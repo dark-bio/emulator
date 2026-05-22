@@ -1,0 +1,115 @@
+// launcher: starts QEMU with the firmware image and forwards a host TCP port
+// into the guest where the firmware's own WebSocket server is listening.
+//
+//   ws client ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
+//
+// No protocol translation lives here -- the launcher only spawns QEMU and
+// inherits its stdio.
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+struct Config {
+    kernel: PathBuf,
+    initrd: PathBuf,
+    host_addr: String,
+}
+
+impl Config {
+    fn from_env() -> Self {
+        let firmware = std::env::var("EMULATOR_FIRMWARE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("firmware/build"));
+        Self {
+            kernel: firmware.join("vmlinuz"),
+            initrd: firmware.join("initramfs.gz"),
+            host_addr: std::env::var("EMULATOR_HOST_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
+        }
+    }
+}
+
+fn main() {
+    let cfg = Config::from_env();
+
+    for required in [&cfg.kernel, &cfg.initrd] {
+        if !required.exists() {
+            eprintln!(
+                "missing {} -- run firmware/build.sh first \
+                 (or set EMULATOR_FIRMWARE to a directory containing vmlinuz + initramfs.gz)",
+                required.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!(
+        "[launcher] firmware from {}, WebSocket at ws://{}/ws once guest boots",
+        cfg.kernel.parent().unwrap().display(),
+        cfg.host_addr,
+    );
+
+    let mut cmd = Command::new("qemu-system-aarch64");
+    cmd.args([
+        "-M",
+        "virt",
+        "-cpu",
+        "cortex-a72",
+        "-m",
+        "256",
+        "-nographic",
+        "-no-reboot",
+        "-kernel",
+    ])
+    .arg(&cfg.kernel)
+    .args(["-initrd"])
+    .arg(&cfg.initrd)
+    .args(["-append", "console=ttyAMA0 rdinit=/init", "-netdev"])
+    .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
+    .args([
+        "-device",
+        "virtio-net-pci,netdev=net0",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+    ])
+    .stdin(Stdio::null());
+
+    protect_from_orphan(&mut cmd);
+
+    let mut child = cmd.spawn().unwrap_or_else(|e| {
+        eprintln!("failed to spawn qemu-system-aarch64: {e}");
+        std::process::exit(1);
+    });
+
+    let status = child.wait().expect("waiting for QEMU child failed");
+    println!("[launcher] QEMU exited with {status}");
+}
+
+// On Linux, set PR_SET_PDEATHSIG so the kernel SIGKILLs QEMU if the launcher
+// dies for any reason -- including SIGKILL or panic, neither of which run
+// Rust's Drop. Without this the child gets reparented to PID 1 and keeps
+// holding the host port.
+//
+// macOS has no equivalent prctl; Windows would use a Job Object with
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Both are deferred -- on those hosts
+// QEMU may outlive an abnormally-terminated launcher.
+#[cfg(target_os = "linux")]
+fn protect_from_orphan(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: pre_exec runs in the forked child before exec; only the
+    // async-signal-safe prctl is called.
+    unsafe {
+        cmd.pre_exec(|| {
+            let rc = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+            if rc == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protect_from_orphan(_cmd: &mut Command) {}

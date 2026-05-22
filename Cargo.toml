@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["launcher"]
+# firmware/ is intentionally outside this workspace: it's a placeholder for the
+# real Ark firmware which will live in its own (closed-source) repository. The
+# emulator consumes the firmware as a built artifact, not as a source dep.
+exclude = ["firmware"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
