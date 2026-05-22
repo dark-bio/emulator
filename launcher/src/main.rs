@@ -62,16 +62,6 @@ impl Config {
 }
 
 fn main() -> wry::Result<()> {
-    // WebKitGTK's hardware-accelerated compositor breaks on certain
-    // GPU/Wayland combinations, leaving the webview blank. Disabling the
-    // DMA-BUF renderer falls back to a path that works everywhere. Only
-    // touched on Linux; honors any explicit user setting.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        // SAFETY: we are still single-threaded here; main has just started.
-        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
-    }
-
     let cfg = Config::from_env();
 
     for required in [&cfg.kernel, &cfg.initrd] {
@@ -232,7 +222,9 @@ fn build_webview(
     {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().expect("tao window has no default vbox");
+        let vbox = window
+            .default_vbox()
+            .expect("tao window has no default vbox");
         configure(WebViewBuilder::new_gtk(vbox))
     }
     #[cfg(not(target_os = "linux"))]
