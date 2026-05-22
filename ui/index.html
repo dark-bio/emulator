@@ -120,12 +120,12 @@
 </head>
 <body>
   <div class="scene">
-    <div class="device">
-      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" />
-      <span class="led tl"></span>
-      <span class="led tr"></span>
-      <span class="led bl"></span>
-      <span class="led br"></span>
+    <div class="device" data-tauri-drag-region>
+      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" data-tauri-drag-region />
+      <span class="led tl" data-tauri-drag-region></span>
+      <span class="led tr" data-tauri-drag-region></span>
+      <span class="led bl" data-tauri-drag-region></span>
+      <span class="led br" data-tauri-drag-region></span>
     </div>
     <button class="reset-pin" type="button" aria-label="reset button">
       <img src="assets/sim_removal_tool.svg" alt="" />
@@ -147,69 +147,16 @@
     pin.addEventListener('pointercancel', release);
   })();
 
-  // Drag the entire (chromeless) window by mousing down on the device. We
-  // implement the drag in JS rather than handing off to the WM's native
-  // move-drag, because that API needs the originating button event's
-  // timestamp/serial -- which our IPC hop drops, making it work only every
-  // other attempt.
-  //
-  // Math: on pointerdown, the launcher snapshots its current outer position.
-  // On each pointermove we send the cursor's delta in CSS pixels from the
-  // pointerdown position, and the launcher applies it to the snapshot. This
-  // avoids any assumption about how cursor-in-window coords relate to the
-  // window's outer position (they can differ by a constant on GTK).
-  //
-  // The pointermove fires faster than the WM can apply position updates, so
-  // we coalesce multiple events between animation frames into one IPC call --
-  // avoids piling up updates and the visible jitter that causes.
-  (() => {
-    const device = document.querySelector('.device');
-    let pressScreen = null;
-    let pointerId = null;
-    let pending = null;
-    let scheduled = false;
+  // Window drag is handled natively by Tauri via the `data-tauri-drag-region`
+  // attribute on .device (and its children). No JS plumbing needed.
 
-    const flush = () => {
-      scheduled = false;
-      if (pending && window.ipc && window.ipc.postMessage) {
-        window.ipc.postMessage(`drag-by:${pending.dx},${pending.dy}`);
-        pending = null;
-      }
-    };
-
-    device.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      pressScreen = { x: e.screenX, y: e.screenY };
-      pointerId = e.pointerId;
-      device.setPointerCapture(pointerId);
-      if (window.ipc && window.ipc.postMessage) {
-        window.ipc.postMessage('drag-start');
-      }
-    });
-
-    device.addEventListener('pointermove', e => {
-      if (e.pointerId !== pointerId || pressScreen === null) return;
-      pending = {
-        dx: e.screenX - pressScreen.x,
-        dy: e.screenY - pressScreen.y,
-      };
-      if (!scheduled) {
-        scheduled = true;
-        requestAnimationFrame(flush);
-      }
-    });
-
-    const stop = e => {
-      if (e.pointerId === pointerId) {
-        pressScreen = null;
-        pointerId = null;
-        pending = null;
-      }
-    };
-    device.addEventListener('pointerup', stop);
-    device.addEventListener('pointercancel', stop);
-    device.addEventListener('lostpointercapture', stop);
-  })();
+  // Escape closes the window. No window chrome means no X button; this is
+  // the in-app way out. Alt+F4 / WM shortcuts still work.
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && window.__TAURI__) {
+      window.__TAURI__.window.getCurrentWindow().close();
+    }
+  });
 </script>
 </body>
 </html>

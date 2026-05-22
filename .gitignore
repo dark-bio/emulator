@@ -1,3 +1,4 @@
 target/
 firmware/build/
 .claude/
+launcher/gen/schemas/

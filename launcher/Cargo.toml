@@ -3,9 +3,11 @@ name = "launcher"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
-tao = "0.30"
-wry = "0.45"
+tauri = { version = "2", features = [] }
 
 # PDEATHSIG is Linux-only; libc is only needed there.
 [target.'cfg(target_os = "linux")'.dependencies]
