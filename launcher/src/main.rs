@@ -18,7 +18,14 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
-const UI_HTML: &str = include_str!("../../ui/index.html");
+// All UI assets are baked into the binary at build time so the launcher
+// stays a single self-contained executable. Served to the webview via a
+// custom `wry://` protocol so the HTML can use ordinary relative paths
+// (`src="assets/..."`) that also work when the file is opened directly in a
+// browser for iteration.
+const UI_HTML: &[u8] = include_bytes!("../../ui/index.html");
+const UI_VAULT_SVG: &[u8] = include_bytes!("../../ui/assets/dark_bio_vault.svg");
+const UI_TOOL_SVG: &[u8] = include_bytes!("../../ui/assets/sim_removal_tool.svg");
 
 struct Config {
     kernel: PathBuf,
@@ -91,12 +98,13 @@ fn main() -> wry::Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Ark I emulator")
-        .with_inner_size(LogicalSize::new(480.0, 320.0))
+        // 220×286 scene + 12px padding all sides = 244×310 inner, scaled ×1.5.
+        .with_inner_size(LogicalSize::new(366.0, 465.0))
         .with_resizable(false)
         .build(&event_loop)
         .expect("build window");
 
-    let _webview = build_webview(&window, UI_HTML)?;
+    let _webview = build_webview(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -114,21 +122,47 @@ fn main() -> wry::Result<()> {
     });
 }
 
+// Serve the embedded UI bundle. The webview requests `wry://localhost/...`;
+// we map "/" + "/index.html" to the HTML and "/assets/..." to the SVG bytes.
+fn serve_asset(path: &str) -> (&'static [u8], &'static str) {
+    match path {
+        "/" | "/index.html" => (UI_HTML, "text/html; charset=utf-8"),
+        "/assets/dark_bio_vault.svg" => (UI_VAULT_SVG, "image/svg+xml"),
+        "/assets/sim_removal_tool.svg" => (UI_TOOL_SVG, "image/svg+xml"),
+        _ => (b"not found", "text/plain"),
+    }
+}
+
 // wry's cross-platform `WebViewBuilder::new(&window)` doesn't fully wire the
 // webview into the GTK widget tree under Tao on Linux -- the window opens
 // but stays blank. The Linux-specific `new_gtk(vbox)` path attaches it to
 // the window's default vbox container, which is what actually renders.
-fn build_webview(window: &tao::window::Window, html: &str) -> wry::Result<wry::WebView> {
+fn build_webview(window: &tao::window::Window) -> wry::Result<wry::WebView> {
+    let configure = |builder: wry::WebViewBuilder<'_>| -> wry::Result<wry::WebView> {
+        builder
+            .with_custom_protocol("wry".to_string(), |request| {
+                let path = request.uri().path().to_owned();
+                let (body, mime) = serve_asset(&path);
+                wry::http::Response::builder()
+                    .header("Content-Type", mime)
+                    .body(std::borrow::Cow::Borrowed(body))
+                    .unwrap()
+            })
+            .with_url("wry://localhost/")
+            .with_devtools(true)
+            .build()
+    };
+
     #[cfg(target_os = "linux")]
     {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
         let vbox = window.default_vbox().expect("tao window has no default vbox");
-        WebViewBuilder::new_gtk(vbox).with_html(html).build()
+        configure(WebViewBuilder::new_gtk(vbox))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        WebViewBuilder::new(window).with_html(html).build()
+        configure(WebViewBuilder::new(window))
     }
 }
 

@@ -2,166 +2,148 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>ark emulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ark I emulator</title>
 <style>
   :root {
     color-scheme: dark;
     --bg: #0d1117;
-    --fg: #c9d1d9;
-    --muted: #6e7681;
-    --accent: #58a6ff;
-    --ok: #7ee787;
-    --bad: #f85149;
+    --led: #2ea043;
+    --pad: 4vmin;
   }
   * { box-sizing: border-box; }
   html, body {
     margin: 0;
     padding: 0;
     background: var(--bg);
-    color: var(--fg);
+    color: #c9d1d9;
     font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
     height: 100vh;
+    width: 100vw;
+    overflow: hidden;
   }
-  /* The window itself is the enclosure -- no inner chrome, just layout. */
-  .panel {
-    box-sizing: border-box;
-    height: 100%;
-    padding: 16px 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-  .name { font-weight: 600; font-size: 13px; letter-spacing: 0.04em; }
-  .badge {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    background: #21262d;
-    color: var(--muted);
-  }
-  .badge.ok  { color: var(--ok); }
-  .badge.bad { color: var(--bad); }
-
-  .row {
+  body {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 6px 0;
+    justify-content: center;
+    padding: var(--pad);
   }
-  .label { font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
 
-  /* The toggle switch. Two labeled halves, the active one highlighted. */
-  .switch {
-    display: inline-flex;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    overflow: hidden;
+  /* Scene: a 220:286 box sized to fit the largest area available inside the
+     body's padding box, keeping aspect ratio. Sized via the smaller of the
+     two viewport-derived constraints so it never overflows. */
+  .scene {
+    --aspect-w: 220;
+    --aspect-h: 286;
+    width: min(
+      calc(100vw - 2 * var(--pad)),
+      calc((100vh - 2 * var(--pad)) * var(--aspect-w) / var(--aspect-h))
+    );
+    aspect-ratio: var(--aspect-w) / var(--aspect-h);
+    position: relative;
+  }
+
+  /* Device fills the top portion of the scene (220/286 ≈ 76.9% of height). */
+  .device {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    z-index: 2;
+  }
+  .device-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    -webkit-user-drag: none;
     user-select: none;
   }
-  .switch button {
-    background: transparent;
-    color: var(--muted);
-    border: none;
-    padding: 6px 14px;
-    font-family: inherit;
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 0.08s, color 0.08s;
-  }
-  .switch button:not(.active):hover { color: var(--fg); }
-  .switch button.active {
-    background: var(--accent);
-    color: #0d1117;
-    font-weight: 600;
-  }
 
-  .footer {
-    margin-top: auto;
-    font-size: 11px;
-    color: var(--muted);
-    line-height: 1.5;
+  /* LED dots: 9/220 = 4.09% across; 23/220 = 10.45% from each corner edge.
+     Box is square (aspect 1:1) so a single percentage works for both axes. */
+  .led {
+    position: absolute;
+    width: 4.09%;
+    aspect-ratio: 1 / 1;
+    border-radius: 50%;
+    background: var(--led);
+    box-shadow: 0 0 0.6vmin 0.1vmin rgba(46, 160, 67, 0.55);
+  }
+  .led.tl { top: 10.45%; left: 10.45%; }
+  .led.tr { top: 10.45%; right: 10.45%; }
+  .led.bl { bottom: 10.45%; left: 10.45%; }
+  .led.br { bottom: 10.45%; right: 10.45%; }
+
+  /* Reset pin. All measurements as a fraction of .scene's 220x286 box.
+     - width: 18/220 = 8.18% of scene width
+     - height: 54/286 = 18.88% of scene height
+     - top: 220/286 = 76.92% (device's bottom edge)
+     - right: 18/220 = 8.18% (mirrors the companion app's 42-of-500 offset)
+     translateY uses pin's own height as 100%:
+     - default: +10/54 = +18.5%  (gap below device)
+     - hover  : +4/54  = +7.4%
+     - active : -15%              (slides under the device; softer than the
+                                   companion's reference for a less abrupt feel) */
+  .reset-pin {
+    position: absolute;
+    top: 76.92%;
+    right: 8.18%;
+    width: 8.18%;
+    height: 18.88%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    z-index: 1;
+    transform: translateY(18.5%);
+    transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+  }
+  .reset-pin:hover   { transform: translateY(7.4%); }
+  /* .pressed wins over :hover (later, same specificity) so the cursor leaving
+     the moving hitbox doesn't pop the press state back to hover. */
+  .reset-pin.pressed { transform: translateY(-15%); }
+  .reset-pin:focus-visible {
+    outline: 2px solid #58a6ff;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .reset-pin img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    -webkit-user-drag: none;
+    user-select: none;
   }
 </style>
 </head>
 <body>
-  <div class="panel">
-    <div class="head">
-      <span class="name">ARK I · EMULATOR</span>
-      <span id="status" class="badge">connecting...</span>
+  <div class="scene">
+    <div class="device">
+      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" />
+      <span class="led tl"></span>
+      <span class="led tr"></span>
+      <span class="led bl"></span>
+      <span class="led br"></span>
     </div>
-
-    <div class="row">
-      <span class="label">case</span>
-      <div class="switch" role="group" aria-label="case mode">
-        <button id="upper" class="active" type="button">UPPER</button>
-        <button id="lower" type="button">lower</button>
-      </div>
-    </div>
-
-    <div class="footer">
-      Controls firmware-side hardware state. The dashboard sees the effect on
-      its next echoed reply.
-    </div>
+    <button class="reset-pin" type="button" aria-label="reset button">
+      <img src="assets/sim_removal_tool.svg" alt="" />
+    </button>
   </div>
-
 <script>
-  // The emulator's hardware-channel WS. Defaults to the firmware's /hw endpoint
-  // on the launcher's default address; override with ?bridge=...
-  const params = new URLSearchParams(location.search);
-  const wsUrl = params.get("bridge") || "ws://127.0.0.1:8080/hw";
-
-  const status = document.getElementById("status");
-  const upper = document.getElementById("upper");
-  const lower = document.getElementById("lower");
-
-  function setStatus(text, cls) {
-    status.textContent = text;
-    status.className = "badge " + (cls || "");
-  }
-
-  function setSwitch(which) {
-    upper.classList.toggle("active", which === "upper");
-    lower.classList.toggle("active", which === "lower");
-  }
-
-  let ws;
-  function connect() {
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      setStatus("connected", "ok");
-      upper.disabled = false;
-      lower.disabled = false;
-    };
-    ws.onclose = () => {
-      setStatus("disconnected", "bad");
-      upper.disabled = true;
-      lower.disabled = true;
-      setTimeout(connect, 1000);
-    };
-    ws.onerror = () => setStatus("error", "bad");
-    ws.onmessage = (ev) => {
-      const v = String(ev.data).trim();
-      if (v === "upper" || v === "lower") setSwitch(v);
-    };
-  }
-
-  function send(which) {
-    if (ws && ws.readyState === 1) {
-      ws.send(which);
-      setSwitch(which); // optimistic; firmware will confirm on next connect
-    }
-  }
-
-  upper.addEventListener("click", () => send("upper"));
-  lower.addEventListener("click", () => send("lower"));
-
-  connect();
+  // Pointer capture keeps the press "sticky" -- once the user mousedowns on
+  // the pin, the .pressed state stays until mouseup anywhere, even if the
+  // cursor leaves the (now-moved) hitbox. Without this, the pin springs back
+  // as soon as its translated position slides out from under the cursor.
+  (() => {
+    const pin = document.querySelector('.reset-pin');
+    pin.addEventListener('pointerdown', e => {
+      pin.setPointerCapture(e.pointerId);
+      pin.classList.add('pressed');
+    });
+    const release = () => pin.classList.remove('pressed');
+    pin.addEventListener('pointerup', release);
+    pin.addEventListener('pointercancel', release);
+  })();
 </script>
 </body>
 </html>
