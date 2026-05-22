@@ -1,16 +1,20 @@
 // helloware: a stand-in for arkos-core. Runs as PID 1 in a minimal Alpine
-// initramfs booted by QEMU. Hosts a WebSocket server directly -- in
-// production the real firmware will do the same (a feature-flagged transport
-// that substitutes WebSocket for WebUSB inside the emulator build).
+// initramfs booted by QEMU. Hosts two WebSocket endpoints:
 //
-// QEMU's SLIRP hostfwd maps the host's TCP port to :8080 inside the guest,
-// so the launcher and clients see a normal WebSocket endpoint with no
-// translation hops.
+//   /ws  -- the "dashboard" channel; in production this is what the host
+//           dashboard talks to. Here it echoes text, cased according to the
+//           current hardware state.
+//   /hw  -- the "hardware" channel; in production this carries LED state out
+//           and button events in. Here it has a single toggle: case=upper or
+//           case=lower, controlling how /ws echoes text.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -19,11 +23,26 @@ use futures_util::{SinkExt, StreamExt};
 const BANNER: &str = "helloware v0.1 \u{00b7} ready";
 const LISTEN: &str = "0.0.0.0:8080";
 
+#[derive(Clone)]
+struct HwState {
+    // true = uppercase (default), false = lowercase. The dashboard handler
+    // reads this every time it cases a reply; the hardware handler writes it.
+    case_upper: Arc<AtomicBool>,
+}
+
 #[tokio::main]
 async fn main() {
     println!("[helloware] {BANNER}");
 
-    let app = Router::new().route("/ws", get(ws_handler));
+    let state = HwState {
+        case_upper: Arc::new(AtomicBool::new(true)),
+    };
+
+    let app = Router::new()
+        .route("/ws", get(dashboard_ws))
+        .route("/hw", get(hardware_ws))
+        .with_state(state);
+
     let addr: SocketAddr = LISTEN.parse().expect("static literal parses");
 
     match tokio::net::TcpListener::bind(addr).await {
@@ -38,16 +57,18 @@ async fn main() {
         }
     }
 
-    // PID 1 must never return -- otherwise the kernel panics. Idle forever.
     eprintln!("[helloware] idling (server exited); kill the guest to stop");
     park().await;
 }
 
-async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(handle_ws)
+async fn dashboard_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<HwState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_dashboard(socket, state))
 }
 
-async fn handle_ws(socket: WebSocket) {
+async fn handle_dashboard(socket: WebSocket, state: HwState) {
     let (mut sender, mut receiver) = socket.split();
 
     if sender.send(Message::Text(BANNER.to_string())).await.is_err() {
@@ -57,8 +78,17 @@ async fn handle_ws(socket: WebSocket) {
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(t) => {
-                let response = format!("HELLO from helloware: {}", t.trim().to_uppercase());
-                println!("[helloware] rx: {t:?} -> {response:?}");
+                let upper = state.case_upper.load(Ordering::Relaxed);
+                let cased = if upper {
+                    t.trim().to_uppercase()
+                } else {
+                    t.trim().to_lowercase()
+                };
+                let response = format!("HELLO from helloware: {cased}");
+                println!(
+                    "[helloware] rx[{}]: {t:?} -> {response:?}",
+                    if upper { "UPPER" } else { "lower" }
+                );
                 if sender.send(Message::Text(response)).await.is_err() {
                     break;
                 }
@@ -67,6 +97,47 @@ async fn handle_ws(socket: WebSocket) {
             _ => {}
         }
     }
+}
+
+async fn hardware_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<HwState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_hardware(socket, state))
+}
+
+async fn handle_hardware(socket: WebSocket, state: HwState) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Sync the UI's switch to the firmware's current state on connect.
+    let init = case_label(state.case_upper.load(Ordering::Relaxed));
+    if sender.send(Message::Text(init.to_string())).await.is_err() {
+        return;
+    }
+
+    while let Some(Ok(msg)) = receiver.next().await {
+        match msg {
+            Message::Text(t) => match t.trim() {
+                "upper" => {
+                    state.case_upper.store(true, Ordering::Relaxed);
+                    println!("[helloware] hw: case=upper");
+                }
+                "lower" => {
+                    state.case_upper.store(false, Ordering::Relaxed);
+                    println!("[helloware] hw: case=lower");
+                }
+                other => {
+                    println!("[helloware] hw: ignoring unknown {other:?}");
+                }
+            },
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+}
+
+fn case_label(upper: bool) -> &'static str {
+    if upper { "upper" } else { "lower" }
 }
 
 async fn park() -> ! {

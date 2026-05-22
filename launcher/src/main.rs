@@ -1,13 +1,24 @@
-// launcher: starts QEMU with the firmware image and forwards a host TCP port
-// into the guest where the firmware's own WebSocket server is listening.
+// launcher: starts QEMU with the firmware image, opens a fixed-size native
+// window hosting the emulator's UI (loaded into the OS webview), and ties the
+// QEMU lifecycle to the window. Closing the window or QEMU's own exit both
+// terminate the launcher process; PR_SET_PDEATHSIG ensures QEMU dies with us.
 //
-//   ws client ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
+//   ws clients ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
 //
-// No protocol translation lives here -- the launcher only spawns QEMU and
-// inherits its stdio.
+// The webview (this launcher's own window) speaks the firmware's /hw channel;
+// the demo dashboard in ../dashboard/ speaks /ws over its own browser tab.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+
+use tao::dpi::LogicalSize;
+use tao::event::{Event, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoop};
+use tao::window::WindowBuilder;
+use wry::WebViewBuilder;
+
+const UI_HTML: &str = include_str!("../../ui/index.html");
 
 struct Config {
     kernel: PathBuf,
@@ -29,7 +40,17 @@ impl Config {
     }
 }
 
-fn main() {
+fn main() -> wry::Result<()> {
+    // WebKitGTK's hardware-accelerated compositor breaks on certain
+    // GPU/Wayland combinations, leaving the webview blank. Disabling the
+    // DMA-BUF renderer falls back to a path that works everywhere. Only
+    // touched on Linux; honors any explicit user setting.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: we are still single-threaded here; main has just started.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+
     let cfg = Config::from_env();
 
     for required in [&cfg.kernel, &cfg.initrd] {
@@ -49,6 +70,69 @@ fn main() {
         cfg.host_addr,
     );
 
+    let qemu = spawn_qemu(&cfg);
+
+    // If QEMU dies on its own (kernel panic, bad args, etc.), terminate the
+    // process so the window comes down with it.
+    thread::spawn(move || {
+        let mut child = qemu;
+        match child.wait() {
+            Ok(status) => {
+                eprintln!("[launcher] QEMU exited with {status}");
+                std::process::exit(status.code().unwrap_or(0));
+            }
+            Err(e) => {
+                eprintln!("[launcher] wait on QEMU failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Ark I emulator")
+        .with_inner_size(LogicalSize::new(480.0, 320.0))
+        .with_resizable(false)
+        .build(&event_loop)
+        .expect("build window");
+
+    let _webview = build_webview(&window, UI_HTML)?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
+            // Exit the whole process -- PDEATHSIG (Linux) then kills QEMU.
+            // On other OSes, QEMU outlives an externally-killed launcher
+            // (see protect_from_orphan below) so a graceful exit here still
+            // requires the kernel to clean up the orphan.
+            std::process::exit(0);
+        }
+    });
+}
+
+// wry's cross-platform `WebViewBuilder::new(&window)` doesn't fully wire the
+// webview into the GTK widget tree under Tao on Linux -- the window opens
+// but stays blank. The Linux-specific `new_gtk(vbox)` path attaches it to
+// the window's default vbox container, which is what actually renders.
+fn build_webview(window: &tao::window::Window, html: &str) -> wry::Result<wry::WebView> {
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().expect("tao window has no default vbox");
+        WebViewBuilder::new_gtk(vbox).with_html(html).build()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        WebViewBuilder::new(window).with_html(html).build()
+    }
+}
+
+fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
     cmd.args([
         "-M",
@@ -78,13 +162,10 @@ fn main() {
 
     protect_from_orphan(&mut cmd);
 
-    let mut child = cmd.spawn().unwrap_or_else(|e| {
+    cmd.spawn().unwrap_or_else(|e| {
         eprintln!("failed to spawn qemu-system-aarch64: {e}");
         std::process::exit(1);
-    });
-
-    let status = child.wait().expect("waiting for QEMU child failed");
-    println!("[launcher] QEMU exited with {status}");
+    })
 }
 
 // On Linux, set PR_SET_PDEATHSIG so the kernel SIGKILLs QEMU if the launcher

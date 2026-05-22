@@ -3,6 +3,10 @@ name = "launcher"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+tao = "0.30"
+wry = "0.45"
+
 # PDEATHSIG is Linux-only; libc is only needed there.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
