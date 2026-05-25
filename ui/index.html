@@ -1,81 +1,103 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Ark I emulator</title>
-<style>
-  :root {
-    color-scheme: dark;
-    --bg: #0d1117;
-    --led: #2ea043;
-    --pad: 4vmin;
-  }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0;
-    padding: 0;
-    /* Windowless: the launcher's window itself is transparent, so the body
-       must paint nothing. Only the device + LEDs + pin appear on the desktop. */
-    background: transparent;
-    color: #c9d1d9;
-    font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
-    height: 100vh;
-    width: 100vw;
-    overflow: hidden;
-  }
-  body {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--pad);
-  }
 
-  /* Scene: a 220:286 box sized to fit the largest area available inside the
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ark I emulator</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --led: #2ea043;
+      --pad: 4vmin;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      /* Windowless: the launcher's window itself is transparent, so the body
+       must paint nothing. Only the device + LEDs + pin appear on the desktop. */
+      background: transparent;
+      color: #c9d1d9;
+      font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--pad);
+    }
+
+    /* Scene: a 220:286 box sized to fit the largest area available inside the
      body's padding box, keeping aspect ratio. Sized via the smaller of the
      two viewport-derived constraints so it never overflows. */
-  .scene {
-    --aspect-w: 220;
-    --aspect-h: 286;
-    width: min(
-      calc(100vw - 2 * var(--pad)),
-      calc((100vh - 2 * var(--pad)) * var(--aspect-w) / var(--aspect-h))
-    );
-    aspect-ratio: var(--aspect-w) / var(--aspect-h);
-    position: relative;
-  }
+    .scene {
+      --aspect-w: 220;
+      --aspect-h: 286;
+      width: min(calc(100vw - 2 * var(--pad)),
+          calc((100vh - 2 * var(--pad)) * var(--aspect-w) / var(--aspect-h)));
+      aspect-ratio: var(--aspect-w) / var(--aspect-h);
+      position: relative;
+    }
 
-  /* Device fills the top portion of the scene (220/286 ≈ 76.9% of height). */
-  .device {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 1 / 1;
-    z-index: 2;
-  }
-  .device-img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    -webkit-user-drag: none;
-    user-select: none;
-  }
+    /* Device fills the top portion of the scene (220/286 ≈ 76.9% of height). */
+    .device {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      z-index: 2;
+    }
 
-  /* LED dots: 9/220 = 4.09% across; 23/220 = 10.45% from each corner edge.
+    .device-img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+
+    /* LED dots: 9/220 = 4.09% across; 23/220 = 10.45% from each corner edge.
      Box is square (aspect 1:1) so a single percentage works for both axes. */
-  .led {
-    position: absolute;
-    width: 4.09%;
-    aspect-ratio: 1 / 1;
-    border-radius: 50%;
-    background: var(--led);
-    box-shadow: 0 0 0.6vmin 0.1vmin rgba(46, 160, 67, 0.55);
-  }
-  .led.tl { top: 10.45%; left: 10.45%; }
-  .led.tr { top: 10.45%; right: 10.45%; }
-  .led.bl { bottom: 10.45%; left: 10.45%; }
-  .led.br { bottom: 10.45%; right: 10.45%; }
+    .led {
+      position: absolute;
+      width: 4.09%;
+      aspect-ratio: 1 / 1;
+      border-radius: 50%;
+      background: var(--led);
+      box-shadow: 0 0 0.6vmin 0.1vmin rgba(46, 160, 67, 0.55);
+    }
 
-  /* Reset pin. All measurements as a fraction of .scene's 220x286 box.
+    .led.tl {
+      top: 10.45%;
+      left: 10.45%;
+    }
+
+    .led.tr {
+      top: 10.45%;
+      right: 10.45%;
+    }
+
+    .led.bl {
+      bottom: 10.45%;
+      left: 10.45%;
+    }
+
+    .led.br {
+      bottom: 10.45%;
+      right: 10.45%;
+    }
+
+    /* Reset pin. All measurements as a fraction of .scene's 220x286 box.
      - width: 18/220 = 8.18% of scene width
      - height: 54/286 = 18.88% of scene height
      - top: 220/286 = 76.92% (device's bottom edge)
@@ -85,39 +107,48 @@
      - hover  : +4/54  = +7.4%
      - active : -15%              (slides under the device; softer than the
                                    companion's reference for a less abrupt feel) */
-  .reset-pin {
-    position: absolute;
-    top: 76.92%;
-    right: 8.18%;
-    width: 8.18%;
-    height: 18.88%;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    z-index: 1;
-    transform: translateY(18.5%);
-    transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
-  }
-  .reset-pin:hover   { transform: translateY(7.4%); }
-  /* .pressed wins over :hover (later, same specificity) so the cursor leaving
+    .reset-pin {
+      position: absolute;
+      top: 76.92%;
+      right: 8.18%;
+      width: 8.18%;
+      height: 18.88%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      z-index: 1;
+      transform: translateY(18.5%);
+      transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+    }
+
+    .reset-pin:hover {
+      transform: translateY(7.4%);
+    }
+
+    /* .pressed wins over :hover (later, same specificity) so the cursor leaving
      the moving hitbox doesn't pop the press state back to hover. */
-  .reset-pin.pressed { transform: translateY(-15%); }
-  .reset-pin:focus-visible {
-    outline: 2px solid #58a6ff;
-    outline-offset: 2px;
-    border-radius: 4px;
-  }
-  .reset-pin img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    -webkit-user-drag: none;
-    user-select: none;
-  }
-</style>
+    .reset-pin.pressed {
+      transform: translateY(-15%);
+    }
+
+    .reset-pin:focus-visible {
+      outline: 2px solid #58a6ff;
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .reset-pin img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+  </style>
 </head>
+
 <body>
   <div class="scene">
     <div class="device" data-tauri-drag-region>
@@ -131,32 +162,97 @@
       <img src="assets/sim_removal_tool.svg" alt="" />
     </button>
   </div>
-<script>
-  // Pointer capture keeps the press "sticky" -- once the user mousedowns on
-  // the pin, the .pressed state stays until mouseup anywhere, even if the
-  // cursor leaves the (now-moved) hitbox. Without this, the pin springs back
-  // as soon as its translated position slides out from under the cursor.
-  (() => {
-    const pin = document.querySelector('.reset-pin');
-    pin.addEventListener('pointerdown', e => {
-      pin.setPointerCapture(e.pointerId);
-      pin.classList.add('pressed');
+  <script>
+    // Hardware channel: stream driver frames in from the firmware, send reset-pin
+    // edge events out. Every message on /hw is wrapped in the bus envelope
+    //   { "d": "<driver>", "id": "<instance>", "payload": { ... } }
+    // The UI currently renders rgbled frames and emits button edges; other
+    // driver tags (switch / revbits / bootblink) flow through but are ignored.
+    (() => {
+      const pin = document.querySelector('.reset-pin');
+      const leds = [
+        document.querySelector('.led.bl'),
+        document.querySelector('.led.tl'),
+        document.querySelector('.led.tr'),
+        document.querySelector('.led.br'),
+      ];
+
+      // GPIO pin the firmware listens on for the reset button. The mapping is
+      // revision-dependent (device_ark_one.rs:220) — 5 for R3+, 27 for R0–R2.
+      // R11 is the emulator's default revbits revision, so 5 is correct unless
+      // ARKOS_EMULATOR_REVISION is overridden to an early board.
+      const BUTTON_PIN_ID = '5';
+
+      function applyLeds(colors) {
+        for (let i = 0; i < 4; i++) {
+          const [r, g, b] = colors[i] || [0, 0, 0];
+          leds[i].style.background = `rgb(${r}, ${g}, ${b})`;
+          leds[i].style.boxShadow = `0 0 0.6vmin 0.1vmin rgba(${r}, ${g}, ${b}, 0.55)`;
+        }
+      }
+
+      let ws = null;
+      function connect() {
+        ws = new WebSocket('ws://127.0.0.1:8080/hw');
+        ws.onmessage = ev => {
+          try {
+            const env = JSON.parse(ev.data);
+            if (env.d === 'rgbled' && Array.isArray(env.payload?.colors)) {
+              applyLeds(env.payload.colors);
+            }
+            // Other driver tags (switch, revbits, bootblink) currently no-op.
+          } catch { }
+        };
+        ws.onclose = () => {
+          ws = null;
+          setTimeout(connect, 1000);
+        };
+        ws.onerror = () => { try { ws.close(); } catch { } };
+      }
+      connect();
+
+      function sendButton(edge) {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ d: 'button', id: BUTTON_PIN_ID, payload: { edge } }));
+        }
+      }
+
+      // Pointer capture keeps the press "sticky" -- once the user mousedowns
+      // on the pin, the .pressed state (and the firmware's view of the button)
+      // stays until mouseup anywhere, even if the cursor leaves the moving
+      // hitbox. `pressed` guards against duplicate edges from pointerup +
+      // pointercancel firing on the same release.
+      let pressed = false;
+      pin.addEventListener('pointerdown', e => {
+        pin.setPointerCapture(e.pointerId);
+        pin.classList.add('pressed');
+        if (!pressed) {
+          pressed = true;
+          sendButton('falling');
+        }
+      });
+      const release = () => {
+        pin.classList.remove('pressed');
+        if (pressed) {
+          pressed = false;
+          sendButton('rising');
+        }
+      };
+      pin.addEventListener('pointerup', release);
+      pin.addEventListener('pointercancel', release);
+    })();
+
+    // Window drag is handled natively by Tauri via the `data-tauri-drag-region`
+    // attribute on .device (and its children). No JS plumbing needed.
+
+    // Escape closes the window. No window chrome means no X button; this is
+    // the in-app way out. Alt+F4 / WM shortcuts still work.
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && window.__TAURI__) {
+        window.__TAURI__.window.getCurrentWindow().close();
+      }
     });
-    const release = () => pin.classList.remove('pressed');
-    pin.addEventListener('pointerup', release);
-    pin.addEventListener('pointercancel', release);
-  })();
-
-  // Window drag is handled natively by Tauri via the `data-tauri-drag-region`
-  // attribute on .device (and its children). No JS plumbing needed.
-
-  // Escape closes the window. No window chrome means no X button; this is
-  // the in-app way out. Alt+F4 / WM shortcuts still work.
-  window.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && window.__TAURI__) {
-      window.__TAURI__.window.getCurrentWindow().close();
-    }
-  });
-</script>
+  </script>
 </body>
+
 </html>

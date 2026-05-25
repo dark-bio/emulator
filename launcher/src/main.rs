@@ -13,6 +13,7 @@ use std::thread;
 struct Config {
     kernel: PathBuf,
     initrd: PathBuf,
+    disk: PathBuf,
     host_addr: String,
 }
 
@@ -24,6 +25,10 @@ impl Config {
         Self {
             kernel: firmware.join("vmlinuz"),
             initrd: firmware.join("initramfs.gz"),
+            // Backing block device for the firmware's eMMC partitions. Mutated
+            // in-place by the guest (LUKS init, user data); rebuilding the
+            // firmware artifact resets it.
+            disk: firmware.join("disk.img"),
             host_addr: std::env::var("EMULATOR_HOST_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
         }
@@ -33,11 +38,12 @@ impl Config {
 fn main() {
     let cfg = Config::from_env();
 
-    for required in [&cfg.kernel, &cfg.initrd] {
+    for required in [&cfg.kernel, &cfg.initrd, &cfg.disk] {
         if !required.exists() {
             eprintln!(
-                "missing {} -- run firmware/build.sh first \
-                 (or set EMULATOR_FIRMWARE to a directory containing vmlinuz + initramfs.gz)",
+                "missing {} -- set EMULATOR_FIRMWARE to a directory containing \
+                 vmlinuz + initramfs.gz + disk.img (produced by the firmware \
+                 repo's `./arkos.sh emulator-build`)",
                 required.display()
             );
             std::process::exit(1);
@@ -88,11 +94,21 @@ fn spawn_qemu(cfg: &Config) -> Child {
     .arg(&cfg.kernel)
     .args(["-initrd"])
     .arg(&cfg.initrd)
-    .args(["-append", "console=ttyAMA0 rdinit=/init", "-netdev"])
+    // rdinit=/sbin/init hands control to openrc inside the rootfs, which
+    // brings up networking and starts runcore (the arkos-core supervisor).
+    .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
     .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
     .args([
         "-device",
         "virtio-net-pci,netdev=net0",
+        "-drive",
+    ])
+    // Backing disk for the firmware's eMMC partitions (boot/trya/tryb/self/user).
+    // format=raw matches the layout produced by arkos-make-emmc.sh.
+    .arg(format!("file={},if=none,id=disk0,format=raw", cfg.disk.display()))
+    .args([
+        "-device",
+        "virtio-blk-pci,drive=disk0",
         "-serial",
         "stdio",
         "-monitor",
