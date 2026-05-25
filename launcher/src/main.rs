@@ -51,7 +51,7 @@ fn main() {
     }
 
     println!(
-        "[launcher] firmware from {}, WebSocket at ws://{}/ws once guest boots",
+        "[launcher] firmware from {}, hardware bus at ws://{}/hw once guest boots",
         cfg.kernel.parent().unwrap().display(),
         cfg.host_addr,
     );
