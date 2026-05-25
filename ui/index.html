@@ -183,11 +183,28 @@
       // ARKOS_EMULATOR_REVISION is overridden to an early board.
       const BUTTON_PIN_ID = '5';
 
+      // The real device's LEDs are typically driven at ~10% of their max to
+      // look comfortably bright; we scale 10x in the emulator so commanded
+      // colours look right. When a scaled component would clip past 255 the
+      // colour saturates, and the excess instead grows the glow proportionally
+      // (e.g. 250% peak -> 2.5x blur + spread). Mirrors the perceptual feel of
+      // an overdriven LED.
+      const GLOW_BLUR = 0.6;   // vmin, at 100% brightness
+      const GLOW_SPREAD = 0.1; // vmin, at 100% brightness
+
       function applyLeds(colors) {
         for (let i = 0; i < 4; i++) {
-          const [r, g, b] = colors[i] || [0, 0, 0];
+          const [r0, g0, b0] = colors[i] || [0, 0, 0];
+          const r10 = r0 * 10, g10 = g0 * 10, b10 = b0 * 10;
+          const peak = Math.max(r10, g10, b10);
+          const overflow = peak > 255 ? peak / 255 : 1;
+          const r = Math.min(255, r10);
+          const g = Math.min(255, g10);
+          const b = Math.min(255, b10);
           leds[i].style.background = `rgb(${r}, ${g}, ${b})`;
-          leds[i].style.boxShadow = `0 0 0.6vmin 0.1vmin rgba(${r}, ${g}, ${b}, 0.55)`;
+          leds[i].style.boxShadow =
+            `0 0 ${GLOW_BLUR * overflow}vmin ${GLOW_SPREAD * overflow}vmin ` +
+            `rgba(${r}, ${g}, ${b}, 0.55)`;
         }
       }
 
