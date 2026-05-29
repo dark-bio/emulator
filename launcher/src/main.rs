@@ -86,9 +86,8 @@ fn spawn_qemu(cfg: &Config) -> Child {
         "-cpu",
         "cortex-a72",
         "-m",
-        "256",
+        "8192",
         "-nographic",
-        "-no-reboot",
         "-kernel",
     ])
     .arg(&cfg.kernel)
@@ -98,14 +97,13 @@ fn spawn_qemu(cfg: &Config) -> Child {
     // brings up networking and starts runcore (the arkos-core supervisor).
     .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
     .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
-    .args([
-        "-device",
-        "virtio-net-pci,netdev=net0",
-        "-drive",
-    ])
+    .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
     // Backing disk for the firmware's eMMC partitions (boot/trya/tryb/self/user).
     // format=raw matches the layout produced by arkos-make-emmc.sh.
-    .arg(format!("file={},if=none,id=disk0,format=raw", cfg.disk.display()))
+    .arg(format!(
+        "file={},if=none,id=disk0,format=raw",
+        cfg.disk.display()
+    ))
     .args([
         "-device",
         "virtio-blk-pci,drive=disk0",
