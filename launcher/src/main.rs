@@ -1,10 +1,12 @@
-// launcher: starts QEMU with the firmware image, then hands control to Tauri
-// which manages a fixed-size native window hosting the emulator's UI. The
-// QEMU lifecycle is tied to the process: closing the window exits the
-// launcher and PR_SET_PDEATHSIG kills QEMU (Linux); QEMU exiting on its own
-// terminates the launcher and the window closes with it.
+// launcher: spawns QEMU with the firmware image and hosts a Tauri window
+// for the emulator UI. Window and QEMU are lifecycle-bound — closing either
+// tears down the other; on Linux, PR_SET_PDEATHSIG ensures QEMU can't
+// outlive the launcher even on SIGKILL.
 //
 //   ws clients ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
+//
+// The backing disk image is plain raw — no encryption at the qemu layer.
+// The emulator is a dev/test convenience, not a vault; see README.
 
 use std::fs;
 use std::io;
@@ -12,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 
+/// Launch-time configuration. See `Config::from_env` for the env vars.
 struct Config {
     kernel: PathBuf,
     initrd: PathBuf,
@@ -20,6 +23,11 @@ struct Config {
 }
 
 impl Config {
+    /// Read configuration from `EMULATOR_FIRMWARE`, `EMULATOR_DISK`, and
+    /// `EMULATOR_HOST_ADDR`. Defaults resolve against the cwd at launch time.
+    /// The disk is deliberately separate from `EMULATOR_FIRMWARE` — it's user
+    /// state, not a build artifact, and rebuilding the firmware shouldn't
+    /// wipe it.
     fn from_env() -> Self {
         let firmware = std::env::var("EMULATOR_FIRMWARE")
             .map(PathBuf::from)
@@ -27,10 +35,6 @@ impl Config {
         Self {
             kernel: firmware.join("vmlinuz"),
             initrd: firmware.join("initramfs.gz"),
-            // Backing block device for the firmware's eMMC partitions. This is
-            // user state, not a build artifact — kept separate from
-            // EMULATOR_FIRMWARE so rebuilding the firmware doesn't wipe it.
-            // Default resolves against the cwd at launch time.
             disk: std::env::var("EMULATOR_DISK")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("disk.img")),
@@ -56,7 +60,10 @@ fn main() {
     }
 
     if let Err(e) = ensure_disk(&cfg.disk) {
-        eprintln!("[launcher] failed to prepare disk image at {}: {e}", cfg.disk.display());
+        eprintln!(
+            "[launcher] failed to prepare disk image at {}: {e}",
+            cfg.disk.display()
+        );
         std::process::exit(1);
     }
 
@@ -88,6 +95,32 @@ fn main() {
         .expect("error while running tauri application");
 }
 
+/// Initial size of the sparse disk image. The firmware's first-boot
+/// `initdisk` service partitions and formats it; the launcher only allocates
+/// the raw container.
+const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Lazily creates the backing disk image if missing. Idempotent — to reset
+/// device state, delete the file and re-launch.
+fn ensure_disk(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    println!(
+        "[launcher] disk.img missing, allocating sparse {} GiB blank disk",
+        DISK_BYTES >> 30
+    );
+    // File::set_len on a freshly-created file produces a sparse file on
+    // Linux ext4/btrfs/xfs and macOS APFS. On Windows NTFS the bytes are
+    // zero-allocated rather than sparse, so the initial file is a real 4 GiB.
+    let file = fs::File::create(path)?;
+    file.set_len(DISK_BYTES)?;
+    Ok(())
+}
+
+/// Spawn `qemu-system-aarch64` configured for the emulator: virt machine with
+/// paravirt net + disk, host port 8080 forwarded into the guest, PDEATHSIG
+/// attached on Linux.
 fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
     cmd.args([
@@ -103,13 +136,11 @@ fn spawn_qemu(cfg: &Config) -> Child {
     .arg(&cfg.kernel)
     .args(["-initrd"])
     .arg(&cfg.initrd)
-    // rdinit=/sbin/init hands control to openrc inside the rootfs, which
-    // brings up networking and starts runcore (the arkos-core supervisor).
+    // rdinit=/sbin/init hands control to openrc, which brings up networking
+    // and starts the arkos-core supervisor.
     .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
     .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
     .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
-    // Backing disk for the firmware's eMMC partitions (boot/trya/tryb/self/user).
-    // format=raw matches the layout produced by arkos-make-emmc.sh.
     .arg(format!(
         "file={},if=none,id=disk0,format=raw",
         cfg.disk.display()
@@ -132,42 +163,12 @@ fn spawn_qemu(cfg: &Config) -> Child {
     })
 }
 
-// ensure_disk lazily materializes the backing block device used as the
-// firmware's eMMC stand-in. The launcher just allocates a 4 GiB sparse file;
-// the firmware's emulator-only `initdisk` openrc service runs on first boot
-// and lays down the actual partition table (self + user with the production
-// UUIDs) and ext4 + NOT_ENCRYPTED marker on the self partition. Keeping the
-// disk-format logic in the firmware means the launcher's host requirements
-// stay confined to qemu — no parted / sgdisk / mkfs.ext4 needed on Mac or
-// Windows.
-//
-// Idempotent: existing disk is left untouched (this is user state, not a
-// build artifact). To reset, delete the file and re-launch.
-const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
-fn ensure_disk(path: &Path) -> io::Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    println!("[launcher] disk.img missing, allocating sparse {} GiB blank disk", DISK_BYTES >> 30);
-    // File::set_len on a freshly-created file produces a sparse file on
-    // Linux ext4/btrfs/xfs and macOS APFS. On Windows NTFS the bytes are
-    // zero-allocated rather than sparse, so initial `disk.img` is a real
-    // 4 GiB — acceptable but worth an FSCTL_SET_SPARSE follow-up if it ever
-    // becomes a problem.
-    let file = fs::File::create(path)?;
-    file.set_len(DISK_BYTES)?;
-    Ok(())
-}
-
-// On Linux, set PR_SET_PDEATHSIG so the kernel SIGKILLs QEMU if the launcher
-// dies for any reason -- including SIGKILL or panic, neither of which run
-// Rust's Drop. Without this the child gets reparented to PID 1 and keeps
-// holding the host port.
-//
-// macOS has no equivalent prctl; Windows would use a Job Object with
-// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Both are deferred -- on those hosts
-// QEMU may outlive an abnormally-terminated launcher.
+/// Attach `PR_SET_PDEATHSIG=SIGKILL` to the QEMU child. Ensures the kernel
+/// kills QEMU if the launcher dies for any reason — including SIGKILL or
+/// panic, neither of which run Rust's `Drop`. macOS has no prctl equivalent;
+/// Windows wants a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Both
+/// deferred — on those hosts QEMU may outlive an abnormally-terminated
+/// launcher.
 #[cfg(target_os = "linux")]
 fn protect_from_orphan(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
