@@ -14,7 +14,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 
-/// Launch-time configuration. See `Config::from_env` for the env vars.
+use clap::Parser;
+
+/// Command-line arguments. The disk is deliberately separate from `--firmware`
+/// — it's user state, not a build artifact, and rebuilding the firmware
+/// shouldn't wipe it. Defaults resolve against the cwd at launch time.
+#[derive(Parser)]
+#[command(about = "Ark device emulator: boots ArkOS in QEMU behind a small UI.")]
+struct Args {
+    /// Firmware build directory containing vmlinuz + initramfs.gz.
+    #[arg(long, default_value = "firmware/build")]
+    firmware: PathBuf,
+
+    /// Path to the backing disk image; auto-allocated on first run.
+    #[arg(long, default_value = "disk.img")]
+    disk: PathBuf,
+
+    /// Host address that SLIRP forwards into the guest's :8080.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    host_addr: String,
+}
+
+/// Launch-time configuration, derived from the parsed `Args`.
 struct Config {
     kernel: PathBuf,
     initrd: PathBuf,
@@ -22,35 +43,24 @@ struct Config {
     host_addr: String,
 }
 
-impl Config {
-    /// Read configuration from `EMULATOR_FIRMWARE`, `EMULATOR_DISK`, and
-    /// `EMULATOR_HOST_ADDR`. Defaults resolve against the cwd at launch time.
-    /// The disk is deliberately separate from `EMULATOR_FIRMWARE` — it's user
-    /// state, not a build artifact, and rebuilding the firmware shouldn't
-    /// wipe it.
-    fn from_env() -> Self {
-        let firmware = std::env::var("EMULATOR_FIRMWARE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("firmware/build"));
+impl From<Args> for Config {
+    fn from(args: Args) -> Self {
         Self {
-            kernel: firmware.join("vmlinuz"),
-            initrd: firmware.join("initramfs.gz"),
-            disk: std::env::var("EMULATOR_DISK")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("disk.img")),
-            host_addr: std::env::var("EMULATOR_HOST_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
+            kernel: args.firmware.join("vmlinuz"),
+            initrd: args.firmware.join("initramfs.gz"),
+            disk: args.disk,
+            host_addr: args.host_addr,
         }
     }
 }
 
 fn main() {
-    let cfg = Config::from_env();
+    let cfg: Config = Args::parse().into();
 
     for required in [&cfg.kernel, &cfg.initrd] {
         if !required.exists() {
             eprintln!(
-                "missing {} -- set EMULATOR_FIRMWARE to a directory containing \
+                "missing {} -- pass --firmware pointing at a directory containing \
                  vmlinuz + initramfs.gz (produced by the firmware repo's \
                  `./arkos.sh emulator-build`)",
                 required.display()

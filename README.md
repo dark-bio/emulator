@@ -15,12 +15,6 @@ reset pin).
 > to the actual Ark hardware, not this emulator. For any workload where data
 > confidentiality matters, use a real Ark.
 
-```
-host clients ──TCP──▶ host:8080 ──SLIRP hostfwd──▶ guest:8080 ──▶ firmware
-                                                                    │
-emulator UI (window) ◀──/hw bus──▶ firmware driver layer ◀─────────┘
-```
-
 ## Prerequisites
 
 All platforms also need a firmware artifact directory containing `vmlinuz` +
@@ -44,7 +38,7 @@ All platforms also need a firmware artifact directory containing `vmlinuz` +
 ## Run
 
 ```sh
-EMULATOR_FIRMWARE=/path/to/firmware/build cargo run --release -p launcher
+cargo run --release -p launcher -- --firmware /path/to/firmware/build
 ```
 
 The window shows the device face. The reset pin is a real button; the four
@@ -56,11 +50,13 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
 ## Configuration
 
-| var | default | meaning |
+| flag | default | meaning |
 |---|---|---|
-| `EMULATOR_FIRMWARE` | `firmware/build` | directory containing `vmlinuz` + `initramfs.gz` |
-| `EMULATOR_DISK` | `disk.img` | path to the backing disk; auto-allocated on first run |
-| `EMULATOR_HOST_ADDR` | `127.0.0.1:8080` | host address that SLIRP forwards into the guest's `:8080` |
+| `--firmware` | `firmware/build` | directory containing `vmlinuz` + `initramfs.gz` |
+| `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
+| `--host-addr` | `127.0.0.1:8080` | host address that SLIRP forwards into the guest's `:8080` |
+
+Run with `--help` for the full list.
 
 ## Layout
 
