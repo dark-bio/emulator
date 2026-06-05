@@ -1,3 +1,4 @@
 target/
 .claude/
 launcher/gen/schemas/
+disk.img
