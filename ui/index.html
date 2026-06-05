@@ -191,6 +191,14 @@
       // streams over /hw.
       const LED_SWITCH_PIN_ID = '22';
 
+      // Carrier identity the UI advertises in response to a revbits read
+      // request. The firmware asks us at boot which carrier it's running on;
+      // (1, 11) is "Ark I, revision 11" — the latest production carrier as
+      // of writing. Could be made configurable later if multiple carriers
+      // need to be exercised from the same UI.
+      const CARRIER_VERSION = 1;
+      const CARRIER_REVISION = 11;
+
       // The wire carries raw sRGB floats out of the firmware (no clamping, no
       // 0..255 quantization). The real device's LEDs are typically driven at
       // ~10% of their max to look comfortably bright, so we boost 10x and
@@ -241,8 +249,16 @@
             ) {
               bootMode = false;
               bootCtrl.stop();
+            } else if (env.d === 'revbits' && env.payload?.op === 'read') {
+              // Firmware is asking what carrier it's running on; reply on
+              // the same (driver, instance) key with our configured identity.
+              ws.send(JSON.stringify({
+                d: 'revbits',
+                id: env.id,
+                payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
+              }));
             }
-            // Other driver tags (revbits, bootblink) currently no-op.
+            // Other driver tags (bootblink) currently no-op.
           } catch { }
         };
         ws.onclose = () => {
