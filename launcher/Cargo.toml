@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
 
 # PDEATHSIG is Linux-only; libc is only needed there.
