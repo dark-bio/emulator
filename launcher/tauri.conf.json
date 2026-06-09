@@ -17,6 +17,7 @@
         "resizable": false,
         "decorations": false,
         "transparent": true,
+        "alwaysOnTop": true,
         "url": "index.html"
       }
     ],
