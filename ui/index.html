@@ -9,7 +9,7 @@
     :root {
       color-scheme: dark;
       --bg: #0d1117;
-      --led: #2ea043;
+      --led: #000000;
       --pad: 4vmin;
     }
 
@@ -74,7 +74,7 @@
       aspect-ratio: 1 / 1;
       border-radius: 50%;
       background: var(--led);
-      box-shadow: 0 0 0.6vmin 0.1vmin rgba(46, 160, 67, 0.55);
+      box-shadow: 0 0 0.6vmin 0.1vmin rgba(0, 0, 0, 0.55);
     }
 
     .led.tl {
@@ -133,9 +133,7 @@
     }
 
     .reset-pin:focus-visible {
-      outline: 2px solid #58a6ff;
-      outline-offset: 2px;
-      border-radius: 4px;
+      outline: 0;
     }
 
     .reset-pin img {
@@ -163,7 +161,7 @@
     </button>
   </div>
   <script type="module">
-    import { startBootAnimation } from './boot.js';
+    import { startBootAnimation } from './boot_anim.js';
 
     // Hardware channel: stream driver frames in from the firmware, send reset-pin
     // edge events out. Every message on /hw is wrapped in the bus envelope
@@ -228,9 +226,12 @@
 
       // Local boot animation runs until the firmware signals (via the led
       // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
-      // so the brightness/glow look matches firmware-driven frames.
+      // so the brightness/glow look matches firmware-driven frames. Restarted
+      // whenever the /hw socket drops, which is our proxy for "firmware just
+      // rebooted" — covers clean reboots, crashes, and arkos-core respawns
+      // equally, since none of them get to send a graceful signal first.
       let bootMode = true;
-      const bootCtrl = startBootAnimation(applyLeds);
+      let bootCtrl = startBootAnimation(applyLeds);
 
       let ws = null;
       function connect() {
@@ -263,6 +264,15 @@
         };
         ws.onclose = () => {
           ws = null;
+          // Treat a dropped /hw socket as "firmware is rebooting": flip back
+          // into bootMode so firmware LED frames are ignored again, and kick
+          // off a fresh local animation. Guarded so the no-op case (initial
+          // connection refused while still in bootMode) doesn't stack
+          // animations.
+          if (!bootMode) {
+            bootMode = true;
+            bootCtrl = startBootAnimation(applyLeds);
+          }
           setTimeout(connect, 1000);
         };
         ws.onerror = () => { try { ws.close(); } catch { } };

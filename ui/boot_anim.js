@@ -2,8 +2,9 @@
 // up its own LED driver. Mirrors the on-device boot blinker chip: four LEDs
 // blink in turn, each going through CYCLES_PER_LED fade-in/fade-out cycles
 // that get progressively faster, then staying on at BOOT_PWR while the next
-// LED takes its turn. After all four are lit the sequence restarts and loops
-// forever until the caller invokes the returned `stop()`.
+// LED takes its turn. Once the first three LEDs are lit, the fourth keeps
+// pulsing at the fastest cadence indefinitely -- a "still loading" indicator
+// rather than a wrap-around restart -- until the caller invokes `stop()`.
 //
 // The animation doesn't write to the DOM itself -- each frame it computes the
 // four [r,g,b] colour triples (each channel in 0..1) and hands them to the
@@ -35,14 +36,25 @@ const LED_BLINK_MS = (() => {
   }
   return total;
 })();
-const TOTAL_BOOT_MS = LED_BLINK_MS * NUM_LEDS;
 
 function bootBrightness(ledIndex, elapsedMs) {
-  const t = elapsedMs % TOTAL_BOOT_MS;
   const myStart = ledIndex * LED_BLINK_MS;
-  if (t < myStart) return 0;                          // hasn't started yet
-  if (t >= myStart + LED_BLINK_MS) return BOOT_PWR;   // blink phase done, on
-  let inLed = t - myStart;
+  if (elapsedMs < myStart) return 0;                  // hasn't started yet
+  let inLed = elapsedMs - myStart;
+  if (inLed >= LED_BLINK_MS) {
+    // Blink phase done. Earlier LEDs latch on; the last LED keeps pulsing at
+    // the fastest cadence so the boot animation reads as "still loading"
+    // rather than "done" until the firmware actually takes over.
+    if (ledIndex < NUM_LEDS - 1) return BOOT_PWR;
+    const stepMs = stepDelayMs(CYCLES_PER_LED - 1);
+    const subBlinkMs = STEPS_PER_FADE * 2 * stepMs;
+    const fadeMs = STEPS_PER_FADE * stepMs;
+    const inCycle = (inLed - LED_BLINK_MS) % subBlinkMs;
+    const norm = inCycle < fadeMs
+      ? inCycle / fadeMs
+      : 1 - (inCycle - fadeMs) / fadeMs;
+    return BOOT_PWR * norm;
+  }
   for (let j = 0; j < CYCLES_PER_LED; j++) {
     const stepMs = stepDelayMs(j);
     const cycleMs = STEPS_PER_FADE * 2 * FADES_PER_CYCLE * stepMs;

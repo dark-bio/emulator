@@ -11,7 +11,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::thread;
 
 use clap::Parser;
@@ -162,8 +162,7 @@ fn spawn_qemu(cfg: &Config) -> Child {
         "stdio",
         "-monitor",
         "none",
-    ])
-    .stdin(Stdio::null());
+    ]);
 
     protect_from_orphan(&mut cmd);
 
