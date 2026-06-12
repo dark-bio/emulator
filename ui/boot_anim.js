@@ -1,6 +1,6 @@
 // Local boot animation, played by the UI while the firmware is still bringing
-// up its own LED driver. Mirrors the on-device boot blinker chip: four LEDs
-// blink in turn, each going through CYCLES_PER_LED fade-in/fade-out cycles
+// up its own LED driver. Stands in for the firmware's own boot LED sequence:
+// four LEDs blink in turn, each going through CYCLES_PER_LED fade-in/fade-out cycles
 // that get progressively faster, then staying on at BOOT_PWR while the next
 // LED takes its turn. Once the first three LEDs are lit, the fourth keeps
 // pulsing at the fastest cadence indefinitely -- a "still loading" indicator

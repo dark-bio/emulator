@@ -163,11 +163,10 @@
   <script type="module">
     import { startBootAnimation } from './boot_anim.js';
 
-    // Hardware channel: stream driver frames in from the firmware, send reset-pin
-    // edge events out. Every message on /hw is wrapped in the bus envelope
+    // Hardware channel: driver frames stream in from the firmware, reset-pin
+    // edges go out. Every /hw message is wrapped in the bus envelope
     //   { "d": "<driver>", "id": "<instance>", "payload": { ... } }
-    // The UI currently renders rgbled frames and emits button edges; other
-    // driver tags (switch / revbits / bootblink) flow through but are ignored.
+    // Recognised tags are handled below; anything else is ignored.
     (() => {
       const pin = document.querySelector('.reset-pin');
       const leds = [
@@ -177,23 +176,22 @@
         document.querySelector('.led.br'),
       ];
 
-      // GPIO pin the firmware listens on for the reset button. The mapping is
-      // revision-dependent — 5 for R3+, 27 for R0–R2. R11 is the emulator's
-      // default revbits revision, so 5 is correct unless
-      // ARKOS_EMULATOR_REVISION is overridden to an early board.
+      // Address of the /hw bus, injected by the launcher before this script
+      // runs so the UI follows --host-addr. Falls back to the default for
+      // running the UI outside the launcher.
+      const HW_ADDR = window.__HW_ADDR__ ?? '127.0.0.1:8080';
+
+      // GPIO id the firmware watches for reset-button edges, paired with the
+      // carrier identity advertised below.
       const BUTTON_PIN_ID = '5';
 
-      // GPIO pin the firmware drives high once it has taken over the LEDs
-      // from the on-device boot blinker. Until we see this, the UI runs a
-      // local boot animation; after, it displays the colours the firmware
-      // streams over /hw.
+      // GPIO id the firmware drives high once it has taken over the LEDs from
+      // its own boot sequence. Until we see this, the UI runs a local boot
+      // animation; after, it displays the colours streamed over /hw.
       const LED_SWITCH_PIN_ID = '22';
 
-      // Carrier identity the UI advertises in response to a revbits read
-      // request. The firmware asks us at boot which carrier it's running on;
-      // (1, 11) is "Ark I, revision 11" — the latest production carrier as
-      // of writing. Could be made configurable later if multiple carriers
-      // need to be exercised from the same UI.
+      // Carrier identity the UI advertises when the firmware reads it at boot.
+      // Could be made configurable later to exercise other carriers.
       const CARRIER_VERSION = 1;
       const CARRIER_REVISION = 11;
 
@@ -235,7 +233,7 @@
 
       let ws = null;
       function connect() {
-        ws = new WebSocket('ws://127.0.0.1:8080/hw');
+        ws = new WebSocket(`ws://${HW_ADDR}/hw`);
         ws.onmessage = ev => {
           try {
             const env = JSON.parse(ev.data);
@@ -259,7 +257,7 @@
                 payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
               }));
             }
-            // Other driver tags (bootblink) currently no-op.
+            // Unrecognised driver tags no-op.
           } catch { }
         };
         ws.onclose = () => {

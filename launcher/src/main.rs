@@ -10,6 +10,7 @@
 
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -32,7 +33,7 @@ struct Args {
 
     /// Host address that SLIRP forwards into the guest's :8080.
     #[arg(long, default_value = "127.0.0.1:8080")]
-    host_addr: String,
+    host_addr: SocketAddr,
 }
 
 /// Launch-time configuration, derived from the parsed `Args`.
@@ -40,7 +41,7 @@ struct Config {
     kernel: PathBuf,
     initrd: PathBuf,
     disk: PathBuf,
-    host_addr: String,
+    host_addr: SocketAddr,
 }
 
 impl From<Args> for Config {
@@ -100,15 +101,27 @@ fn main() {
         }
     });
 
+    // The /hw address is fixed at launch, so hand it to the UI as a constant
+    // injected before page scripts run rather than over a command. The UI reads
+    // window.__HW_ADDR__ and dials it, following --host-addr instead of
+    // assuming a fixed port.
+    let hw_addr = format!("window.__HW_ADDR__ = {:?};", cfg.host_addr.to_string());
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("hw-addr")
+                .js_init_script(hw_addr)
+                .build(),
+        )
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-/// Initial size of the sparse disk image. The firmware's first-boot
-/// `initdisk` service partitions and formats it; the launcher only allocates
-/// the raw container.
+/// Initial size of the sparse disk image. The firmware partitions and formats
+/// it on first boot; the launcher only allocates the raw container.
 const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Guest RAM in MiB.
+const GUEST_RAM_MB: u32 = 8192;
 
 /// Lazily creates the backing disk image if missing. Idempotent — to reset
 /// device state, delete the file and re-launch.
@@ -133,36 +146,29 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
 /// attached on Linux.
 fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
-    cmd.args([
-        "-M",
-        "virt",
-        "-cpu",
-        "cortex-a72",
-        "-m",
-        "8192",
-        "-nographic",
-        "-kernel",
-    ])
-    .arg(&cfg.kernel)
-    .args(["-initrd"])
-    .arg(&cfg.initrd)
-    // rdinit=/sbin/init hands control to openrc, which brings up networking
-    // and starts the arkos-core supervisor.
-    .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
-    .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
-    .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
-    .arg(format!(
-        "file={},if=none,id=disk0,format=raw",
-        cfg.disk.display()
-    ))
-    .args([
-        "-device",
-        "virtio-blk-pci,drive=disk0",
-        "-serial",
-        "stdio",
-        "-monitor",
-        "none",
-    ]);
+    cmd.args(["-M", "virt", "-cpu", "cortex-a72", "-m"])
+        .arg(GUEST_RAM_MB.to_string())
+        .args(["-nographic", "-kernel"])
+        .arg(&cfg.kernel)
+        .args(["-initrd"])
+        .arg(&cfg.initrd)
+        // rdinit=/sbin/init hands control to the firmware's init, which brings up
+        // networking and the ArkOS services.
+        .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
+        .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
+        .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
+        .arg(format!(
+            "file={},if=none,id=disk0,format=raw",
+            cfg.disk.display()
+        ))
+        .args([
+            "-device",
+            "virtio-blk-pci,drive=disk0",
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+        ]);
 
     protect_from_orphan(&mut cmd);
 
