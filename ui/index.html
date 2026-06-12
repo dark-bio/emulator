@@ -164,7 +164,7 @@
     import { startBootAnimation } from './boot_anim.js';
 
     // Hardware channel: driver frames stream in from the firmware, reset-pin
-    // edges go out. Every /hw message is wrapped in the bus envelope
+    // edges go out. Every /v1/hw message is wrapped in the bus envelope
     //   { "d": "<driver>", "id": "<instance>", "payload": { ... } }
     // Recognised tags are handled below; anything else is ignored.
     (() => {
@@ -176,7 +176,7 @@
         document.querySelector('.led.br'),
       ];
 
-      // Address of the /hw bus, injected by the launcher before this script
+      // Address of the /v1/hw bus, injected by the launcher before this script
       // runs so the UI follows --host-addr. Falls back to the default for
       // running the UI outside the launcher.
       const HW_ADDR = window.__HW_ADDR__ ?? '127.0.0.1:8080';
@@ -187,7 +187,7 @@
 
       // GPIO id the firmware drives high once it has taken over the LEDs from
       // its own boot sequence. Until we see this, the UI runs a local boot
-      // animation; after, it displays the colours streamed over /hw.
+      // animation; after, it displays the colours streamed over /v1/hw.
       const LED_SWITCH_PIN_ID = '22';
 
       // Carrier identity the UI advertises when the firmware reads it at boot.
@@ -225,7 +225,7 @@
       // Local boot animation runs until the firmware signals (via the led
       // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
       // so the brightness/glow look matches firmware-driven frames. Restarted
-      // whenever the /hw socket drops, which is our proxy for "firmware just
+      // whenever the /v1/hw socket drops, which is our proxy for "firmware just
       // rebooted" — covers clean reboots, crashes, and arkos-core respawns
       // equally, since none of them get to send a graceful signal first.
       let bootMode = true;
@@ -233,7 +233,7 @@
 
       let ws = null;
       function connect() {
-        ws = new WebSocket(`ws://${HW_ADDR}/hw`);
+        ws = new WebSocket(`ws://${HW_ADDR}/v1/hw`);
         ws.onmessage = ev => {
           try {
             const env = JSON.parse(ev.data);
@@ -262,7 +262,7 @@
         };
         ws.onclose = () => {
           ws = null;
-          // Treat a dropped /hw socket as "firmware is rebooting": flip back
+          // Treat a dropped /v1/hw socket as "firmware is rebooting": flip back
           // into bootMode so firmware LED frames are ignored again, and kick
           // off a fresh local animation. Guarded so the no-op case (initial
           // connection refused while still in bootMode) doesn't stack

@@ -63,7 +63,7 @@ Run with `--help` for the full list.
 | path | role |
 |---|---|
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
-| `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/hw` driver bus. |
+| `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
 
 ## Known issues
 

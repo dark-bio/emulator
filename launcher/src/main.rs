@@ -79,7 +79,7 @@ fn main() {
     }
 
     println!(
-        "[launcher] firmware from {}, hardware bus at ws://{}/hw once guest boots",
+        "[launcher] firmware from {}, hardware bus at ws://{}/v1/hw once guest boots",
         cfg.kernel.parent().unwrap().display(),
         cfg.host_addr,
     );
@@ -101,7 +101,7 @@ fn main() {
         }
     });
 
-    // The /hw address is fixed at launch, so hand it to the UI as a constant
+    // The /v1/hw address is fixed at launch, so hand it to the UI as a constant
     // injected before page scripts run rather than over a command. The UI reads
     // window.__HW_ADDR__ and dials it, following --host-addr instead of
     // assuming a fixed port.
