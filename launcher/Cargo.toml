@@ -10,6 +10,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
 
-# PDEATHSIG is Linux-only; libc is only needed there.
+# Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; Windows uses a
+# Job Object via windows-sys; macOS uses a death pipe + /bin/sh (std only).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

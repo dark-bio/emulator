@@ -1,12 +1,16 @@
 // launcher: spawns QEMU with the firmware image and hosts a Tauri window
 // for the emulator UI. Window and QEMU are lifecycle-bound — closing either
-// tears down the other; on Linux, PR_SET_PDEATHSIG ensures QEMU can't
-// outlive the launcher even on SIGKILL.
+// tears down the other, on every platform and even on a hard kill:
+//   - QEMU exits  -> the wait thread exits the launcher (all platforms).
+//   - launcher exits -> QEMU dies with it via the OS-specific protection in
+//     the `orphan` module, which survives SIGKILL/force-quit.
 //
 //   ws clients ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
 //
 // The backing disk image is plain raw — no encryption at the qemu layer.
 // The emulator is a dev/test convenience, not a vault; see README.
+
+mod orphan;
 
 use std::fs;
 use std::io;
@@ -84,7 +88,8 @@ fn main() {
         cfg.host_addr,
     );
 
-    // Spawn QEMU; a background thread watches it and exits the process if it
+    // Spawn QEMU; it's orphan-protected (see `spawn_qemu` / the `orphan`
+    // module), and a background thread watches it and exits the process if it
     // dies on its own, which causes Tauri's window to close with us.
     let qemu = spawn_qemu(&cfg);
     thread::spawn(move || {
@@ -142,8 +147,8 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
 }
 
 /// Spawn `qemu-system-aarch64` configured for the emulator: virt machine with
-/// paravirt net + disk, host port 8080 forwarded into the guest, PDEATHSIG
-/// attached on Linux.
+/// paravirt net + disk, host port 8080 forwarded into the guest. Spawned
+/// through `orphan::guard` so the child can't outlive the launcher.
 fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
     cmd.args(["-M", "virt", "-cpu", "cortex-a72", "-m"])
@@ -170,35 +175,8 @@ fn spawn_qemu(cfg: &Config) -> Child {
             "none",
         ]);
 
-    protect_from_orphan(&mut cmd);
-
-    cmd.spawn().unwrap_or_else(|e| {
+    orphan::guard(cmd).spawn().unwrap_or_else(|e| {
         eprintln!("failed to spawn qemu-system-aarch64: {e}");
         std::process::exit(1);
     })
 }
-
-/// Attach `PR_SET_PDEATHSIG=SIGKILL` to the QEMU child. Ensures the kernel
-/// kills QEMU if the launcher dies for any reason — including SIGKILL or
-/// panic, neither of which run Rust's `Drop`. macOS has no prctl equivalent;
-/// Windows wants a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Both
-/// deferred — on those hosts QEMU may outlive an abnormally-terminated
-/// launcher.
-#[cfg(target_os = "linux")]
-fn protect_from_orphan(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: pre_exec runs in the forked child before exec; only the
-    // async-signal-safe prctl is called.
-    unsafe {
-        cmd.pre_exec(|| {
-            let rc = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
-            if rc == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn protect_from_orphan(_cmd: &mut Command) {}

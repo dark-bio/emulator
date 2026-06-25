@@ -65,10 +65,3 @@ Run with `--help` for the full list.
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
 
-## Known issues
-
-- **macOS / Windows: orphaned QEMU on abnormal exit.** If the launcher dies
-  in a way that bypasses normal cleanup (`kill -9`, force quit, OOM kill,
-  panic in FFI, etc.), QEMU may be left running and you'll need to terminate
-  it manually. Linux is fine — `PR_SET_PDEATHSIG` makes the kernel take care
-  of it.
