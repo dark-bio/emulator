@@ -38,6 +38,10 @@ struct Args {
     /// Host address that SLIRP forwards into the guest's :8080.
     #[arg(long, default_value = "127.0.0.1:8080")]
     host_addr: SocketAddr,
+
+    /// Guest RAM in MiB. Lower it on memory-constrained hosts.
+    #[arg(long, default_value_t = 8192)]
+    memory: u32,
 }
 
 /// Launch-time configuration, derived from the parsed `Args`.
@@ -46,6 +50,7 @@ struct Config {
     initrd: PathBuf,
     disk: PathBuf,
     host_addr: SocketAddr,
+    memory: u32,
 }
 
 impl From<Args> for Config {
@@ -55,6 +60,7 @@ impl From<Args> for Config {
             initrd: args.firmware.join("initramfs.gz"),
             disk: args.disk,
             host_addr: args.host_addr,
+            memory: args.memory,
         }
     }
 }
@@ -125,9 +131,6 @@ fn main() {
 /// it on first boot; the launcher only allocates the raw container.
 const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Guest RAM in MiB.
-const GUEST_RAM_MB: u32 = 8192;
-
 /// Lazily creates the backing disk image if missing. Idempotent — to reset
 /// device state, delete the file and re-launch.
 fn ensure_disk(path: &Path) -> io::Result<()> {
@@ -152,7 +155,7 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
 fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
     cmd.args(["-M", "virt", "-cpu", "cortex-a72", "-m"])
-        .arg(GUEST_RAM_MB.to_string())
+        .arg(cfg.memory.to_string())
         .args(["-nographic", "-kernel"])
         .arg(&cfg.kernel)
         .args(["-initrd"])

@@ -16,6 +16,7 @@
         "height": 465,
         "resizable": false,
         "decorations": false,
+        "shadow": false,
         "transparent": true,
         "alwaysOnTop": true,
         "url": "index.html"
@@ -27,6 +28,6 @@
   },
   "bundle": {
     "active": false,
-    "icon": []
+    "icon": ["icons/icon.ico"]
   }
 }
