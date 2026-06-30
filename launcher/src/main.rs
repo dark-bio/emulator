@@ -5,7 +5,7 @@
 //   - launcher exits -> QEMU dies with it via the OS-specific protection in
 //     the `orphan` module, which survives SIGKILL/force-quit.
 //
-//   ws clients ──TCP──▶ host:8080 ──QEMU SLIRP hostfwd──▶ guest:8080 ──▶ firmware
+//   ws clients ──TCP──▶ host:18181 ──QEMU SLIRP hostfwd──▶ guest:18181 ──▶ firmware
 //
 // The backing disk image is plain raw — no encryption at the qemu layer.
 // The emulator is a dev/test convenience, not a vault; see README.
@@ -21,6 +21,9 @@ use std::thread;
 
 use clap::Parser;
 
+/// The port the firmware uses to communicate with the host.
+const GUEST_PORT: u16 = 18181;
+
 /// Command-line arguments. The disk is deliberately separate from `--firmware`
 /// — it's user state, not a build artifact, and rebuilding the firmware
 /// shouldn't wipe it. Defaults resolve against the cwd at launch time.
@@ -35,8 +38,8 @@ struct Args {
     #[arg(long, default_value = "disk.img")]
     disk: PathBuf,
 
-    /// Host address that SLIRP forwards into the guest's :8080.
-    #[arg(long, default_value = "127.0.0.1:8080")]
+    /// Host address that SLIRP forwards into the guest's port.
+    #[arg(long, default_value = "127.0.0.1:18181")]
     host_addr: SocketAddr,
 
     /// Guest RAM in MiB. Lower it on memory-constrained hosts.
@@ -150,7 +153,7 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
 }
 
 /// Spawn `qemu-system-aarch64` configured for the emulator: virt machine with
-/// paravirt net + disk, host port 8080 forwarded into the guest. Spawned
+/// paravirt net + disk, host port 18181 forwarded into the guest. Spawned
 /// through `orphan::guard` so the child can't outlive the launcher.
 fn spawn_qemu(cfg: &Config) -> Child {
     let mut cmd = Command::new("qemu-system-aarch64");
@@ -163,7 +166,10 @@ fn spawn_qemu(cfg: &Config) -> Child {
         // rdinit=/sbin/init hands control to the firmware's init, which brings up
         // networking and the ArkOS services.
         .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
-        .arg(format!("user,id=net0,hostfwd=tcp:{}-:8080", cfg.host_addr))
+        .arg(format!(
+            "user,id=net0,hostfwd=tcp:{}-:{GUEST_PORT}",
+            cfg.host_addr
+        ))
         .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
         .arg(format!(
             "file={},if=none,id=disk0,format=raw",

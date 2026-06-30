@@ -54,7 +54,7 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 |---|---|---|
 | `--firmware` | `firmware/build` | directory containing `vmlinuz` + `initramfs.gz` |
 | `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
-| `--host-addr` | `127.0.0.1:8080` | host address that SLIRP forwards into the guest's `:8080` |
+| `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
 
 Run with `--help` for the full list.
