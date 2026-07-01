@@ -24,15 +24,17 @@ use clap::Parser;
 /// The port the firmware uses to communicate with the host.
 const GUEST_PORT: u16 = 18181;
 
-/// Command-line arguments. The disk is deliberately separate from `--firmware`
-/// — it's user state, not a build artifact, and rebuilding the firmware
-/// shouldn't wipe it. Defaults resolve against the cwd at launch time.
+/// Launch configuration parsed from command-line arguments.
 #[derive(Parser)]
 #[command(about = "Ark device emulator: boots ArkOS in QEMU behind a small UI.")]
-struct Args {
-    /// Firmware build directory containing vmlinuz + initramfs.gz.
-    #[arg(long, default_value = "firmware/build")]
-    firmware: PathBuf,
+struct Config {
+    /// Path to the kernel image (vmlinuz).
+    #[arg(long)]
+    kernel: PathBuf,
+
+    /// Path to the initramfs (.gz).
+    #[arg(long)]
+    initrd: PathBuf,
 
     /// Path to the backing disk image; auto-allocated on first run.
     #[arg(long, default_value = "disk.img")]
@@ -47,36 +49,13 @@ struct Args {
     memory: u32,
 }
 
-/// Launch-time configuration, derived from the parsed `Args`.
-struct Config {
-    kernel: PathBuf,
-    initrd: PathBuf,
-    disk: PathBuf,
-    host_addr: SocketAddr,
-    memory: u32,
-}
-
-impl From<Args> for Config {
-    fn from(args: Args) -> Self {
-        Self {
-            kernel: args.firmware.join("vmlinuz"),
-            initrd: args.firmware.join("initramfs.gz"),
-            disk: args.disk,
-            host_addr: args.host_addr,
-            memory: args.memory,
-        }
-    }
-}
-
 fn main() {
-    let cfg: Config = Args::parse().into();
+    let cfg: Config = Config::parse();
 
     for required in [&cfg.kernel, &cfg.initrd] {
         if !required.exists() {
             eprintln!(
-                "missing {} -- pass --firmware pointing at a directory containing \
-                 vmlinuz + initramfs.gz (produced by the firmware repo's \
-                 `./arkos.sh emulator-build`)",
+                "missing {} -- pass --kernel and --initrd pointing at the firmware files",
                 required.display()
             );
             std::process::exit(1);
@@ -90,12 +69,6 @@ fn main() {
         );
         std::process::exit(1);
     }
-
-    println!(
-        "[launcher] firmware from {}, hardware bus at ws://{}/v1/hw once guest boots",
-        cfg.kernel.parent().unwrap().display(),
-        cfg.host_addr,
-    );
 
     // Spawn QEMU; it's orphan-protected (see `spawn_qemu` / the `orphan`
     // module), and a background thread watches it and exits the process if it
