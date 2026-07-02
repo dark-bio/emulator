@@ -1,5 +1,5 @@
 // launcher: spawns QEMU with the firmware image and hosts a Tauri window
-// for the emulator UI. Window and QEMU are lifecycle-bound — closing either
+// for the emulator UI. Window and QEMU are lifecycle-bound; closing either
 // tears down the other, on every platform and even on a hard kill:
 //   - QEMU exits  -> the wait thread exits the launcher (all platforms).
 //   - launcher exits -> QEMU dies with it via the OS-specific protection in
@@ -7,7 +7,7 @@
 //
 //   ws clients ──TCP──▶ host:18181 ──QEMU SLIRP hostfwd──▶ guest:18181 ──▶ firmware
 //
-// The backing disk image is plain raw — no encryption at the qemu layer.
+// The backing disk image is plain raw, with no encryption at the qemu layer.
 // The emulator is a dev/test convenience, not a vault; see README.
 
 mod orphan;
@@ -107,7 +107,7 @@ fn main() {
 /// it on first boot; the launcher only allocates the raw container.
 const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Lazily creates the backing disk image if missing. Idempotent — to reset
+/// Lazily creates the backing disk image if missing. Idempotent; to reset
 /// device state, delete the file and re-launch.
 fn ensure_disk(path: &Path) -> io::Result<()> {
     if path.exists() {

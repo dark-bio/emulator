@@ -1,4 +1,4 @@
-# Dark Bio — Ark Emulator
+# Dark Bio - Ark Emulator
 
 A desktop app that runs an Ark device locally for development and demo
 purposes. It boots the real ArkOS firmware inside QEMU and hosts a small
@@ -7,7 +7,7 @@ reset pin).
 
 > [!CAUTION]
 > **The emulator is not a vault.** The backing disk image is a plain raw file
-> on your host filesystem — anything the emulated Ark stores ends up there,
+> on your host filesystem. Anything the emulated Ark stores ends up there,
 > readable by anyone with access to your machine. Do not put real genomic
 > data, real keys, or anything else you want to keep private into the
 > emulator. It exists for development, demos, and integration testing only.
@@ -22,18 +22,18 @@ All platforms also need a firmware artifact directory containing `vmlinuz` +
 
 ### Linux
 
-- `qemu-system-aarch64` — Arch: `pacman -S qemu-system-aarch64`; Debian/Ubuntu: `apt install qemu-system-arm`.
-- `webkit2gtk-4.1` + `libsoup3` — Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
+- `qemu-system-aarch64`: Arch: `pacman -S qemu-system-aarch64`; Debian/Ubuntu: `apt install qemu-system-arm`.
+- `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
 
 ### macOS
 
-- `qemu-system-aarch64` — `brew install qemu`.
+- `qemu-system-aarch64`: `brew install qemu`.
 - WKWebView ships with the OS; nothing extra needed.
 
 ### Windows
 
-- `qemu-system-aarch64` — install QEMU via its official Windows installer.
-- WebView2 runtime — preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
+- `qemu-system-aarch64`: install QEMU via its official Windows installer.
+- WebView2 runtime: preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
 
 ## Run
 
@@ -43,8 +43,8 @@ cargo run --release -p launcher -- --firmware /path/to/firmware/build
 
 The window shows the device face. The reset pin is a real button; the four
 corner LEDs render whatever the firmware streams from its RGB-LED driver. The
-backing `disk.img` is created automatically on first launch (4 GiB sparse) —
-delete it to reset the emulated device's state.
+backing `disk.img` is created automatically on first launch (4 GiB sparse).
+Delete it to reset the emulated device's state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 

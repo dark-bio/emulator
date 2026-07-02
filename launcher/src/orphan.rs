@@ -1,14 +1,15 @@
-//! Tie a spawned child to the current process so it can't be orphaned: when
-//! this process exits — including a hard kill (`kill -9`, `TerminateProcess`,
-//! force-quit, OOM) where no in-process cleanup runs — the child dies with it.
+//! Tie a spawned child to the current process so it can't be orphaned. When
+//! this process exits, the child dies with it. This holds even for a hard kill
+//! (`kill -9`, `TerminateProcess`, force-quit, OOM) where no in-process cleanup
+//! runs.
 //!
 //! There is no portable primitive, so each OS uses its own mechanism. Only the
 //! three below are implemented; any other target fails to compile rather than
 //! silently leaving children unprotected.
 //!
-//!   - **Linux**   — `PR_SET_PDEATHSIG=SIGKILL`, armed pre-spawn via `pre_exec`.
-//!   - **Windows** — a Job Object flagged `KILL_ON_JOB_CLOSE`, armed post-spawn.
-//!   - **macOS**   — a "death pipe": this process holds the write end open for
+//!   - **Linux**:   `PR_SET_PDEATHSIG=SIGKILL`, armed pre-spawn via `pre_exec`.
+//!   - **Windows**: a Job Object flagged `KILL_ON_JOB_CLOSE`, armed post-spawn.
+//!   - **macOS**:   a "death pipe". This process holds the write end open for
 //!     its lifetime while a stock `/bin/sh` blocks on the read end, so the EOF on
 //!     exit fires the kill. (macOS has no parent-death signal, so it needs a
 //!     separate process.)
@@ -48,7 +49,7 @@ impl GuardedCommand {
 }
 
 /// Linux: attach `PR_SET_PDEATHSIG=SIGKILL` so the kernel kills the child the
-/// moment this process dies — for any reason, including SIGKILL or a panic,
+/// moment this process dies, for any reason. This includes SIGKILL or a panic,
 /// neither of which run `Drop`. Other platforms have no pre-exec hook and arm
 /// their equivalents in [`arm_post_spawn`].
 #[cfg(target_os = "linux")]
@@ -77,9 +78,10 @@ fn arm_post_spawn(_child: &Child) -> io::Result<()> {
 }
 
 /// Windows: put the child in a Job Object flagged `KILL_ON_JOB_CLOSE` and keep
-/// the job handle open for this process's lifetime. When this process ends —
-/// cleanly, via `TerminateProcess`, or by crashing — the OS closes its handles,
-/// the job's last reference goes with them, and Windows terminates the child.
+/// the job handle open for this process's lifetime. When this process ends,
+/// whether cleanly, via `TerminateProcess`, or by crashing, the OS closes its
+/// handles, the job's last reference goes with them, and Windows terminates the
+/// child.
 /// A sub-millisecond window between spawn and assignment can still orphan the
 /// child if this process dies inside it.
 #[cfg(windows)]
@@ -127,7 +129,7 @@ fn arm_post_spawn(child: &Child) -> io::Result<()> {
 }
 
 /// macOS: no parent-death signal exists, and `kill -9` runs no in-process
-/// cleanup — so the child's fate is tied to a *death pipe* watched by a separate
+/// cleanup, so the child's fate is tied to a *death pipe* watched by a separate
 /// process. This process keeps the write end open for its lifetime while a stock
 /// `/bin/sh` blocks on the read end. However this process dies (clean exit,
 /// panic, SIGKILL, OOM), the kernel closes its fds, the read hits EOF, and the
@@ -151,7 +153,7 @@ fn arm_post_spawn(child: &Child) -> io::Result<()> {
         .spawn()?;
 
     // Std pipe ends are close-on-exec, so the shell never inherited the write
-    // end — only this process holds it. Leak it so it stays open until exit; that
+    // end; only this process holds it. Leak it so it stays open until exit; that
     // EOF is the watchdog's signal. (`reader` moved into the child's stdin and
     // our copy is already closed.)
     std::mem::forget(writer);

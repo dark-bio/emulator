@@ -198,7 +198,7 @@
       // The wire carries raw sRGB floats out of the firmware (no clamping, no
       // 0..255 quantization). The real device's LEDs are typically driven at
       // ~10% of their max to look comfortably bright, so we boost 10x and
-      // scale to 0..255 for CSS — BRIGHTNESS = 10 * 255 = 2550. When a
+      // scale to 0..255 for CSS: BRIGHTNESS = 10 * 255 = 2550. When a
       // channel would clip past 255 the colour saturates and the excess grows
       // the glow proportionally (e.g. 250% peak -> 2.5x blur + spread), so an
       // overdriven LED looks roughly the way it would on hardware.
@@ -226,7 +226,7 @@
       // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
       // so the brightness/glow look matches firmware-driven frames. Restarted
       // whenever the /v1/hw socket drops, which is our proxy for "firmware just
-      // rebooted" — covers clean reboots, crashes, and arkos-core respawns
+      // rebooted". Covers clean reboots, crashes, and arkos-core respawns
       // equally, since none of them get to send a graceful signal first.
       let bootMode = true;
       let bootCtrl = startBootAnimation(applyLeds);
@@ -238,7 +238,7 @@
           try {
             const env = JSON.parse(ev.data);
             if (env.d === 'rgbled' && Array.isArray(env.payload?.colors)) {
-              // Ignore firmware LED frames until the led switch flips — the
+              // Ignore firmware LED frames until the led switch flips; the
               // local boot animation owns the display until then.
               if (!bootMode) applyLeds(env.payload.colors);
             } else if (
