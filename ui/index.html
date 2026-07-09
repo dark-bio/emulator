@@ -226,8 +226,9 @@
       // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
       // so the brightness/glow look matches firmware-driven frames. Restarted
       // whenever the /v1/hw socket drops, which is our proxy for "firmware just
-      // rebooted". Covers clean reboots, crashes, and arkos-core respawns
-      // equally, since none of them get to send a graceful signal first.
+      // rebooted". Covers clean reboots, crashes, and firmware process
+      // respawns equally, since none of them get to send a graceful signal
+      // first.
       let bootMode = true;
       let bootCtrl = startBootAnimation(applyLeds);
 

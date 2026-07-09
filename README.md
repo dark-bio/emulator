@@ -17,8 +17,9 @@ reset pin).
 
 ## Prerequisites
 
-All platforms also need a firmware artifact directory containing `vmlinuz` +
-`initramfs.gz`, produced by the firmware repo's `./arkos.sh emulator-build`.
+All platforms also need a pair of ArkOS emulator firmware artifacts: a kernel
+image (`vmlinuz`) and a gzipped initramfs. The launcher takes their paths via
+`--kernel` and `--initrd`.
 
 ### Linux
 
@@ -38,7 +39,7 @@ All platforms also need a firmware artifact directory containing `vmlinuz` +
 ## Run
 
 ```sh
-cargo run --release -p launcher -- --firmware /path/to/firmware/build
+cargo run --release -p launcher -- --kernel /path/to/vmlinuz --initrd /path/to/initramfs.gz
 ```
 
 The window shows the device face. The reset pin is a real button; the four
@@ -52,7 +53,8 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
 | flag | default | meaning |
 |---|---|---|
-| `--firmware` | `firmware/build` | directory containing `vmlinuz` + `initramfs.gz` |
+| `--kernel` | *required* | path to the kernel image (`vmlinuz`) |
+| `--initrd` | *required* | path to the initramfs (`.gz`) |
 | `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
 | `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
