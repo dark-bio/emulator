@@ -7,12 +7,12 @@
 //
 //   ws clients ──TCP──▶ host:18181 ──QEMU SLIRP hostfwd──▶ guest:18181 ──▶ firmware
 //
-// The backing disk image is plain raw, with no encryption at the qemu layer.
-// The emulator is a dev/test convenience, not a vault; see README.
+// The backing disk image is an unencrypted qcow2 file that starts small and
+// grows on demand; there is no encryption at the qemu layer. The emulator is a
+// dev/test convenience, not a vault; see README.
 
 mod orphan;
 
-use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -103,25 +103,31 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-/// Initial size of the sparse disk image. The firmware partitions and formats
-/// it on first boot; the launcher only allocates the raw container.
-const DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Virtual ceiling of the backing qcow2 disk. The host file starts tiny and
+/// grows on demand as the guest writes, never exceeding this size.
+const DISK_BYTES: u64 = 127_731_564_544;
 
-/// Lazily creates the backing disk image if missing. Idempotent; to reset
+/// Lazily creates the backing qcow2 disk image if missing. Idempotent; to reset
 /// device state, delete the file and re-launch.
 fn ensure_disk(path: &Path) -> io::Result<()> {
     if path.exists() {
         return Ok(());
     }
-    println!(
-        "[launcher] disk.img missing, allocating sparse {} GiB blank disk",
-        DISK_BYTES >> 30
-    );
-    // File::set_len on a freshly-created file produces a sparse file on
-    // Linux ext4/btrfs/xfs and macOS APFS. On Windows NTFS the bytes are
-    // zero-allocated rather than sparse, so the initial file is a real 4 GiB.
-    let file = fs::File::create(path)?;
-    file.set_len(DISK_BYTES)?;
+    println!("[launcher] disk image missing, creating qcow2 (grows on demand)");
+    // qcow2 is sparse on every host (including Windows NTFS, where a raw
+    // set_len would zero-fill the whole file): it starts at a few hundred KB and
+    // grows as the guest writes. Delegated to qemu-img, which ships with QEMU,
+    // rather than hand-writing the format. The bare byte count is read as bytes.
+    let status = Command::new("qemu-img")
+        .args(["create", "-f", "qcow2"])
+        .arg(path)
+        .arg(DISK_BYTES.to_string())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "qemu-img create failed ({status}); is qemu-img installed and on PATH?"
+        )));
+    }
     Ok(())
 }
 
@@ -145,7 +151,7 @@ fn spawn_qemu(cfg: &Config) -> Child {
         ))
         .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
         .arg(format!(
-            "file={},if=none,id=disk0,format=raw",
+            "file={},if=none,id=disk0,format=qcow2,discard=unmap,detect-zeroes=unmap",
             cfg.disk.display()
         ))
         .args([

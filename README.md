@@ -6,8 +6,8 @@ native window standing in for the device's physical face (4 RGB LEDs and a
 reset pin).
 
 > [!CAUTION]
-> **The emulator is not a vault.** The backing disk image is a plain raw file
-> on your host filesystem. Anything the emulated Ark stores ends up there,
+> **The emulator is not a vault.** The backing disk image is an unencrypted
+> qcow2 file on your host filesystem. Anything the emulated Ark stores ends up there,
 > readable by anyone with access to your machine. Do not put real genomic
 > data, real keys, or anything else you want to keep private into the
 > emulator. It exists for development, demos, and integration testing only.
@@ -24,6 +24,7 @@ image (`vmlinuz`) and a gzipped initramfs. The launcher takes their paths via
 ### Linux
 
 - `qemu-system-aarch64`: Arch: `pacman -S qemu-system-aarch64`; Debian/Ubuntu: `apt install qemu-system-arm`.
+- `qemu-img` (used to allocate the disk image): Arch: `pacman -S qemu-img`; Debian/Ubuntu: `apt install qemu-utils`.
 - `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
 
 ### macOS
@@ -44,8 +45,10 @@ cargo run --release -p launcher -- --kernel /path/to/vmlinuz --initrd /path/to/i
 
 The window shows the device face. The reset pin is a real button; the four
 corner LEDs render whatever the firmware streams from its RGB-LED driver. The
-backing `disk.img` is created automatically on first launch (4 GiB sparse).
-Delete it to reset the emulated device's state.
+backing disk is created automatically on first launch as a dynamically growing
+qcow2 image: it starts a few hundred KB in size and grows on demand as the guest
+writes, up to a fixed virtual ceiling. Delete it to reset the emulated device's
+state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
