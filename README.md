@@ -18,23 +18,31 @@ reset pin).
 ## Prerequisites
 
 All platforms also need a pair of ArkOS emulator firmware artifacts: a kernel
-image (`vmlinuz`) and a gzipped initramfs. The launcher takes their paths via
-`--kernel` and `--initrd`.
+image (`vmlinuz`) and a gzipped initramfs, built for either `aarch64` or
+`x86_64`. The launcher takes their paths via `--kernel` and `--initrd`, and
+their architecture via `--arch`, which defaults to the host's architecture and
+picks the matching QEMU system emulator.
+
+When the guest architecture matches the host's, the launcher enables hardware
+virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
+`kvm` group; HVF on macOS) and falls back to plain emulation if unavailable.
+Cross-architecture guests always run under plain emulation and boot noticeably
+slower.
 
 ### Linux
 
-- `qemu-system-aarch64`: Arch: `pacman -S qemu-system-aarch64`; Debian/Ubuntu: `apt install qemu-system-arm`.
+- `qemu-system-aarch64` and/or `qemu-system-x86_64` (matching your firmware artifacts): Arch: `pacman -S qemu-system-aarch64 qemu-system-x86`; Debian/Ubuntu: `apt install qemu-system-arm qemu-system-x86`.
 - `qemu-img` (used to allocate the disk image): Arch: `pacman -S qemu-img`; Debian/Ubuntu: `apt install qemu-utils`.
 - `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
 
 ### macOS
 
-- `qemu-system-aarch64`: `brew install qemu`.
+- QEMU: `brew install qemu` (ships both `qemu-system-aarch64` and `qemu-system-x86_64`).
 - WKWebView ships with the OS; nothing extra needed.
 
 ### Windows
 
-- `qemu-system-aarch64`: install QEMU via its official Windows installer.
+- QEMU: the official Windows installer (ships both `qemu-system-aarch64` and `qemu-system-x86_64`).
 - WebView2 runtime: preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
 
 ## Run
@@ -58,6 +66,7 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 |---|---|---|
 | `--kernel` | *required* | path to the kernel image (`vmlinuz`) |
 | `--initrd` | *required* | path to the initramfs (`.gz`) |
+| `--arch` | host arch | CPU architecture of the firmware artifacts (`aarch64` or `x86_64`) |
 | `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
 | `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
