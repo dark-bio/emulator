@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ark I emulator</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --led: #000000;
+      --pad: 4vmin;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      /* Windowless: the launcher's window itself is transparent, so the body
+       must paint nothing. Only the device + LEDs + pin appear on the desktop. */
+      background: transparent;
+      color: #c9d1d9;
+      font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--pad);
+    }
+
+    /* Scene: a 220:286 box sized to fit the largest area available inside the
+     body's padding box, keeping aspect ratio. Sized via the smaller of the
+     two viewport-derived constraints so it never overflows. */
+    .scene {
+      --aspect-w: 220;
+      --aspect-h: 286;
+      width: min(calc(100vw - 2 * var(--pad)),
+          calc((100vh - 2 * var(--pad)) * var(--aspect-w) / var(--aspect-h)));
+      aspect-ratio: var(--aspect-w) / var(--aspect-h);
+      position: relative;
+    }
+
+    /* Device fills the top portion of the scene (220/286 ≈ 76.9% of height). */
+    .device {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      z-index: 2;
+    }
+
+    .device-img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+
+    /* LED dots: 9/220 = 4.09% across; 23/220 = 10.45% from each corner edge.
+     Box is square (aspect 1:1) so a single percentage works for both axes. */
+    .led {
+      position: absolute;
+      width: 4.09%;
+      aspect-ratio: 1 / 1;
+      border-radius: 50%;
+      background: var(--led);
+      box-shadow: 0 0 0.6vmin 0.1vmin rgba(0, 0, 0, 0.55);
+    }
+
+    .led.tl {
+      top: 10.45%;
+      left: 10.45%;
+    }
+
+    .led.tr {
+      top: 10.45%;
+      right: 10.45%;
+    }
+
+    .led.bl {
+      bottom: 10.45%;
+      left: 10.45%;
+    }
+
+    .led.br {
+      bottom: 10.45%;
+      right: 10.45%;
+    }
+
+    /* Reset pin. All measurements as a fraction of .scene's 220x286 box.
+     - width: 18/220 = 8.18% of scene width
+     - height: 54/286 = 18.88% of scene height
+     - top: 220/286 = 76.92% (device's bottom edge)
+     - right: 18/220 = 8.18% (mirrors the companion app's 42-of-500 offset)
+     translateY uses pin's own height as 100%:
+     - default: +10/54 = +18.5%  (gap below device)
+     - hover  : +4/54  = +7.4%
+     - active : -15%              (slides under the device; softer than the
+                                   companion's reference for a less abrupt feel) */
+    .reset-pin {
+      position: absolute;
+      top: 76.92%;
+      right: 8.18%;
+      width: 8.18%;
+      height: 18.88%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      z-index: 1;
+      transform: translateY(18.5%);
+      transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+    }
+
+    .reset-pin:hover {
+      transform: translateY(7.4%);
+    }
+
+    /* .pressed wins over :hover (later, same specificity) so the cursor leaving
+     the moving hitbox doesn't pop the press state back to hover. */
+    .reset-pin.pressed {
+      transform: translateY(-15%);
+    }
+
+    .reset-pin:focus-visible {
+      outline: 0;
+    }
+
+    .reset-pin img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="scene">
+    <div class="device" data-tauri-drag-region>
+      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" data-tauri-drag-region />
+      <span class="led tl" data-tauri-drag-region></span>
+      <span class="led tr" data-tauri-drag-region></span>
+      <span class="led bl" data-tauri-drag-region></span>
+      <span class="led br" data-tauri-drag-region></span>
+    </div>
+    <button class="reset-pin" type="button" aria-label="reset button">
+      <img src="assets/sim_removal_tool.svg" alt="" />
+    </button>
+  </div>
+  <script type="module">
+    import { startBootAnimation } from './boot_anim.js';
+
+    // Hardware channel: driver frames stream in from the firmware, reset-pin
+    // edges go out. Every /v1/hw message is wrapped in the bus envelope
+    //   { "d": "<driver>", "id": "<instance>", "payload": { ... } }
+    // Recognised tags are handled below; anything else is ignored.
+    (() => {
+      const pin = document.querySelector('.reset-pin');
+      const leds = [
+        document.querySelector('.led.bl'),
+        document.querySelector('.led.tl'),
+        document.querySelector('.led.tr'),
+        document.querySelector('.led.br'),
+      ];
+
+      // Address of the /v1/hw bus, injected by the launcher before this script
+      // runs so the UI follows --host-addr. Falls back to the default for
+      // running the UI outside the launcher.
+      const HW_ADDR = window.__HW_ADDR__ ?? '127.0.0.1:18181';
+
+      // GPIO id the firmware watches for reset-button edges, paired with the
+      // carrier identity advertised below.
+      const BUTTON_PIN_ID = '5';
+
+      // GPIO id the firmware drives high once it has taken over the LEDs from
+      // its own boot sequence. Until we see this, the UI runs a local boot
+      // animation; after, it displays the colours streamed over /v1/hw.
+      const LED_SWITCH_PIN_ID = '22';
+
+      // Carrier identity the UI advertises when the firmware reads it at boot.
+      // Could be made configurable later to exercise other carriers.
+      const CARRIER_VERSION = 1;
+      const CARRIER_REVISION = 11;
+
+      // The wire carries raw sRGB floats out of the firmware (no clamping, no
+      // 0..255 quantization). The real device's LEDs are typically driven at
+      // ~10% of their max to look comfortably bright, so we boost 10x and
+      // scale to 0..255 for CSS: BRIGHTNESS = 10 * 255 = 2550. When a
+      // channel would clip past 255 the colour saturates and the excess grows
+      // the glow proportionally (e.g. 250% peak -> 2.5x blur + spread), so an
+      // overdriven LED looks roughly the way it would on hardware.
+      const BRIGHTNESS = 10 * 255;
+      const GLOW_BLUR = 0.6;   // vmin, at 100% brightness
+      const GLOW_SPREAD = 0.1; // vmin, at 100% brightness
+
+      function applyLeds(colors) {
+        for (let i = 0; i < 4; i++) {
+          const [r0, g0, b0] = colors[i] || [0, 0, 0];
+          const rScaled = r0 * BRIGHTNESS, gScaled = g0 * BRIGHTNESS, bScaled = b0 * BRIGHTNESS;
+          const peak = Math.max(rScaled, gScaled, bScaled);
+          const overflow = peak > 255 ? peak / 255 : 1;
+          const r = Math.min(255, rScaled);
+          const g = Math.min(255, gScaled);
+          const b = Math.min(255, bScaled);
+          leds[i].style.background = `rgb(${r}, ${g}, ${b})`;
+          leds[i].style.boxShadow =
+            `0 0 ${GLOW_BLUR * overflow}vmin ${GLOW_SPREAD * overflow}vmin ` +
+            `rgba(${r}, ${g}, ${b}, 0.55)`;
+        }
+      }
+
+      // Local boot animation runs until the firmware signals (via the led
+      // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
+      // so the brightness/glow look matches firmware-driven frames. Restarted
+      // whenever the /v1/hw socket drops, which is our proxy for "firmware just
+      // rebooted". Covers clean reboots, crashes, and firmware process
+      // respawns equally, since none of them get to send a graceful signal
+      // first.
+      let bootMode = true;
+      let bootCtrl = startBootAnimation(applyLeds);
+
+      let ws = null;
+      function connect() {
+        ws = new WebSocket(`ws://${HW_ADDR}/v1/hw`);
+        ws.onmessage = ev => {
+          try {
+            const env = JSON.parse(ev.data);
+            if (env.d === 'rgbled' && Array.isArray(env.payload?.colors)) {
+              // Ignore firmware LED frames until the led switch flips; the
+              // local boot animation owns the display until then.
+              if (!bootMode) applyLeds(env.payload.colors);
+            } else if (
+              env.d === 'switch' &&
+              env.id === LED_SWITCH_PIN_ID &&
+              env.payload?.level === 'high'
+            ) {
+              bootMode = false;
+              bootCtrl.stop();
+            } else if (env.d === 'revbits' && env.payload?.op === 'read') {
+              // Firmware is asking what carrier it's running on; reply on
+              // the same (driver, instance) key with our configured identity.
+              ws.send(JSON.stringify({
+                d: 'revbits',
+                id: env.id,
+                payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
+              }));
+            }
+            // Unrecognised driver tags no-op.
+          } catch { }
+        };
+        ws.onclose = () => {
+          ws = null;
+          // Treat a dropped /v1/hw socket as "firmware is rebooting": flip back
+          // into bootMode so firmware LED frames are ignored again, and kick
+          // off a fresh local animation. Guarded so the no-op case (initial
+          // connection refused while still in bootMode) doesn't stack
+          // animations.
+          if (!bootMode) {
+            bootMode = true;
+            bootCtrl = startBootAnimation(applyLeds);
+          }
+          setTimeout(connect, 1000);
+        };
+        ws.onerror = () => { try { ws.close(); } catch { } };
+      }
+      connect();
+
+      function sendButton(edge) {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ d: 'button', id: BUTTON_PIN_ID, payload: { edge } }));
+        }
+      }
+
+      // Pointer capture keeps the press "sticky" -- once the user mousedowns
+      // on the pin, the .pressed state (and the firmware's view of the button)
+      // stays until mouseup anywhere, even if the cursor leaves the moving
+      // hitbox. `pressed` guards against duplicate edges from pointerup +
+      // pointercancel firing on the same release.
+      let pressed = false;
+      pin.addEventListener('pointerdown', e => {
+        pin.setPointerCapture(e.pointerId);
+        pin.classList.add('pressed');
+        if (!pressed) {
+          pressed = true;
+          sendButton('falling');
+        }
+      });
+      const release = () => {
+        pin.classList.remove('pressed');
+        if (pressed) {
+          pressed = false;
+          sendButton('rising');
+        }
+      };
+      pin.addEventListener('pointerup', release);
+      pin.addEventListener('pointercancel', release);
+    })();
+
+    // Window drag is handled natively by Tauri via the `data-tauri-drag-region`
+    // attribute on .device (and its children). No JS plumbing needed.
+
+    // Escape closes the window. No window chrome means no X button; this is
+    // the in-app way out. Alt+F4 / WM shortcuts still work.
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && window.__TAURI__) {
+        window.__TAURI__.window.getCurrentWindow().close();
+      }
+    });
+  </script>
+</body>
+
+</html>

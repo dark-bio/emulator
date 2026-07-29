@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "Ark Emulator",
+  "version": "0.1.0",
+  "identifier": "bio.dark.emulator",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Ark I emulator",
+        "width": 366,
+        "height": 465,
+        "resizable": false,
+        "decorations": false,
+        "shadow": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico"]
+  }
+}
