@@ -36,9 +36,19 @@ struct Config {
     #[arg(long)]
     initrd: PathBuf,
 
+    /// CPU architecture of the firmware artifacts; defaults to the host's
+    /// architecture.
+    #[arg(long, value_enum)]
+    arch: Option<GuestArch>,
+
     /// Path to the backing disk image; auto-allocated on first run.
     #[arg(long, default_value = "disk.img")]
     disk: PathBuf,
+
+    /// Cloud environment the device gets bound to when its disk is first
+    /// created; ignored for existing disks (the binding is burnt in).
+    #[arg(long, default_value = "release", value_parser = ["develop", "staging", "release"])]
+    env: String,
 
     /// Host address that SLIRP forwards into the guest's port.
     #[arg(long, default_value = "127.0.0.1:18181")]
@@ -62,6 +72,19 @@ fn main() {
         }
     }
 
+    // Resolve the guest architecture; it decides which QEMU system emulator
+    // to spawn and how to configure it. Unless overridden via --arch, assume
+    // firmware built for the host's architecture, which is also the variant
+    // that gets hardware acceleration.
+    let arch = cfg.arch.unwrap_or_else(|| match std::env::consts::ARCH {
+        "aarch64" => GuestArch::Arm64,
+        "x86_64" => GuestArch::Amd64,
+        other => {
+            eprintln!("no firmware exists for {other} hosts -- pass --arch explicitly");
+            std::process::exit(1);
+        }
+    });
+
     if let Err(e) = ensure_disk(&cfg.disk) {
         eprintln!(
             "[launcher] failed to prepare disk image at {}: {e}",
@@ -73,7 +96,7 @@ fn main() {
     // Spawn QEMU; it's orphan-protected (see `spawn_qemu` / the `orphan`
     // module), and a background thread watches it and exits the process if it
     // dies on its own, which causes Tauri's window to close with us.
-    let qemu = spawn_qemu(&cfg);
+    let qemu = spawn_qemu(&cfg, arch);
     thread::spawn(move || {
         let mut child = qemu;
         match child.wait() {
@@ -101,6 +124,45 @@ fn main() {
         )
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// CPU architecture of the firmware being booted, in the same docker-style
+/// vocabulary the firmware build names its artifacts with. Selects the QEMU
+/// binary, machine model and serial console to boot with.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GuestArch {
+    #[value(name = "arm64")]
+    Arm64,
+    #[value(name = "amd64")]
+    Amd64,
+}
+
+impl GuestArch {
+    /// Whether this architecture is the host's own, which decides if QEMU can
+    /// use hardware acceleration instead of pure emulation.
+    fn host(self) -> bool {
+        match self {
+            Self::Arm64 => std::env::consts::ARCH == "aarch64",
+            Self::Amd64 => std::env::consts::ARCH == "x86_64",
+        }
+    }
+
+    /// QEMU system emulator that boots this architecture.
+    fn qemu_binary(self) -> &'static str {
+        match self {
+            Self::Arm64 => "qemu-system-aarch64",
+            Self::Amd64 => "qemu-system-x86_64",
+        }
+    }
+
+    /// Serial console device of the guest: the arm virt machine exposes a
+    /// PL011 at ttyAMA0, the x86 q35 machine a 16550 at ttyS0.
+    fn console(self) -> &'static str {
+        match self {
+            Self::Arm64 => "ttyAMA0",
+            Self::Amd64 => "ttyS0",
+        }
+    }
 }
 
 /// Virtual ceiling of the backing qcow2 disk. The host file starts tiny and
@@ -131,20 +193,49 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Spawn `qemu-system-aarch64` configured for the emulator: virt machine with
+/// Spawn the guest arch's QEMU system emulator configured for the emulator:
 /// paravirt net + disk, host port 18181 forwarded into the guest. Spawned
 /// through `orphan::guard` so the child can't outlive the launcher.
-fn spawn_qemu(cfg: &Config) -> Child {
-    let mut cmd = Command::new("qemu-system-aarch64");
-    cmd.args(["-M", "virt", "-cpu", "cortex-a72", "-m"])
+fn spawn_qemu(cfg: &Config, arch: GuestArch) -> Child {
+    let native = arch.host();
+    let mut cmd = Command::new(arch.qemu_binary());
+    // A native guest runs -cpu max (the host CPU under KVM/HVF, the maximal
+    // emulated one under the TCG fallback; named foreign models are rejected
+    // by KVM/HVF and -cpu host by TCG, max is the only value valid across the
+    // accel fallback list). A cross-arch arm guest keeps cortex-a72 for
+    // fidelity with the real device's SoC.
+    match arch {
+        GuestArch::Arm64 if native => cmd.args(["-M", "virt", "-cpu", "max"]),
+        GuestArch::Arm64 => cmd.args(["-M", "virt", "-cpu", "cortex-a72"]),
+        GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
+    };
+    // Repeated -accel flags form an ordered fallback list: hardware
+    // virtualization when the host grants it (e.g. /dev/kvm access), plain
+    // emulation otherwise. Cross-arch guests can only ever run TCG, which is
+    // also QEMU's default, so they get no flag.
+    if native {
+        if cfg!(target_os = "linux") {
+            cmd.args(["-accel", "kvm", "-accel", "tcg"]);
+        } else if cfg!(target_os = "macos") {
+            cmd.args(["-accel", "hvf", "-accel", "tcg"]);
+        }
+    }
+    cmd.arg("-m")
         .arg(cfg.memory.to_string())
         .args(["-nographic", "-kernel"])
         .arg(&cfg.kernel)
         .args(["-initrd"])
         .arg(&cfg.initrd)
         // rdinit=/sbin/init hands control to the firmware's init, which brings up
-        // networking and the ArkOS services.
-        .args(["-append", "console=ttyAMA0 rdinit=/sbin/init", "-netdev"])
+        // networking and the ArkOS services. arkos_env seeds the environment
+        // binding that the firmware burns into its OTP analog on first boot.
+        .args(["-append"])
+        .arg(format!(
+            "console={} rdinit=/sbin/init arkos_env={}",
+            arch.console(),
+            cfg.env
+        ))
+        .args(["-netdev"])
         .arg(format!(
             "user,id=net0,hostfwd=tcp:{}-:{GUEST_PORT}",
             cfg.host_addr
@@ -164,7 +255,7 @@ fn spawn_qemu(cfg: &Config) -> Child {
         ]);
 
     orphan::guard(cmd).spawn().unwrap_or_else(|e| {
-        eprintln!("failed to spawn qemu-system-aarch64: {e}");
+        eprintln!("failed to spawn {}: {e}", arch.qemu_binary());
         std::process::exit(1);
     })
 }
