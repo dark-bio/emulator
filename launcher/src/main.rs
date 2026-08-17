@@ -45,6 +45,11 @@ struct Config {
     #[arg(long, default_value = "disk.img")]
     disk: PathBuf,
 
+    /// Cloud environment the device gets bound to when its disk is first
+    /// created; ignored for existing disks (the binding is burnt in).
+    #[arg(long, default_value = "release", value_parser = ["develop", "staging", "release"])]
+    env: String,
+
     /// Host address that SLIRP forwards into the guest's port.
     #[arg(long, default_value = "127.0.0.1:18181")]
     host_addr: SocketAddr,
@@ -72,8 +77,8 @@ fn main() {
     // firmware built for the host's architecture, which is also the variant
     // that gets hardware acceleration.
     let arch = cfg.arch.unwrap_or_else(|| match std::env::consts::ARCH {
-        "aarch64" => GuestArch::Aarch64,
-        "x86_64" => GuestArch::X86_64,
+        "aarch64" => GuestArch::Arm64,
+        "x86_64" => GuestArch::Amd64,
         other => {
             eprintln!("no firmware exists for {other} hosts -- pass --arch explicitly");
             std::process::exit(1);
@@ -121,31 +126,32 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-/// CPU architecture of the firmware being booted. Selects the QEMU binary,
-/// machine model and serial console to boot with.
+/// CPU architecture of the firmware being booted, in the same docker-style
+/// vocabulary the firmware build names its artifacts with. Selects the QEMU
+/// binary, machine model and serial console to boot with.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum GuestArch {
-    #[value(name = "aarch64")]
-    Aarch64,
-    #[value(name = "x86_64")]
-    X86_64,
+    #[value(name = "arm64")]
+    Arm64,
+    #[value(name = "amd64")]
+    Amd64,
 }
 
 impl GuestArch {
-    /// Canonical name of the architecture, matching both the artifact name
-    /// suffix the firmware build emits and `std::env::consts::ARCH`.
-    fn name(self) -> &'static str {
+    /// Whether this architecture is the host's own, which decides if QEMU can
+    /// use hardware acceleration instead of pure emulation.
+    fn host(self) -> bool {
         match self {
-            Self::Aarch64 => "aarch64",
-            Self::X86_64 => "x86_64",
+            Self::Arm64 => std::env::consts::ARCH == "aarch64",
+            Self::Amd64 => std::env::consts::ARCH == "x86_64",
         }
     }
 
     /// QEMU system emulator that boots this architecture.
     fn qemu_binary(self) -> &'static str {
         match self {
-            Self::Aarch64 => "qemu-system-aarch64",
-            Self::X86_64 => "qemu-system-x86_64",
+            Self::Arm64 => "qemu-system-aarch64",
+            Self::Amd64 => "qemu-system-x86_64",
         }
     }
 
@@ -153,8 +159,8 @@ impl GuestArch {
     /// PL011 at ttyAMA0, the x86 q35 machine a 16550 at ttyS0.
     fn console(self) -> &'static str {
         match self {
-            Self::Aarch64 => "ttyAMA0",
-            Self::X86_64 => "ttyS0",
+            Self::Arm64 => "ttyAMA0",
+            Self::Amd64 => "ttyS0",
         }
     }
 }
@@ -191,7 +197,7 @@ fn ensure_disk(path: &Path) -> io::Result<()> {
 /// paravirt net + disk, host port 18181 forwarded into the guest. Spawned
 /// through `orphan::guard` so the child can't outlive the launcher.
 fn spawn_qemu(cfg: &Config, arch: GuestArch) -> Child {
-    let native = arch.name() == std::env::consts::ARCH;
+    let native = arch.host();
     let mut cmd = Command::new(arch.qemu_binary());
     // A native guest runs -cpu max (the host CPU under KVM/HVF, the maximal
     // emulated one under the TCG fallback; named foreign models are rejected
@@ -199,9 +205,9 @@ fn spawn_qemu(cfg: &Config, arch: GuestArch) -> Child {
     // accel fallback list). A cross-arch arm guest keeps cortex-a72 for
     // fidelity with the real device's SoC.
     match arch {
-        GuestArch::Aarch64 if native => cmd.args(["-M", "virt", "-cpu", "max"]),
-        GuestArch::Aarch64 => cmd.args(["-M", "virt", "-cpu", "cortex-a72"]),
-        GuestArch::X86_64 => cmd.args(["-M", "q35", "-cpu", "max"]),
+        GuestArch::Arm64 if native => cmd.args(["-M", "virt", "-cpu", "max"]),
+        GuestArch::Arm64 => cmd.args(["-M", "virt", "-cpu", "cortex-a72"]),
+        GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
     };
     // Repeated -accel flags form an ordered fallback list: hardware
     // virtualization when the host grants it (e.g. /dev/kvm access), plain
@@ -221,9 +227,14 @@ fn spawn_qemu(cfg: &Config, arch: GuestArch) -> Child {
         .args(["-initrd"])
         .arg(&cfg.initrd)
         // rdinit=/sbin/init hands control to the firmware's init, which brings up
-        // networking and the ArkOS services.
+        // networking and the ArkOS services. arkos_env seeds the environment
+        // binding that the firmware burns into its OTP analog on first boot.
         .args(["-append"])
-        .arg(format!("console={} rdinit=/sbin/init", arch.console()))
+        .arg(format!(
+            "console={} rdinit=/sbin/init arkos_env={}",
+            arch.console(),
+            cfg.env
+        ))
         .args(["-netdev"])
         .arg(format!(
             "user,id=net0,hostfwd=tcp:{}-:{GUEST_PORT}",

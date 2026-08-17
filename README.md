@@ -18,10 +18,11 @@ reset pin).
 ## Prerequisites
 
 All platforms also need a pair of ArkOS emulator firmware artifacts: a kernel
-image (`vmlinuz`) and a gzipped initramfs, built for either `aarch64` or
-`x86_64`. The launcher takes their paths via `--kernel` and `--initrd`, and
-their architecture via `--arch`, which defaults to the host's architecture and
-picks the matching QEMU system emulator.
+image (`<base>-kernel.<arch>`) and a gzipped initramfs (`<base>-initrd.<arch>.gz`),
+built for either `arm64` or `amd64` by the firmware repo's
+`./arkos.sh build-emulator`. The launcher takes their paths via `--kernel` and
+`--initrd`, and their architecture via `--arch`, which defaults to the host's
+architecture and picks the matching QEMU system emulator.
 
 When the guest architecture matches the host's, the launcher enables hardware
 virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
@@ -48,7 +49,9 @@ slower.
 ## Run
 
 ```sh
-cargo run --release -p launcher -- --kernel /path/to/vmlinuz --initrd /path/to/initramfs.gz
+cargo run --release -p launcher -- \
+  --kernel /path/to/<base>-kernel.<arch> \
+  --initrd /path/to/<base>-initrd.<arch>.gz
 ```
 
 The window shows the device face. The reset pin is a real button; the four
@@ -64,10 +67,11 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
 | flag | default | meaning |
 |---|---|---|
-| `--kernel` | *required* | path to the kernel image (`vmlinuz`) |
-| `--initrd` | *required* | path to the initramfs (`.gz`) |
-| `--arch` | host arch | CPU architecture of the firmware artifacts (`aarch64` or `x86_64`) |
+| `--kernel` | *required* | path to the kernel image (`<base>-kernel.<arch>`) |
+| `--initrd` | *required* | path to the initramfs (`<base>-initrd.<arch>.gz`) |
+| `--arch` | host arch | CPU architecture of the firmware artifacts (`arm64` or `amd64`) |
 | `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
+| `--env` | `release` | cloud environment the device is bound to when its disk is first created; ignored for existing disks (the binding is burnt in) |
 | `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
 
