@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# fetch-qemu-linux.sh: populate launcher/binaries/ and launcher/qemu-libs/
+# with a relocatable QEMU, for both CI and local development.
+#
+# Only the QEMU system emulator matching the build host's own architecture is
+# bundled, as the generic "qemu-system-guest" sidecar name (which real
+# qemu-system-* binary that is depends on the host). Bundling both guest
+# architectures would double the installer size for no benefit to most
+# users; a source build still gets both via a PATH-installed QEMU (see
+# main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
+# bundled.
+#
+# QEMU comes from apt, dynamically linked against the base system's glibc
+# plus a long tail of libraries (glib, pixman, gnutls, ...) that vary across
+# distros. This is the classic AppImage portability problem. This copies
+# every non-base-system dependency into launcher/qemu-libs/ (bundled as a
+# Tauri resource) and relies on LD_LIBRARY_PATH (set at spawn time by the
+# launcher, see main.rs's `apply_library_path`) rather than patching rpaths.
+# The ELF NEEDED entries `ldd` resolves here are bare sonames (e.g.
+# "libglib-2.0.so.0"), which the dynamic linker re-resolves against
+# LD_LIBRARY_PATH on every run, so no binary patching is required. glibc and
+# the loader itself are deliberately NOT bundled: they must match the host
+# kernel/loader exactly, so bundling them would make things less portable,
+# not more. Run this on an older-glibc runner (e.g. ubuntu-22.04): glibc is
+# forward-compatible, so a binary built against an old one keeps working on
+# newer ones, not the reverse.
+#
+# The x86_64 guest also needs its firmware/BIOS datadir: bios-256k.bin for
+# SeaBIOS, which the q35 machine model runs before a direct -kernel boot,
+# plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
+# default VGA device even with no display output. The exact set needed was
+# found by trial and error, and grew once tested from an isolated bundle
+# instead of a system install that could fall back to its real datadir. To
+# avoid repeating that, this copies every small file (<5MB) from QEMU's
+# datadir, excluding only the two ~64MB ARM UEFI blobs
+# (edk2-arm-{code,vars}.fd). Those are unneeded: the arm64 virt board boots
+# fine on a direct kernel boot with zero firmware files (confirmed
+# separately), and would otherwise dominate the bundle size. Everything
+# lands in the same libs_dir as the .so dependencies and is located via -L
+# (see main.rs's `spawn_qemu`); QEMU looks up specific filenames there and
+# ignores everything else, so co-locating it with unrelated files is
+# harmless. The arm64 host leg of this script never reaches this block.
+#
+# Run from the emulator repo root:
+#   .github/scripts/fetch-qemu-linux.sh
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+bin_dir="$repo_root/launcher/binaries"
+libs_dir="$repo_root/launcher/qemu-libs"
+mkdir -p "$bin_dir" "$libs_dir"
+
+triple="$(rustc -vV | sed -n 's/^host: //p')"
+if [ -z "$triple" ]; then
+  echo "could not determine host target triple via 'rustc -vV'" >&2
+  exit 1
+fi
+
+# Libraries assumed present, at a compatible ABI, on any glibc Linux host.
+# Bundling these would pin the app to this build machine's exact versions,
+# the opposite of the goal.
+is_base_system_lib() {
+  case "$(basename "$1")" in
+    linux-vdso.so.1|ld-linux-x86-64.so.2|ld-linux-aarch64.so.1| \
+    libc.so.6|libm.so.6|libpthread.so.0|libdl.so.2|librt.so.1| \
+    libresolv.so.2|libutil.so.1|libgcc_s.so.1)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+# Copies $1's non-base-system shared library dependencies into libs_dir
+# (skips ones already copied).
+collect_deps() {
+  local bin="$1"
+  ldd "$bin" | awk '{print $1, $3}' | while read -r name path; do
+    [ -n "${path:-}" ] && [ "$path" != "not" ] || continue
+    dest="$libs_dir/$(basename "$name")"
+    is_base_system_lib "$name" && continue
+    [ -e "$dest" ] || cp -L "$path" "$dest"
+  done
+}
+
+case "$triple" in
+  aarch64-*) native_qemu=qemu-system-aarch64 ;;
+  x86_64-*)  native_qemu=qemu-system-x86_64 ;;
+  *)
+    echo "unsupported host architecture in triple $triple" >&2
+    exit 1 ;;
+esac
+
+declare -A binaries=(
+  [qemu-system-guest]="$native_qemu"
+  [qemu-img]=qemu-img
+)
+
+for name in "${!binaries[@]}"; do
+  src="$(command -v "${binaries[$name]}")"
+  cp -L "$src" "$bin_dir/${name}-${triple}"
+  collect_deps "$src"
+done
+
+if [ "$native_qemu" = "qemu-system-x86_64" ]; then
+  qemu_bin_dir="$(dirname "$(command -v qemu-system-x86_64)")"
+  qemu_share="$qemu_bin_dir/../share/qemu"
+  [ -d "$qemu_share" ] || qemu_share="$(find /usr/share /usr/local/share -maxdepth 1 -iname qemu -type d 2>/dev/null | head -1)"
+  if [ -z "${qemu_share:-}" ] || [ ! -d "$qemu_share" ]; then
+    echo "could not locate QEMU's firmware/BIOS datadir (needed for the x86_64 guest)" >&2
+    exit 1
+  fi
+  find "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
+    -exec cp -L {} "$libs_dir/" \;
+fi
+
+# Bundled libraries can depend on each other, so keep walking until a pass
+# copies nothing new.
+prev_count=-1
+cur_count="$(find "$libs_dir" -type f | wc -l)"
+while [ "$cur_count" -ne "$prev_count" ]; do
+  prev_count="$cur_count"
+  for lib in "$libs_dir"/*.so*; do
+    [ -f "$lib" ] && collect_deps "$lib"
+  done
+  cur_count="$(find "$libs_dir" -type f | wc -l)"
+done
+
+echo "populated $bin_dir (triple $triple) and $libs_dir:"
+ls -la "$bin_dir" "$libs_dir"
