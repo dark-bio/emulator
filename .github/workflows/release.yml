@@ -25,11 +25,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             bundles: dmg
-          - os: macos-13
+          - os: macos-26-intel
             bundles: dmg
-          - os: windows-latest
+          - os: windows-2022
             bundles: nsis
           - os: ubuntu-22.04
             bundles: deb,appimage
@@ -95,7 +95,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
