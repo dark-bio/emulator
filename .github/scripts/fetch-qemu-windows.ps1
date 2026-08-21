@@ -83,11 +83,22 @@ Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
 # present, unneeded since the arm64 virt board boots fine on a direct kernel
 # boot with zero firmware files (confirmed separately) and would otherwise
 # dominate the bundle size.
-Get-ChildItem $installDir -Recurse -Include "*.bin", "*.rom", "*.fd", "*.dtb" |
-    Where-Object { $_.Length -lt 5MB } |
-    ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force
-    }
+#
+# Filtering by extension after an unrestricted -Recurse, rather than via
+# -Include, is deliberate: Get-ChildItem -Recurse -Include is unreliable
+# unless -Path itself ends in a wildcard, and silently matching nothing
+# here is exactly how this went wrong the first time: the app installed
+# and started fine, then failed at boot with "could not load PC BIOS
+# 'bios-256k.bin'" since the file was never actually bundled.
+$firmwareExtensions = ".bin", ".rom", ".fd", ".dtb"
+$firmwareFiles = Get-ChildItem $installDir -Recurse -File |
+    Where-Object { $_.Extension -in $firmwareExtensions -and $_.Length -lt 5MB }
+foreach ($file in $firmwareFiles) {
+    Copy-Item $file.FullName (Join-Path $libsDir $file.Name) -Force
+}
+if ($nativeQemu -eq "qemu-system-x86_64.exe" -and -not ($firmwareFiles | Where-Object { $_.Name -eq "bios-256k.bin" })) {
+    throw "bios-256k.bin not found under $installDir (needed for the x86_64 guest); did the QEMU installer layout change?"
+}
 
 Write-Host "populated $binDir (triple $triple) and $libsDir"
 Get-ChildItem $binDir, $libsDir | Format-Table Name, Length

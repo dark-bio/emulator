@@ -96,7 +96,15 @@ declare -A binaries=(
 )
 
 for name in "${!binaries[@]}"; do
-  src="$(command -v "${binaries[$name]}")"
+  bin="${binaries[$name]}"
+  # `command -v` prints nothing and returns non-zero on failure; caught
+  # explicitly here so a missing binary reports a clear cause instead of
+  # `set -e` killing the script with no output.
+  src="$(command -v "$bin" || true)"
+  if [ -z "$src" ]; then
+    echo "$bin not found on PATH (needed for the $name sidecar); is qemu installed?" >&2
+    exit 1
+  fi
   cp -L "$src" "$bin_dir/${name}-${triple}"
   collect_deps "$src"
 done
