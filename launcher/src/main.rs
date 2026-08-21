@@ -280,12 +280,33 @@ fn resolve_sidecar(name: &str) -> Option<PathBuf> {
 /// `.github/scripts/fetch-qemu-{linux,macos,windows}`), if present. `None`
 /// in a local dev build with no bundled libs, where a system-installed QEMU
 /// already has its dependencies satisfied normally.
+///
+/// Logs its resolution outcome unconditionally: a missing or empty
+/// directory here surfaces later as an opaque QEMU firmware/library error
+/// with no indication of where to look, so this is the one place that can
+/// actually say why.
 fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
-    let dir = app
-        .path()
-        .resolve("qemu-libs", BaseDirectory::Resource)
-        .ok()?;
-    dir.exists().then_some(dir)
+    let dir = match app.path().resolve("qemu-libs", BaseDirectory::Resource) {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("[launcher] could not resolve qemu-libs resource directory: {e}");
+            return None;
+        }
+    };
+    if !dir.exists() {
+        eprintln!(
+            "[launcher] resolved qemu-libs directory {} does not exist; \
+             QEMU will fall back to its own default search paths",
+            dir.display()
+        );
+        return None;
+    }
+    let count = std::fs::read_dir(&dir).map(|it| it.count()).unwrap_or(0);
+    eprintln!(
+        "[launcher] using bundled qemu-libs at {} ({count} files)",
+        dir.display()
+    );
+    Some(dir)
 }
 
 /// Name of the platform's dynamic-linker library search-path environment
@@ -383,10 +404,23 @@ fn spawn_qemu(
     // explicit cross-arch --arch request always falls through to a
     // PATH-installed QEMU, which a packaged build won't have.
     let mut cmd = match native.then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
-        Some(bundled) => Command::new(bundled),
-        None => Command::new(arch.qemu_binary()),
+        Some(bundled) => {
+            eprintln!(
+                "[launcher] using bundled QEMU sidecar at {}",
+                bundled.display()
+            );
+            Command::new(bundled)
+        }
+        None => {
+            eprintln!(
+                "[launcher] no bundled QEMU sidecar found, falling back to {} on PATH",
+                arch.qemu_binary()
+            );
+            Command::new(arch.qemu_binary())
+        }
     };
     if let Some(libs) = qemu_libs {
+        eprintln!("[launcher] passing -L {} to QEMU", libs.display());
         cmd.env(library_path_var(), prepend_library_path(libs));
         // -L points QEMU at its firmware/BIOS/keymap datadir (e.g.
         // bios-256k.bin, which the q35 machine model needs even for a
