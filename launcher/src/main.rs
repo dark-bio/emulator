@@ -408,6 +408,25 @@ fn ensure_disk(
     Ok(())
 }
 
+/// On Windows release builds, suppresses the console window Windows would
+/// otherwise auto-allocate for a console-subsystem child process: QEMU's
+/// official builds are console apps, and the launcher itself has no console
+/// of its own once packaged (see the `windows_subsystem` attribute at the
+/// top of this file), which is exactly the situation that triggers it. A
+/// no-op in dev builds, where the terminal already running `cargo run`
+/// gives QEMU's `-serial stdio` output somewhere to go, and a no-op on
+/// every other platform, so it's safe to call unconditionally.
+#[cfg(windows)]
+fn suppress_child_console(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    if !cfg!(debug_assertions) {
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+}
+
+#[cfg(not(windows))]
+fn suppress_child_console(_cmd: &mut Command) {}
+
 /// Spawn the guest arch's QEMU system emulator configured for the emulator:
 /// paravirt net + disk, host port 18181 forwarded into the guest. Spawned
 /// through `orphan::guard` so the child can't outlive the launcher.
@@ -444,6 +463,7 @@ fn spawn_qemu(
             Command::new(arch.qemu_binary())
         }
     };
+    suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
         eprintln!("[launcher] passing -L {} to QEMU", libs.display());
         cmd.env(library_path_var(), prepend_library_path(libs));
