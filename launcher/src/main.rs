@@ -195,6 +195,20 @@ impl GuestArch {
     }
 }
 
+/// Strips Windows' `\\?\` extended-length-path ("verbatim") prefix, if
+/// present. Tauri's resource-path resolver canonicalizes paths on Windows,
+/// which adds this prefix; QEMU's mingw-w64 build (like a lot of software
+/// not written against native Win32 APIs) doesn't understand it and fails
+/// to open files under it even though the path is otherwise correct. A
+/// no-op on every other platform and on any path that never had the
+/// prefix, so it's safe to apply unconditionally.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    match path.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Resolve the kernel/initrd paths to boot. Explicit --kernel/--initrd flags
 /// take priority (and are the only option in a local dev build, since
 /// `cargo run` has no bundled resource directory); otherwise falls back to
@@ -211,12 +225,14 @@ fn resolve_firmware(
     }
 
     let dir = arch.firmware_dir();
-    let kernel = app
-        .path()
-        .resolve(format!("firmware/{dir}/kernel"), BaseDirectory::Resource)?;
-    let initrd = app
-        .path()
-        .resolve(format!("firmware/{dir}/initrd.gz"), BaseDirectory::Resource)?;
+    let kernel = strip_verbatim_prefix(
+        &app.path()
+            .resolve(format!("firmware/{dir}/kernel"), BaseDirectory::Resource)?,
+    );
+    let initrd = strip_verbatim_prefix(
+        &app.path()
+            .resolve(format!("firmware/{dir}/initrd.gz"), BaseDirectory::Resource)?,
+    );
     for (label, path) in [("kernel", &kernel), ("initrd", &initrd)] {
         if !path.exists() {
             return Err(format!(
@@ -287,7 +303,7 @@ fn resolve_sidecar(name: &str) -> Option<PathBuf> {
 /// actually say why.
 fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
     let dir = match app.path().resolve("qemu-libs", BaseDirectory::Resource) {
-        Ok(dir) => dir,
+        Ok(dir) => strip_verbatim_prefix(&dir),
         Err(e) => {
             eprintln!("[launcher] could not resolve qemu-libs resource directory: {e}");
             return None;
