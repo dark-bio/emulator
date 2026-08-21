@@ -17,6 +17,15 @@
 // development fall back to --kernel/--initrd/QEMU-on-PATH, where no bundle
 // exists or the bundled arch doesn't match what was asked for.
 
+// Release builds link as a GUI app on Windows, so launching it (double-click,
+// Start Menu) doesn't pop up a console window alongside the UI. Debug builds
+// keep the default console subsystem so `cargo run`'s eprintln! diagnostics
+// (see `resolve_qemu_libs`/`spawn_qemu`) still show up in the terminal;
+// running a release build from an existing terminal still works too, since
+// this only stops Windows from allocating a *new* console, not from
+// inheriting stdio handles the process already has.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod orphan;
 
 use std::error::Error;
