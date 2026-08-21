@@ -17,12 +17,19 @@ reset pin).
 
 ## Downloading a release
 
-The installers attached to [GitHub Releases](../../releases) ship with QEMU
+The artifacts attached to [GitHub Releases](../../releases) ship with QEMU
 and the ArkOS firmware bundled in for that platform's own host architecture
 only. There's nothing else to install and no flags to pass, but also no
 support for emulating a guest architecture other than the host's (that's a
 source-build, developer-only need; see [Prerequisites](#prerequisites)).
-Download the one for your platform, install it, and run "Ark Emulator".
+
+Each platform has both an installed and a no-install option:
+
+| Platform | Installed | No-install |
+|---|---|---|
+| Linux | `.deb` | `.AppImage`: mark it executable and run it |
+| macOS | `.dmg` | `.app.zip`: unzip, the `.app` runs from anywhere |
+| Windows | NSIS `.exe` installer | `...-portable.zip`: unzip, run `Ark Emulator.exe` from inside |
 
 They're currently unsigned (no Apple Developer ID / Windows code-signing
 certificate yet), so your OS will flag them on first run:

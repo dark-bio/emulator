@@ -8,6 +8,10 @@ name: release
 # standalone with nothing to install, and stay smaller. The firmware fetch
 # runs per job rather than once shared, since which architecture's release
 # assets it needs now depends on each job's own host.
+#
+# Also produces a no-install artifact per platform: the AppImage on Linux,
+# the raw .app on macOS, and a hand-assembled portable .zip on Windows
+# (NSIS has no portable mode; Tauri gives no other way to get one).
 on:
   push:
     tags:
@@ -26,9 +30,9 @@ jobs:
       matrix:
         include:
           - os: macos-26
-            bundles: dmg
+            bundles: dmg,app
           - os: macos-26-intel
-            bundles: dmg
+            bundles: dmg,app
           - os: windows-2022
             bundles: nsis
           - os: ubuntu-22.04
@@ -83,16 +87,68 @@ jobs:
       - name: Build
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
+      - name: Zip portable macOS app
+        # ditto (not zip -r) is Apple's recommended way to archive a .app:
+        # plain zip can mangle extended attributes and resource forks.
+        # --keepParent so extracting drops a plain "Ark Emulator.app", not
+        # its contents loose in the current directory.
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "target/release/bundle/macos/Ark-Emulator-${{ matrix.os }}.app.zip"
+
+      - name: Build portable Windows zip
+        # Tauri's own resource staging only happens inside the NSIS
+        # installer's payload, not as a loose directory on disk, so this
+        # reassembles the same flat layout by hand: main exe + sidecar exes
+        # + qemu-libs/firmware all as siblings, which is what a real install
+        # produces too (confirmed by the launcher's own runtime logging) and
+        # what BaseDirectory::Resource resolves relative to current_exe()
+        # regardless of whether the app was installed or just unzipped.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $portableDir = "target/release/portable/Ark Emulator"
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item "target/release/launcher.exe" (Join-Path $portableDir "Ark Emulator.exe")
+          Copy-Item "target/release/qemu-system-guest.exe" $portableDir
+          Copy-Item "target/release/qemu-img.exe" $portableDir
+          Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
+          Copy-Item "launcher/firmware" (Join-Path $portableDir "firmware") -Recurse
+          Compress-Archive -Path $portableDir `
+            -DestinationPath "target/release/portable/Ark-Emulator-${{ matrix.os }}-portable.zip"
+
+      - name: Stage artifacts
+        # actions/upload-artifact computes the least common ancestor across
+        # every line of a multi-pattern `path:` and preserves the directory
+        # structure below it, so pointing it straight at bundle/dmg/,
+        # bundle/deb/, etc. produces an artifact with deb/ and appimage/ as
+        # actual subdirectories rather than flat files -- gh release create
+        # then tries to upload a directory as an asset and fails. Staging
+        # everything flat here first sidesteps that entirely: nullglob so a
+        # pattern that doesn't apply to this OS (e.g. *.dmg on Linux) just
+        # contributes nothing instead of erroring under -e.
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir -p dist
+          for f in target/release/bundle/dmg/*.dmg \
+                   target/release/bundle/macos/*.app.zip \
+                   target/release/bundle/nsis/*.exe \
+                   target/release/portable/*.zip \
+                   target/release/bundle/deb/*.deb \
+                   target/release/bundle/appimage/*.AppImage; do
+            cp "$f" dist/
+          done
+          ls -la dist/
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.os }}
-          path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
-          if-no-files-found: ignore
+          path: dist/*
+          if-no-files-found: error
 
   release:
     needs: build
