@@ -90,13 +90,11 @@ case "$triple" in
     exit 1 ;;
 esac
 
-declare -A binaries=(
-  [qemu-system-guest]="$native_qemu"
-  [qemu-img]=qemu-img
-)
-
-for name in "${!binaries[@]}"; do
-  bin="${binaries[$name]}"
+# Not an associative array: macOS runners resolve plain `bash` to Apple's
+# pre-installed bash 3.2 (frozen pre-GPLv3), which predates `declare -A`
+# (bash 4.0+). Two explicit calls instead.
+fetch_binary() {
+  local name="$1" bin="$2" src
   # `command -v` prints nothing and returns non-zero on failure; caught
   # explicitly here so a missing binary reports a clear cause instead of
   # `set -e` killing the script with no output.
@@ -107,7 +105,10 @@ for name in "${!binaries[@]}"; do
   fi
   cp -L "$src" "$bin_dir/${name}-${triple}"
   collect_deps "$src"
-done
+}
+
+fetch_binary "qemu-system-guest" "$native_qemu"
+fetch_binary "qemu-img" "qemu-img"
 
 if [ "$native_qemu" = "qemu-system-x86_64" ]; then
   qemu_bin_dir="$(dirname "$(command -v qemu-system-x86_64)")"
