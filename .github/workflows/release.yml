@@ -18,9 +18,9 @@ on:
       - "v*.*.*"
 
 env:
-  # Not secret: a bare version number doesn't reveal which repo it names.
-  # See .github/scripts/fetch-firmware.sh for why the repo path itself
-  # (FIRMWARE_REPO, below) comes from a secret instead.
+  # Firmware images are published to the public dark-bio/emulator-images
+  # repo (see fetch-firmware.sh); bumping the bundled firmware is just
+  # updating this one value.
   FIRMWARE_TAG: "v0.11.4"
 
 jobs:
@@ -82,10 +82,12 @@ jobs:
         # option: on Windows it runs via the Git for Windows bash already on
         # the runner, the same interpreter fetch-firmware.sh needs, so one
         # step covers all three OSes without a pwsh wrapper subprocess.
+        #
+        # dark-bio/emulator-images is public, so no secret is needed here;
+        # the ambient GITHUB_TOKEN is only for the API rate limit.
         shell: bash
         env:
-          FIRMWARE_REPO: ${{ secrets.FIRMWARE_REPO }}
-          GH_TOKEN: ${{ secrets.FIRMWARE_RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: .github/scripts/fetch-firmware.sh
 
       - name: Build
@@ -132,7 +134,7 @@ jobs:
         # every line of a multi-pattern `path:` and preserves the directory
         # structure below it, so pointing it straight at bundle/dmg/,
         # bundle/deb/, etc. produces an artifact with deb/ and appimage/ as
-        # actual subdirectories rather than flat files -- gh release create
+        # actual subdirectories rather than flat files. gh release create
         # then tries to upload a directory as an asset and fails. Staging
         # everything flat here first sidesteps that entirely.
         #

@@ -5,12 +5,13 @@
 # those scripts. Cross-arch guests aren't supported by a packaged installer;
 # a source build passes its own --kernel/--initrd instead.
 #
-# The firmware repo is private (unlike this one), so both its path and a
-# token with read access to it come from Actions secrets rather than being
-# named here: see .github/workflows/release.yml. FIRMWARE_TAG is not secret
-# (a bare version number doesn't reveal which repo it's from), but is still
-# mandatory and has no default here. The pinned version belongs solely in
-# the workflow's env, not duplicated into this script.
+# Firmware images are published to dark-bio/emulator-images, a public repo
+# dedicated to that purpose, so no token is needed to read its releases (gh
+# still works better authenticated, for the API rate limit; the workflow
+# passes the ambient GITHUB_TOKEN for that, nothing needs to be created or
+# configured for it). FIRMWARE_TAG is still mandatory and has no default
+# here, so the pinned version lives solely in the workflow's env, not
+# duplicated into this script.
 #
 # Asset names embed the firmware's version and build commit
 # (arkos-<version>-<commit>-emulator-kernel.<arch>), neither of which this
@@ -19,11 +20,10 @@
 # FIRMWARE_TAG in the workflow; nothing here needs to change.
 #
 # Run from the emulator repo root:
-#   FIRMWARE_REPO=<owner>/<repo> FIRMWARE_TAG=<tag> GH_TOKEN=<token> \
-#     .github/scripts/fetch-firmware.sh
+#   FIRMWARE_TAG=<tag> .github/scripts/fetch-firmware.sh
 set -euo pipefail
 
-: "${FIRMWARE_REPO:?set FIRMWARE_REPO to the firmware release repo, e.g. owner/repo}"
+firmware_repo="dark-bio/emulator-images"
 : "${FIRMWARE_TAG:?set FIRMWARE_TAG to the firmware release tag to pin, e.g. v0.11.4}"
 
 if ! command -v gh >/dev/null; then
@@ -50,7 +50,7 @@ trap 'rm -rf "$tmp"' EXIT
 kernel_pattern="arkos-*-emulator-kernel.${arch}"
 initrd_pattern="arkos-*-emulator-initrd.${arch}.gz"
 
-gh release download "$FIRMWARE_TAG" --repo "$FIRMWARE_REPO" \
+gh release download "$FIRMWARE_TAG" --repo "$firmware_repo" \
   --pattern "$kernel_pattern" \
   --pattern "$initrd_pattern" \
   --dir "$tmp"
