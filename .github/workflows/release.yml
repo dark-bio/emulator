@@ -163,6 +163,24 @@ jobs:
 
           ls -la dist/
 
+      - name: Generate checksums
+        # Matches the convention already used for the bundled firmware
+        # images (see fetch-firmware.sh's verification): a same-named
+        # .sha256 file per asset, so anyone downloading a release can verify
+        # it themselves. macOS has no sha256sum by default (shasum -a 256
+        # instead); Linux and Git for Windows' bundled coreutils both do.
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            if command -v sha256sum >/dev/null; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
+          ls -la
+
       - name: Upload installers
         uses: actions/upload-artifact@v6
         with:
