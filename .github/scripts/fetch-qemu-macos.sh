@@ -21,16 +21,6 @@
 # main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
 # bundled.
 #
-# The native guest needs -accel hvf (Hypervisor.framework), which only
-# grants access to a process carrying the com.apple.security.hypervisor
-# entitlement. Homebrew's qemu formula ad-hoc-signs its binaries with that
-# entitlement already, but the signature doesn't survive intact once the
-# binary is copied out of the Cellar and run against our own relocated
-# dylibs via DYLD_LIBRARY_PATH (confirmed: -accel hvf otherwise fails with a
-# generic HV_ERROR). Ad-hoc re-signing it ourselves, after copying, restores
-# it; no paid Apple Developer account is needed for an ad-hoc signature
-# ("-s -"). qemu-img never touches HVF, so it doesn't need this.
-#
 # The x86_64 guest also needs its firmware/BIOS datadir (bios-256k.bin for
 # SeaBIOS, which the q35 machine model runs before a direct -kernel boot;
 # plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
@@ -119,20 +109,6 @@ fetch_binary() {
 
 fetch_binary "qemu-system-guest" "$native_qemu"
 fetch_binary "qemu-img" "qemu-img"
-
-entitlements="$(mktemp)"
-trap 'rm -f "$entitlements"' EXIT
-cat > "$entitlements" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.hypervisor</key>
-    <true/>
-</dict>
-</plist>
-EOF
-codesign --force --sign - --entitlements "$entitlements" "$bin_dir/qemu-system-guest-${triple}"
 
 if [ "$native_qemu" = "qemu-system-x86_64" ]; then
   # Locate the datadir by finding the one file we actually need, rather than
