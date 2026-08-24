@@ -37,14 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "licenseFile": "../LICENSE",
-    "externalBin": [
-      "binaries/qemu-system-guest",
-      "binaries/qemu-img"
-    ],
-    "resources": [
-      "firmware/**/*",
-      "qemu-libs/**/*"
-    ]
+    "licenseFile": "../LICENSE"
   }
 }

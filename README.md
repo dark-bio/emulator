@@ -50,39 +50,20 @@ certificate yet), so your OS will flag them on first run:
 
 ### Prerequisites
 
-Building from source needs the same things a released installer bundles for
-you: `qemu-img`, a QEMU system emulator, and a pair of ArkOS emulator
-firmware artifacts. A released installer only ever bundles the host-native
-guest architecture, to keep size down. A source build is not limited this
-way: with QEMU installed as below, both `qemu-system-aarch64` and
-`qemu-system-x86_64` are available on `PATH`, so it can still emulate either
-guest regardless of host.
+A source build uses whatever QEMU you have installed, and takes the firmware
+as flags. Nothing is bundled, so unlike a released installer it can emulate
+either guest architecture regardless of host.
 
-**QEMU**: `cargo build`/`cargo run`/`cargo check` all require
-`launcher/binaries/` to already be populated (Tauri validates
-`bundle.externalBin` at build time, not just at packaging time), so before
-your first build, run the script for your platform once from the repo root:
-
-```sh
-.github/scripts/fetch-qemu-linux.sh     # Linux
-.github/scripts/fetch-qemu-macos.sh     # macOS
-pwsh .github/scripts/fetch-qemu-windows.ps1   # Windows
-```
-
-These are the same scripts CI uses to build released installers; run
-standalone they populate `launcher/binaries/` and `launcher/qemu-libs/` from
-whatever QEMU is on your system (installed as below), which is enough for
-local development. `qemu-img` comes along with either QEMU install:
+**QEMU**, which also provides `qemu-img`:
 
 - **Linux**: Arch: `pacman -S qemu-system-aarch64 qemu-system-x86 qemu-img`; Debian/Ubuntu: `apt install qemu-system-arm qemu-system-x86 qemu-utils`. Also needs `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
-- **macOS**: `brew install qemu` (ships both `qemu-system-aarch64` and `qemu-system-x86_64`, plus `qemu-img`). WKWebView ships with the OS; nothing extra needed.
-- **Windows**: the official Windows installer (ships both `qemu-system-aarch64` and `qemu-system-x86_64`, plus `qemu-img`). WebView2 runtime is preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
+- **macOS**: `brew install qemu`. WKWebView ships with the OS; nothing extra needed.
+- **Windows**: the official Windows installer. WebView2 runtime is preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
 
 **Firmware**: a kernel image (`<base>-kernel.<arch>`) and a gzipped initramfs
 (`<base>-initrd.<arch>.gz`), built for either `arm64` or `amd64` by the
 firmware repo's own build tooling. Pass their paths via `--kernel` and
-`--initrd` (see [Run](#run)): a local build has no bundled firmware to fall
-back to, since `launcher/firmware/` is only populated by CI.
+`--initrd` (see [Run](#run)).
 
 When the guest architecture matches the host's, the launcher enables hardware
 virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
@@ -127,6 +108,7 @@ Run with `--help` for the full list.
 |---|---|
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
-| `.github/scripts/` | Populate `launcher/binaries/`, `launcher/qemu-libs/`, and `launcher/firmware/` (all gitignored) with a relocatable, host-arch-only QEMU and the pinned firmware release; used by CI and locally (see [Prerequisites](#prerequisites)). |
+| `launcher/tauri.release.conf.json` | Adds the bundled QEMU and firmware to the base Tauri config. Applied by CI only, so a source build stays free of them. |
+| `.github/scripts/` | CI-only: gather a relocatable, host-arch QEMU and the pinned firmware release for packaging. |
 | `.github/workflows/release.yml` | Tag-triggered CI: builds macOS/Windows/Linux installers and attaches them to a GitHub Release. |
 

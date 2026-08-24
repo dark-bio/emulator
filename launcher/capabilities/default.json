@@ -1,23 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0/capability",
   "identifier": "default",
-  "description": "Capabilities granted to the emulator window: dragging via data-tauri-drag-region, the Escape-to-close handler, and running the bundled qemu-img sidecar to allocate the disk image.",
+  "description": "Capabilities granted to the emulator window: dragging via data-tauri-drag-region and the Escape-to-close handler.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-close",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/qemu-img",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "core:window:allow-close"
   ]
 }

@@ -91,7 +91,13 @@ jobs:
         run: .github/scripts/fetch-firmware.sh
 
       - name: Build
-        run: cargo tauri build --bundles ${{ matrix.bundles }}
+        # tauri.release.conf.json adds the bundled QEMU/firmware to the base
+        # config (JSON merge patch, so it only adds those keys). They're kept
+        # out of tauri.conf.json because tauri-build validates externalBin
+        # paths and resource globs on every cargo invocation, which would
+        # make a plain `cargo run` from a fresh clone fail until the fetch
+        # scripts had been run.
+        run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
       - name: Zip portable macOS app
         # ditto (not zip -r) is Apple's recommended way to archive a .app:

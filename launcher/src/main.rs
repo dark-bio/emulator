@@ -36,7 +36,6 @@ use std::thread;
 
 use clap::Parser;
 use tauri::{path::BaseDirectory, Manager};
-use tauri_plugin_shell::ShellExt;
 
 /// The port the firmware uses to communicate with the host.
 const GUEST_PORT: u16 = 18181;
@@ -106,7 +105,6 @@ fn main() {
     // assuming a fixed port.
     let hw_addr = format!("window.__HW_ADDR__ = {:?};", cfg.host_addr.to_string());
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("hw-addr")
                 .js_init_script(hw_addr)
@@ -117,7 +115,7 @@ fn main() {
             let qemu_libs = resolve_qemu_libs(app);
             let disk = resolve_disk_path(app, &cfg)?;
 
-            if let Err(e) = ensure_disk(app, &disk, qemu_libs.as_deref()) {
+            if let Err(e) = ensure_disk(&disk, qemu_libs.as_deref()) {
                 eprintln!(
                     "[launcher] failed to prepare disk image at {}: {e}",
                     disk.display()
@@ -278,12 +276,11 @@ fn resolve_disk_path(app: &tauri::App, cfg: &Config) -> Result<PathBuf, Box<dyn 
 /// `qemu-system-*` binary that is depends on the build host.
 const QEMU_SIDECAR: &str = "qemu-system-guest";
 
-/// Resolve a bundled sidecar binary next to the launcher's own executable.
-/// Any `cargo build` (including plain `cargo run`/`cargo check`, not just
-/// the full `cargo tauri build` bundler) copies `externalBin` entries there
-/// automatically once `launcher/binaries/` is populated (see README).
-/// Returns `None` only if that directory was never populated, where callers
-/// fall back to a bare `PATH` lookup.
+/// Resolve a bundled sidecar binary next to the launcher's own executable,
+/// where a packaged build's `externalBin` entries land. Returns `None` for a
+/// plain source build, which declares no `externalBin` at all (see
+/// `tauri.release.conf.json`) and whose callers fall back to a `PATH`
+/// lookup, using whatever QEMU the developer already has installed.
 fn resolve_sidecar(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent()?.to_path_buf();
@@ -303,15 +300,14 @@ fn resolve_sidecar(name: &str) -> Option<PathBuf> {
 }
 
 /// Resolve the bundled directory of QEMU's shared library dependencies and
-/// firmware/BIOS datadir files (populated by
-/// `.github/scripts/fetch-qemu-{linux,macos,windows}`), if present. `None`
-/// in a local dev build with no bundled libs, where a system-installed QEMU
-/// already has its dependencies satisfied normally.
+/// firmware/BIOS datadir files, if present. `None` for a source build, where
+/// the system-installed QEMU already knows where its own libraries and
+/// firmware live.
 ///
-/// Logs its resolution outcome unconditionally: a missing or empty
-/// directory here surfaces later as an opaque QEMU firmware/library error
-/// with no indication of where to look, so this is the one place that can
-/// actually say why.
+/// Logs its resolution outcome unconditionally: pointing a bundled QEMU at
+/// the wrong directory surfaces later as an opaque library or firmware
+/// error, with no indication of where to look, so this is the one place
+/// that can actually say what it picked.
 fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
     let dir = match app.path().resolve("qemu-libs", BaseDirectory::Resource) {
         Ok(dir) => strip_verbatim_prefix(&dir),
@@ -321,11 +317,7 @@ fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
         }
     };
     if !dir.exists() {
-        eprintln!(
-            "[launcher] resolved qemu-libs directory {} does not exist; \
-             QEMU will fall back to its own default search paths",
-            dir.display()
-        );
+        eprintln!("[launcher] no bundled qemu-libs, using QEMU's own search paths");
         return None;
     }
     let count = std::fs::read_dir(&dir).map(|it| it.count()).unwrap_or(0);
@@ -370,11 +362,7 @@ const DISK_BYTES: u64 = 127_731_564_544;
 
 /// Lazily creates the backing qcow2 disk image if missing. Idempotent; to reset
 /// device state, delete the file and re-launch.
-fn ensure_disk(
-    app: &tauri::App,
-    path: &Path,
-    qemu_libs: Option<&Path>,
-) -> Result<(), Box<dyn Error>> {
+fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<(), Box<dyn Error>> {
     if path.exists() {
         return Ok(());
     }
@@ -383,21 +371,19 @@ fn ensure_disk(
     // set_len would zero-fill the whole file): it starts at a few hundred KB and
     // grows as the guest writes. Delegated to qemu-img, which ships with QEMU,
     // rather than hand-writing the format. The bare byte count is read as bytes.
-    //
-    // This is a one-shot call (unlike the long-lived qemu-system-* process),
-    // so it goes through the real tauri-plugin-shell sidecar API rather than
-    // `resolve_sidecar`; the plugin resolves the bundled binary in a packaged
-    // build and falls back to `qemu-img` on PATH otherwise.
-    let mut sidecar = app
-        .shell()
-        .sidecar("qemu-img")?
-        .args(["create", "-f", "qcow2"])
-        .arg(path.display().to_string())
-        .arg(DISK_BYTES.to_string());
+    let mut cmd = match resolve_sidecar("qemu-img") {
+        Some(bundled) => Command::new(bundled),
+        None => Command::new("qemu-img"),
+    };
+    suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
-        sidecar = sidecar.env(library_path_var(), prepend_library_path(libs));
+        cmd.env(library_path_var(), prepend_library_path(libs));
     }
-    let output = tauri::async_runtime::block_on(sidecar.output())?;
+    let output = cmd
+        .args(["create", "-f", "qcow2"])
+        .arg(path)
+        .arg(DISK_BYTES.to_string())
+        .output()?;
     if !output.status.success() {
         return Err(format!(
             "qemu-img create failed ({:?}); is qemu-img bundled or installed and on PATH?\nstdout: {}\nstderr: {}",
