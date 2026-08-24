@@ -2,12 +2,7 @@ target/
 launcher/gen/schemas/
 disk.img
 
-# Bundled QEMU sidecars/libs and firmware, fetched by .github/scripts/ (see
-# README); never checked in. The .gitkeep placeholders are kept so the
-# tauri.conf.json `bundle.resources` globs still match on a fresh clone
-# before those scripts have run.
+# Populated by .github/scripts/fetch-*; never checked in.
 launcher/binaries/
-launcher/firmware/*
-!launcher/firmware/.gitkeep
-launcher/qemu-libs/*
-!launcher/qemu-libs/.gitkeep
+launcher/firmware/
+launcher/qemu-libs/
