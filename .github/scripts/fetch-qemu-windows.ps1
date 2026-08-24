@@ -7,7 +7,7 @@
 # fetch, silent-install, and copy. DLLs go into launcher/qemu-libs/ (bundled
 # as a Tauri resource, same as the other two platforms) rather than next to
 # the exes, and the launcher prepends that directory onto PATH before
-# spawning (see main.rs's `apply_library_path`), which is how Windows'
+# spawning (see main.rs's `prepend_library_path`), which is how Windows'
 # default DLL search order picks up a directory that isn't the exe's own.
 #
 # Only the QEMU system emulator matching the build host's own architecture is
@@ -80,16 +80,13 @@ Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force
 }
 # The 5MB cap excludes the ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd) if
-# present, unneeded since the arm64 virt board boots fine on a direct kernel
-# boot with zero firmware files (confirmed separately) and would otherwise
-# dominate the bundle size.
+# present: the arm64 virt board needs no firmware for a direct kernel boot,
+# and they'd otherwise dominate the bundle size.
 #
 # Filtering by extension after an unrestricted -Recurse, rather than via
 # -Include, is deliberate: Get-ChildItem -Recurse -Include is unreliable
-# unless -Path itself ends in a wildcard, and silently matching nothing
-# here is exactly how this went wrong the first time: the app installed
-# and started fine, then failed at boot with "could not load PC BIOS
-# 'bios-256k.bin'" since the file was never actually bundled.
+# unless -Path itself ends in a wildcard, and a wrong pattern here matches
+# nothing without erroring.
 $firmwareExtensions = ".bin", ".rom", ".fd", ".dtb"
 $firmwareFiles = Get-ChildItem $installDir -Recurse -File |
     Where-Object { $_.Extension -in $firmwareExtensions -and $_.Length -lt 5MB }

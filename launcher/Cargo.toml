@@ -12,7 +12,9 @@ tauri-plugin-shell = "2"
 clap = { version = "4", features = ["derive"] }
 
 # Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; Windows uses a
-# Job Object via windows-sys; macOS uses a death pipe + /bin/sh (std only).
+# Job Object via windows-sys, which also provides CREATE_NO_WINDOW for
+# suppressing spawned QEMU consoles; macOS uses a death pipe + /bin/sh (std
+# only).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 

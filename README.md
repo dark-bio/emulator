@@ -29,24 +29,26 @@ Each platform has both an installed and a no-install option:
 |---|---|---|
 | Linux | `.deb` | `.AppImage`: mark it executable and run it |
 | macOS | `.dmg` | `.app.zip`: unzip, the `.app` runs from anywhere |
-| Windows | NSIS `.exe` installer | `...-portable.zip`: unzip, run `Ark Emulator.exe` from inside |
+| Windows | NSIS `.exe` installer | `.zip`: unzip, run `Ark Emulator.exe` from inside |
+
+Each asset has a `.sha256` file published alongside it; verify with
+`sha256sum -c` (Linux/Windows) or `shasum -a 256 -c` (macOS).
 
 They're currently unsigned (no Apple Developer ID / Windows code-signing
 certificate yet), so your OS will flag them on first run:
 
-- **macOS**: Gatekeeper blocks the app ("cannot be opened because the
-  developer cannot be verified"). Right-click the app in Finder and choose
-  **Open**, then confirm in the dialog that appears; this is only needed
-  once.
+- **macOS**: Gatekeeper blocks the app on first launch. Open **System
+  Settings** → **Privacy & Security** → **Security**, click **Open Anyway**
+  (only available for about an hour after the blocked attempt), then enter
+  your password to confirm. Only needed once.
 - **Windows**: SmartScreen shows "Windows protected your PC". Click **More
   info**, then **Run anyway**.
 - **Linux**: no OS-level gatekeeping for an unsigned `.deb`/AppImage; nothing
   extra needed.
 
-The rest of this README covers building and running from source instead,
-which needs the prerequisites below.
+## Building from source
 
-## Prerequisites
+### Prerequisites
 
 Building from source needs the same things a released installer bundles for
 you: `qemu-img`, a QEMU system emulator, and a pair of ArkOS emulator
@@ -78,9 +80,9 @@ local development. `qemu-img` comes along with either QEMU install:
 
 **Firmware**: a kernel image (`<base>-kernel.<arch>`) and a gzipped initramfs
 (`<base>-initrd.<arch>.gz`), built for either `arm64` or `amd64` by the
-firmware repo's `./arkos.sh build-emulator`. Pass their paths via `--kernel`
-and `--initrd` (see [Run](#run)): a local build has no bundled firmware to
-fall back to, since `launcher/firmware/` is only populated by CI.
+firmware repo's own build tooling. Pass their paths via `--kernel` and
+`--initrd` (see [Run](#run)): a local build has no bundled firmware to fall
+back to, since `launcher/firmware/` is only populated by CI.
 
 When the guest architecture matches the host's, the launcher enables hardware
 virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
@@ -88,7 +90,7 @@ virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
 Cross-architecture guests always run under plain emulation and boot noticeably
 slower. `--arch` picks the guest architecture and defaults to the host's.
 
-## Run
+### Run
 
 ```sh
 cargo run --release -p launcher -- \
@@ -105,7 +107,7 @@ state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
-## Configuration
+### Configuration
 
 | flag | default | meaning |
 |---|---|---|

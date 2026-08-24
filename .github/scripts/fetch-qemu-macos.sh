@@ -9,7 +9,7 @@
 # invalidates their code signature, requiring a re-sign), this copies every
 # non-system dylib dependency into launcher/qemu-libs/ (bundled as a Tauri
 # resource) unmodified and relies on DYLD_LIBRARY_PATH (set at spawn time by
-# the launcher, see main.rs's `apply_library_path`): dyld searches
+# the launcher, see main.rs's `prepend_library_path`): dyld searches
 # DYLD_LIBRARY_PATH/<basename> before a dependency's recorded install-name
 # path, even when that path is absolute, so no binary patching is required.
 #
@@ -24,15 +24,15 @@
 # The x86_64 guest also needs its firmware/BIOS datadir (bios-256k.bin for
 # SeaBIOS, which the q35 machine model runs before a direct -kernel boot;
 # plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
-# default VGA device even with no display output). This copies every small
-# file (<5MB) from QEMU's datadir, excluding the ~64MB ARM UEFI blobs
-# (edk2-arm-{code,vars}.fd), which are unneeded (the arm64 virt board boots
-# fine on a direct kernel boot with zero firmware files, confirmed
-# separately) and would otherwise dominate the bundle size. Bundled into the
-# same libs_dir as the dylib dependencies and located via -L (see main.rs's
-# `spawn_qemu`); QEMU looks up specific filenames there and ignores
-# everything else, so co-locating it with unrelated files is harmless. The
-# arm64 host leg of this script never reaches this block.
+# default VGA device even with no display output). Copies every small file
+# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
+# ROMs QEMU actually loads depends on the configured devices. Excludes the
+# ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board needs
+# no firmware for a direct kernel boot, and they'd otherwise dominate the
+# bundle size. Bundled into the same libs_dir as the dylib dependencies and
+# located via -L (see main.rs's `spawn_qemu`); QEMU looks up specific
+# filenames there and ignores everything else, so co-locating it with
+# unrelated files is harmless. The arm64 host leg never reaches this block.
 #
 # Run once per architecture, from the emulator repo root, on that
 # architecture's own machine. arm64 Homebrew and x86_64 Homebrew are separate
@@ -111,16 +111,11 @@ fetch_binary "qemu-system-guest" "$native_qemu"
 fetch_binary "qemu-img" "qemu-img"
 
 if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-  # Locate the datadir by finding the one file we actually need, rather than
-  # guessing at Homebrew's directory layout. Two prior guesses both failed
-  # silently: plain "$(brew --prefix qemu)/share/qemu" pointed at a
-  # directory that existed but didn't contain what we needed, and
-  # "$(brew --prefix qemu)" itself is opt/qemu, a symlink into the Cellar
-  # that plain `find` (no -L) doesn't reliably traverse. `find | -exec cp`
-  # doesn't fail just because it matched zero files, so both looked like
-  # they'd worked. `brew --cellar` gives the real, non-symlinked install
-  # directory directly; -L on top is defensive against any further
-  # symlinks inside it.
+  # `brew --prefix` is opt/<formula>, a symlink into the Cellar that plain
+  # `find` doesn't reliably traverse, and `find | -exec cp` doesn't fail on
+  # zero matches, so a wrong path here would fail silently. `brew --cellar`
+  # gives the real install directory directly; -L is defensive against any
+  # further symlinks inside it.
   cellar="$(brew --cellar qemu)"
   bios="$(find -L "$cellar" -name 'bios-256k.bin' 2>/dev/null | head -1)"
   if [ -z "$bios" ]; then

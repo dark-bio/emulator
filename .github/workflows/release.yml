@@ -110,9 +110,8 @@ jobs:
         # Tauri's own resource staging only happens inside the NSIS
         # installer's payload, not as a loose directory on disk, so this
         # reassembles the same flat layout by hand: main exe + sidecar exes
-        # + qemu-libs/firmware all as siblings, which is what a real install
-        # produces too (confirmed by the launcher's own runtime logging) and
-        # what BaseDirectory::Resource resolves relative to current_exe()
+        # + qemu-libs/firmware all as siblings, matching both a real install
+        # and what BaseDirectory::Resource resolves relative to current_exe()
         # regardless of whether the app was installed or just unzipped.
         if: runner.os == 'Windows'
         shell: pwsh

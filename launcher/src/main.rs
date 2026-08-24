@@ -278,10 +278,12 @@ fn resolve_disk_path(app: &tauri::App, cfg: &Config) -> Result<PathBuf, Box<dyn 
 /// `qemu-system-*` binary that is depends on the build host.
 const QEMU_SIDECAR: &str = "qemu-system-guest";
 
-/// Resolve a bundled sidecar binary next to the launcher's own executable,
-/// where `cargo tauri build` copies `externalBin` entries at package time.
-/// Returns `None` outside a bundled build (e.g. local `cargo run`), where
-/// callers fall back to a bare `PATH` lookup, today's behavior.
+/// Resolve a bundled sidecar binary next to the launcher's own executable.
+/// Any `cargo build` (including plain `cargo run`/`cargo check`, not just
+/// the full `cargo tauri build` bundler) copies `externalBin` entries there
+/// automatically once `launcher/binaries/` is populated (see README).
+/// Returns `None` only if that directory was never populated, where callers
+/// fall back to a bare `PATH` lookup.
 fn resolve_sidecar(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent()?.to_path_buf();
@@ -515,11 +517,11 @@ fn spawn_qemu(
             cmd.args(["-accel", "kvm", "-accel", "tcg"]);
         } else if cfg!(target_os = "macos") {
             // The hvf,tcg fallback list only helps when hvf is cleanly
-            // absent; a real hv_vm_create() failure (confirmed: happens
-            // when running nested inside another hypervisor, which Apple
-            // doesn't support for Hypervisor.framework) is fatal to QEMU
-            // instead of falling through, so this checks availability
-            // ourselves first rather than trusting QEMU to recover from it.
+            // absent; a real hv_vm_create() failure (e.g. running nested
+            // inside another hypervisor, which Apple doesn't support for
+            // Hypervisor.framework) is fatal to QEMU instead of falling
+            // through, so this checks availability ourselves first rather
+            // than trusting QEMU to recover from it.
             if hvf_available() {
                 cmd.args(["-accel", "hvf", "-accel", "tcg"]);
             } else {

@@ -15,7 +15,7 @@
 # distros. This is the classic AppImage portability problem. This copies
 # every non-base-system dependency into launcher/qemu-libs/ (bundled as a
 # Tauri resource) and relies on LD_LIBRARY_PATH (set at spawn time by the
-# launcher, see main.rs's `apply_library_path`) rather than patching rpaths.
+# launcher, see main.rs's `prepend_library_path`) rather than patching rpaths.
 # The ELF NEEDED entries `ldd` resolves here are bare sonames (e.g.
 # "libglib-2.0.so.0"), which the dynamic linker re-resolves against
 # LD_LIBRARY_PATH on every run, so no binary patching is required. glibc and
@@ -28,18 +28,15 @@
 # The x86_64 guest also needs its firmware/BIOS datadir: bios-256k.bin for
 # SeaBIOS, which the q35 machine model runs before a direct -kernel boot,
 # plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
-# default VGA device even with no display output. The exact set needed was
-# found by trial and error, and grew once tested from an isolated bundle
-# instead of a system install that could fall back to its real datadir. To
-# avoid repeating that, this copies every small file (<5MB) from QEMU's
-# datadir, excluding only the two ~64MB ARM UEFI blobs
-# (edk2-arm-{code,vars}.fd). Those are unneeded: the arm64 virt board boots
-# fine on a direct kernel boot with zero firmware files (confirmed
-# separately), and would otherwise dominate the bundle size. Everything
-# lands in the same libs_dir as the .so dependencies and is located via -L
-# (see main.rs's `spawn_qemu`); QEMU looks up specific filenames there and
-# ignores everything else, so co-locating it with unrelated files is
-# harmless. The arm64 host leg of this script never reaches this block.
+# default VGA device even with no display output. Copies every small file
+# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
+# ROMs QEMU actually loads depends on the configured devices. Excludes the
+# two ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board
+# needs no firmware for a direct kernel boot, and they'd otherwise dominate
+# the bundle size. Lands in the same libs_dir as the .so dependencies and is
+# located via -L (see main.rs's `spawn_qemu`); QEMU looks up specific
+# filenames there and ignores everything else, so co-locating it with
+# unrelated files is harmless. The arm64 host leg never reaches this block.
 #
 # Run from the emulator repo root:
 #   .github/scripts/fetch-qemu-linux.sh
