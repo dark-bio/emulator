@@ -427,6 +427,26 @@ fn suppress_child_console(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn suppress_child_console(_cmd: &mut Command) {}
 
+/// Whether Hypervisor.framework is actually usable on this Mac, checked via
+/// `sysctl kern.hv_support` (the standard way macOS virtualization tools
+/// probe this, not requiring root) rather than trusting QEMU's own
+/// `-accel hvf,tcg` fallback list to handle it. Most commonly false when
+/// running nested inside another hypervisor, which Apple doesn't support
+/// for Hypervisor.framework.
+#[cfg(target_os = "macos")]
+fn hvf_available() -> bool {
+    Command::new("sysctl")
+        .args(["-n", "kern.hv_support"])
+        .output()
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "1")
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hvf_available() -> bool {
+    false
+}
+
 /// Spawn the guest arch's QEMU system emulator configured for the emulator:
 /// paravirt net + disk, host port 18181 forwarded into the guest. Spawned
 /// through `orphan::guard` so the child can't outlive the launcher.
@@ -486,15 +506,29 @@ fn spawn_qemu(
         GuestArch::Arm64 => cmd.args(["-M", "virt", "-cpu", "cortex-a72"]),
         GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
     };
-    // Repeated -accel flags form an ordered fallback list: hardware
-    // virtualization when the host grants it (e.g. /dev/kvm access), plain
-    // emulation otherwise. Cross-arch guests can only ever run TCG, which is
-    // also QEMU's default, so they get no flag.
+    // Repeated -accel flags form an ordered fallback list, in principle:
+    // hardware virtualization when the host grants it (e.g. /dev/kvm
+    // access), plain emulation otherwise. Cross-arch guests can only ever
+    // run TCG, which is also QEMU's default, so they get no flag.
     if native {
         if cfg!(target_os = "linux") {
             cmd.args(["-accel", "kvm", "-accel", "tcg"]);
         } else if cfg!(target_os = "macos") {
-            cmd.args(["-accel", "hvf", "-accel", "tcg"]);
+            // The hvf,tcg fallback list only helps when hvf is cleanly
+            // absent; a real hv_vm_create() failure (confirmed: happens
+            // when running nested inside another hypervisor, which Apple
+            // doesn't support for Hypervisor.framework) is fatal to QEMU
+            // instead of falling through, so this checks availability
+            // ourselves first rather than trusting QEMU to recover from it.
+            if hvf_available() {
+                cmd.args(["-accel", "hvf", "-accel", "tcg"]);
+            } else {
+                eprintln!(
+                    "[launcher] Hypervisor.framework unavailable on this Mac; \
+                     falling back to software emulation, which will be slower"
+                );
+                cmd.args(["-accel", "tcg"]);
+            }
         }
     }
     cmd.arg("-m")
