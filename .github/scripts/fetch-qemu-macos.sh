@@ -135,15 +135,23 @@ EOF
 codesign --force --sign - --entitlements "$entitlements" "$bin_dir/qemu-system-guest-${triple}"
 
 if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-  qemu_bin_dir="$(dirname "$(command -v qemu-system-x86_64)")"
-  qemu_share="$qemu_bin_dir/../share/qemu"
-  [ -d "$qemu_share" ] || qemu_share="$(brew --prefix qemu)/share/qemu"
-  if [ ! -d "$qemu_share" ]; then
-    echo "could not locate QEMU's firmware/BIOS datadir (needed for the x86_64 guest)" >&2
+  # Locate the datadir by finding the one file we actually need, rather than
+  # guessing at Homebrew's directory layout. A prior guess, plain
+  # "$(brew --prefix qemu)/share/qemu", found a directory that existed but
+  # didn't contain what we needed, and silently copied nothing since
+  # `find | -exec cp` doesn't fail just because it matched zero files.
+  bios="$(find "$(brew --prefix qemu)" -name 'bios-256k.bin' 2>/dev/null | head -1)"
+  if [ -z "$bios" ]; then
+    echo "could not locate bios-256k.bin under $(brew --prefix qemu) (needed for the x86_64 guest)" >&2
     exit 1
   fi
+  qemu_share="$(dirname "$bios")"
   find "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
     -exec cp -L {} "$libs_dir/" \;
+  if [ ! -f "$libs_dir/bios-256k.bin" ]; then
+    echo "bios-256k.bin was not copied into $libs_dir; the find/cp above matched nothing" >&2
+    exit 1
+  fi
 fi
 
 # Bundled dylibs can depend on each other, so keep walking until a pass
