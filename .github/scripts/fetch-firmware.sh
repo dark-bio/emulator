@@ -19,6 +19,15 @@
 # with a wildcard. Bumping the bundled firmware is therefore just updating
 # FIRMWARE_TAG in the workflow; nothing here needs to change.
 #
+# Each asset has a same-named .sha256 file published alongside it, checked
+# here since `gh release download` doesn't verify one itself: HTTPS covers
+# tampering in transit, not a corrupted/truncated download completing
+# anyway, or a release's assets being silently replaced under an unchanged
+# filename without FIRMWARE_TAG changing. Verifying against a checksum
+# published in the same release isn't a defense against that release itself
+# being compromised, since both files could be replaced together; it's a
+# correctness check, not a trust boundary.
+#
 # Run from the emulator repo root:
 #   FIRMWARE_TAG=<tag> .github/scripts/fetch-firmware.sh
 set -euo pipefail
@@ -30,6 +39,29 @@ if ! command -v gh >/dev/null; then
   echo "the GitHub CLI (gh) is required" >&2
   exit 1
 fi
+
+# macOS has no sha256sum by default (shasum -a 256 instead); Linux and Git
+# for Windows' bundled coreutils both have sha256sum.
+sha256_of() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Compares against the first whitespace-delimited field of $1.sha256 rather
+# than feeding the file to `sha256sum -c` directly, so this doesn't depend
+# on the checksum file's recorded filename matching our own local path.
+verify_checksum() {
+  local file="$1" recorded actual
+  recorded="$(awk '{print $1}' "${file}.sha256")"
+  actual="$(sha256_of "$file")"
+  if [ "$recorded" != "$actual" ]; then
+    echo "checksum mismatch for $(basename "$file"): expected $recorded, got $actual" >&2
+    exit 1
+  fi
+}
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$triple" in
@@ -53,6 +85,8 @@ initrd_pattern="arkos-*-emulator-initrd.${arch}.gz"
 gh release download "$FIRMWARE_TAG" --repo "$firmware_repo" \
   --pattern "$kernel_pattern" \
   --pattern "$initrd_pattern" \
+  --pattern "${kernel_pattern}.sha256" \
+  --pattern "${initrd_pattern}.sha256" \
   --dir "$tmp"
 
 kernel="$(find "$tmp" -maxdepth 1 -name "$kernel_pattern" | head -1)"
@@ -61,6 +95,13 @@ if [ -z "$kernel" ] || [ -z "$initrd" ]; then
   echo "release $FIRMWARE_TAG has no assets matching $kernel_pattern / $initrd_pattern" >&2
   exit 1
 fi
+if [ ! -f "${kernel}.sha256" ] || [ ! -f "${initrd}.sha256" ]; then
+  echo "release $FIRMWARE_TAG is missing a .sha256 for the kernel or initrd asset" >&2
+  exit 1
+fi
+
+verify_checksum "$kernel"
+verify_checksum "$initrd"
 
 cp "$kernel" "$out_dir/kernel"
 cp "$initrd" "$out_dir/initrd.gz"
