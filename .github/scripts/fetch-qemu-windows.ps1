@@ -80,8 +80,9 @@ Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force
 }
 # The 5MB cap excludes the ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd) if
-# present: the arm64 virt board needs no firmware for a direct kernel boot,
-# and they'd otherwise dominate the bundle size.
+# present, which a direct kernel boot never uses and which would dominate the
+# bundle size. Smaller ROMs are kept for both guest architectures: arm64 needs
+# efi-virtio.rom for its virtio-pci devices, so this is not gated on arch.
 #
 # Filtering by extension after an unrestricted -Recurse, rather than via
 # -Include, is deliberate: Get-ChildItem -Recurse -Include is unreliable

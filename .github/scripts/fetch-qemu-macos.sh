@@ -117,20 +117,23 @@ fetch_binary() {
 fetch_binary "qemu-system-guest" "$native_qemu"
 fetch_binary "qemu-img" "qemu-img"
 
-# `brew --prefix` is opt/<formula>, a symlink into the Cellar that plain
-# `find` doesn't reliably traverse, and `find | -exec cp` doesn't fail on zero
-# matches, so a wrong path here would fail silently. `brew --cellar` gives the
-# real install directory directly; -L is defensive against further symlinks
-# inside it. efi-virtio.rom anchors the search because both guests need it.
-cellar="$(brew --cellar qemu)"
-rom="$(find -L "$cellar" -name 'efi-virtio.rom' 2>/dev/null | head -1)"
-if [ -z "$rom" ]; then
-  echo "could not locate efi-virtio.rom under $cellar (QEMU's firmware datadir)" >&2
+# Ask QEMU which datadirs it searches rather than guessing at Homebrew's
+# layout, whose prefix is a symlink into the Cellar. Queried through the
+# system binary on PATH, not the copy already in bin_dir, since these paths
+# are reported relative to the binary's own location. -L on find follows any
+# symlinks inside them.
+qemu_datadirs="$("$native_qemu" -L help 2>/dev/null || true)"
+if [ -z "$qemu_datadirs" ]; then
+  echo "could not determine QEMU's firmware datadirs via '$native_qemu -L help'" >&2
   exit 1
 fi
-qemu_share="$(dirname "$rom")"
-find -L "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
-  -exec cp -L {} "$libs_dir/" \;
+while IFS= read -r dir; do
+  [ -d "$dir" ] || continue
+  find -L "$dir" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
+    -exec cp -L {} "$libs_dir/" \;
+done <<EOF
+$qemu_datadirs
+EOF
 
 # Assert per guest arch, since a silent miss here only surfaces later as an
 # opaque QEMU firmware error on a machine that has no QEMU to fall back to.
@@ -140,7 +143,8 @@ if [ "$native_qemu" = "qemu-system-x86_64" ]; then
 fi
 for f in $required_firmware; do
   if [ ! -f "$libs_dir/$f" ]; then
-    echo "$f was not copied into $libs_dir from $qemu_share" >&2
+    echo "$f not found in any QEMU datadir:" >&2
+    echo "$qemu_datadirs" >&2
     exit 1
   fi
 done

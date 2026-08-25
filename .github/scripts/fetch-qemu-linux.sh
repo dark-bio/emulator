@@ -113,15 +113,23 @@ for name in "${!binaries[@]}"; do
   collect_deps "$src"
 done
 
-qemu_bin_dir="$(dirname "$(command -v "$native_qemu")")"
-qemu_share="$qemu_bin_dir/../share/qemu"
-[ -d "$qemu_share" ] || qemu_share="$(find /usr/share /usr/local/share -maxdepth 1 -iname qemu -type d 2>/dev/null | head -1)"
-if [ -z "${qemu_share:-}" ] || [ ! -d "$qemu_share" ]; then
-  echo "could not locate QEMU's firmware/BIOS datadir" >&2
+# Ask QEMU which datadirs it searches rather than guessing at distro layout.
+# Debian splits these across packages and directories (seabios provides the
+# BIOS and VGA ROMs, ipxe-qemu the option ROMs) while other distros ship one
+# directory, and -L help is the only authoritative answer. -L on find follows
+# the symlinks Debian uses for some ROMs.
+qemu_datadirs="$("$native_qemu" -L help 2>/dev/null || true)"
+if [ -z "$qemu_datadirs" ]; then
+  echo "could not determine QEMU's firmware datadirs via '$native_qemu -L help'" >&2
   exit 1
 fi
-find "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
-  -exec cp -L {} "$libs_dir/" \;
+while IFS= read -r dir; do
+  [ -d "$dir" ] || continue
+  find -L "$dir" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
+    -exec cp -L {} "$libs_dir/" \;
+done <<EOF
+$qemu_datadirs
+EOF
 
 # Assert per guest arch, since a silent miss here only surfaces later as an
 # opaque QEMU firmware error on a machine that has no QEMU to fall back to.
@@ -131,7 +139,9 @@ if [ "$native_qemu" = "qemu-system-x86_64" ]; then
 fi
 for f in $required_firmware; do
   if [ ! -f "$libs_dir/$f" ]; then
-    echo "$f was not copied into $libs_dir from $qemu_share" >&2
+    echo "$f not found in any QEMU datadir:" >&2
+    echo "$qemu_datadirs" >&2
+    echo "on Debian/Ubuntu, efi-virtio.rom needs the ipxe-qemu package" >&2
     exit 1
   fi
 done
