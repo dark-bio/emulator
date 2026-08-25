@@ -93,8 +93,18 @@ $firmwareFiles = Get-ChildItem $installDir -Recurse -File |
 foreach ($file in $firmwareFiles) {
     Copy-Item $file.FullName (Join-Path $libsDir $file.Name) -Force
 }
-if ($nativeQemu -eq "qemu-system-x86_64.exe" -and -not ($firmwareFiles | Where-Object { $_.Name -eq "bios-256k.bin" })) {
-    throw "bios-256k.bin not found under $installDir (needed for the x86_64 guest); did the QEMU installer layout change?"
+# Assert per guest arch, since a silent miss here only surfaces later as an
+# opaque QEMU firmware error on a machine that has no QEMU to fall back to.
+# efi-virtio.rom is the option ROM every virtio-pci device carries, so both
+# guests need it.
+$requiredFirmware = @("efi-virtio.rom")
+if ($nativeQemu -eq "qemu-system-x86_64.exe") {
+    $requiredFirmware += "bios-256k.bin", "vgabios-stdvga.bin"
+}
+foreach ($name in $requiredFirmware) {
+    if (-not ($firmwareFiles | Where-Object { $_.Name -eq $name })) {
+        throw "$name not found under $installDir; did the QEMU installer layout change?"
+    }
 }
 
 Write-Host "populated $binDir (triple $triple) and $libsDir"

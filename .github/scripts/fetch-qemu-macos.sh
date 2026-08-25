@@ -21,18 +21,25 @@
 # main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
 # bundled.
 #
-# The x86_64 guest also needs its firmware/BIOS datadir (bios-256k.bin for
-# SeaBIOS, which the q35 machine model runs before a direct -kernel boot;
-# plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
-# default VGA device even with no display output). Copies every small file
-# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
-# ROMs QEMU actually loads depends on the configured devices. Excludes the
-# ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board needs
-# no firmware for a direct kernel boot, and they'd otherwise dominate the
-# bundle size. Bundled into the same libs_dir as the dylib dependencies and
-# located via -L (see main.rs's `spawn_qemu`); QEMU looks up specific
-# filenames there and ignores everything else, so co-locating it with
-# unrelated files is harmless. The arm64 host leg never reaches this block.
+# Both guests need QEMU's firmware/BIOS datadir, so this is not gated on
+# architecture. x86_64 needs bios-256k.bin for SeaBIOS, which the q35 machine
+# model runs before a direct -kernel boot, plus vgabios-stdvga.bin since
+# -nographic still implies a default VGA device. arm64 needs efi-virtio.rom,
+# the option ROM every virtio-pci device carries, including the net and block
+# devices the guest is built from.
+#
+# Do not test this by pointing -L at an empty directory on a machine with
+# QEMU installed: -L only *adds* to the search path, so QEMU silently falls
+# back to its built-in datadir and the bundle looks complete when it is not.
+# That masked this exact bug until a packaged .app ran on a Mac without QEMU.
+#
+# Copies every small file (<5MB) from the datadir rather than hand-picking
+# filenames, since which ROMs QEMU loads depends on the configured devices.
+# The cap excludes the ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd), which
+# a direct kernel boot never uses and which would dominate the bundle size.
+# Everything lands in the same libs_dir as the dylibs and is located via -L
+# (see main.rs's `spawn_qemu`); QEMU looks up only the filenames it needs and
+# ignores the rest, so sharing the directory is harmless.
 #
 # Run once per architecture, from the emulator repo root, on that
 # architecture's own machine. arm64 Homebrew and x86_64 Homebrew are separate
@@ -110,26 +117,33 @@ fetch_binary() {
 fetch_binary "qemu-system-guest" "$native_qemu"
 fetch_binary "qemu-img" "qemu-img"
 
-if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-  # `brew --prefix` is opt/<formula>, a symlink into the Cellar that plain
-  # `find` doesn't reliably traverse, and `find | -exec cp` doesn't fail on
-  # zero matches, so a wrong path here would fail silently. `brew --cellar`
-  # gives the real install directory directly; -L is defensive against any
-  # further symlinks inside it.
-  cellar="$(brew --cellar qemu)"
-  bios="$(find -L "$cellar" -name 'bios-256k.bin' 2>/dev/null | head -1)"
-  if [ -z "$bios" ]; then
-    echo "could not locate bios-256k.bin under $cellar (needed for the x86_64 guest)" >&2
-    exit 1
-  fi
-  qemu_share="$(dirname "$bios")"
-  find -L "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
-    -exec cp -L {} "$libs_dir/" \;
-  if [ ! -f "$libs_dir/bios-256k.bin" ]; then
-    echo "bios-256k.bin was not copied into $libs_dir; the find/cp above matched nothing" >&2
-    exit 1
-  fi
+# `brew --prefix` is opt/<formula>, a symlink into the Cellar that plain
+# `find` doesn't reliably traverse, and `find | -exec cp` doesn't fail on zero
+# matches, so a wrong path here would fail silently. `brew --cellar` gives the
+# real install directory directly; -L is defensive against further symlinks
+# inside it. efi-virtio.rom anchors the search because both guests need it.
+cellar="$(brew --cellar qemu)"
+rom="$(find -L "$cellar" -name 'efi-virtio.rom' 2>/dev/null | head -1)"
+if [ -z "$rom" ]; then
+  echo "could not locate efi-virtio.rom under $cellar (QEMU's firmware datadir)" >&2
+  exit 1
 fi
+qemu_share="$(dirname "$rom")"
+find -L "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
+  -exec cp -L {} "$libs_dir/" \;
+
+# Assert per guest arch, since a silent miss here only surfaces later as an
+# opaque QEMU firmware error on a machine that has no QEMU to fall back to.
+required_firmware="efi-virtio.rom"
+if [ "$native_qemu" = "qemu-system-x86_64" ]; then
+  required_firmware="$required_firmware bios-256k.bin vgabios-stdvga.bin"
+fi
+for f in $required_firmware; do
+  if [ ! -f "$libs_dir/$f" ]; then
+    echo "$f was not copied into $libs_dir from $qemu_share" >&2
+    exit 1
+  fi
+done
 
 # Bundled dylibs can depend on each other, so keep walking until a pass
 # copies nothing new.

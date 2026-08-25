@@ -25,18 +25,25 @@
 # forward-compatible, so a binary built against an old one keeps working on
 # newer ones, not the reverse.
 #
-# The x86_64 guest also needs its firmware/BIOS datadir: bios-256k.bin for
-# SeaBIOS, which the q35 machine model runs before a direct -kernel boot,
-# plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
-# default VGA device even with no display output. Copies every small file
-# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
-# ROMs QEMU actually loads depends on the configured devices. Excludes the
-# two ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board
-# needs no firmware for a direct kernel boot, and they'd otherwise dominate
-# the bundle size. Lands in the same libs_dir as the .so dependencies and is
-# located via -L (see main.rs's `spawn_qemu`); QEMU looks up specific
-# filenames there and ignores everything else, so co-locating it with
-# unrelated files is harmless. The arm64 host leg never reaches this block.
+# Both guests need QEMU's firmware/BIOS datadir, so this is not gated on
+# architecture. x86_64 needs bios-256k.bin for SeaBIOS, which the q35 machine
+# model runs before a direct -kernel boot, plus vgabios-stdvga.bin since
+# -nographic still implies a default VGA device. arm64 needs efi-virtio.rom,
+# the option ROM every virtio-pci device carries, including the net and block
+# devices the guest is built from.
+#
+# Do not test this by pointing -L at an empty directory on a machine with
+# QEMU installed: -L only *adds* to the search path, so QEMU silently falls
+# back to its built-in datadir and the bundle looks complete when it is not.
+# That masked this exact bug until a packaged .app ran on a Mac without QEMU.
+#
+# Copies every small file (<5MB) from the datadir rather than hand-picking
+# filenames, since which ROMs QEMU loads depends on the configured devices.
+# The cap excludes the ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd), which
+# a direct kernel boot never uses and which would dominate the bundle size.
+# Everything lands in the same libs_dir as the .so dependencies and is located
+# via -L (see main.rs's `spawn_qemu`); QEMU looks up only the filenames it
+# needs and ignores the rest, so sharing the directory is harmless.
 #
 # Run from the emulator repo root:
 #   .github/scripts/fetch-qemu-linux.sh
@@ -106,17 +113,28 @@ for name in "${!binaries[@]}"; do
   collect_deps "$src"
 done
 
+qemu_bin_dir="$(dirname "$(command -v "$native_qemu")")"
+qemu_share="$qemu_bin_dir/../share/qemu"
+[ -d "$qemu_share" ] || qemu_share="$(find /usr/share /usr/local/share -maxdepth 1 -iname qemu -type d 2>/dev/null | head -1)"
+if [ -z "${qemu_share:-}" ] || [ ! -d "$qemu_share" ]; then
+  echo "could not locate QEMU's firmware/BIOS datadir" >&2
+  exit 1
+fi
+find "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
+  -exec cp -L {} "$libs_dir/" \;
+
+# Assert per guest arch, since a silent miss here only surfaces later as an
+# opaque QEMU firmware error on a machine that has no QEMU to fall back to.
+required_firmware="efi-virtio.rom"
 if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-  qemu_bin_dir="$(dirname "$(command -v qemu-system-x86_64)")"
-  qemu_share="$qemu_bin_dir/../share/qemu"
-  [ -d "$qemu_share" ] || qemu_share="$(find /usr/share /usr/local/share -maxdepth 1 -iname qemu -type d 2>/dev/null | head -1)"
-  if [ -z "${qemu_share:-}" ] || [ ! -d "$qemu_share" ]; then
-    echo "could not locate QEMU's firmware/BIOS datadir (needed for the x86_64 guest)" >&2
+  required_firmware="$required_firmware bios-256k.bin vgabios-stdvga.bin"
+fi
+for f in $required_firmware; do
+  if [ ! -f "$libs_dir/$f" ]; then
+    echo "$f was not copied into $libs_dir from $qemu_share" >&2
     exit 1
   fi
-  find "$qemu_share" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
-    -exec cp -L {} "$libs_dir/" \;
-fi
+done
 
 # Bundled libraries can depend on each other, so keep walking until a pass
 # copies nothing new.
