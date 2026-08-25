@@ -10,10 +10,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
 
-# Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; Windows uses a
-# Job Object via windows-sys, which also provides CREATE_NO_WINDOW for
-# suppressing spawned QEMU consoles; macOS uses a death pipe + /bin/sh (std
-# only).
+# Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; macOS uses a
+# death pipe + /bin/sh (std only). Windows needs windows-sys for a Job Object,
+# plus CREATE_NO_WINDOW to suppress spawned QEMU consoles and LibraryLoader to
+# probe for WHPX. See src/platform.rs and src/orphan.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
@@ -22,5 +22,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
 ] }

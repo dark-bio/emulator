@@ -9,7 +9,7 @@
 # invalidates their code signature, requiring a re-sign), this copies every
 # non-system dylib dependency into launcher/qemu-libs/ (bundled as a Tauri
 # resource) unmodified and relies on DYLD_LIBRARY_PATH (set at spawn time by
-# the launcher, see main.rs's `prepend_library_path`): dyld searches
+# the launcher, see platform.rs's `prepend_library_path`): dyld searches
 # DYLD_LIBRARY_PATH/<basename> before a dependency's recorded install-name
 # path, even when that path is absolute, so no binary patching is required.
 #
@@ -18,28 +18,21 @@
 # qemu-system-* binary that is depends on the host). Bundling both guest
 # architectures would double the installer size for no benefit to most
 # users; a source build still gets both via a PATH-installed QEMU (see
-# main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
+# qemu.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
 # bundled.
 #
-# Both guests need QEMU's firmware/BIOS datadir, so this is not gated on
-# architecture. x86_64 needs bios-256k.bin for SeaBIOS, which the q35 machine
-# model runs before a direct -kernel boot, plus vgabios-stdvga.bin since
-# -nographic still implies a default VGA device. arm64 needs efi-virtio.rom,
-# the option ROM every virtio-pci device carries, including the net and block
-# devices the guest is built from.
-#
-# Do not test this by pointing -L at an empty directory on a machine with
-# QEMU installed: -L only *adds* to the search path, so QEMU silently falls
-# back to its built-in datadir and the bundle looks complete when it is not.
-# That masked this exact bug until a packaged .app ran on a Mac without QEMU.
-#
-# Copies every small file (<5MB) from the datadir rather than hand-picking
-# filenames, since which ROMs QEMU loads depends on the configured devices.
-# The cap excludes the ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd), which
-# a direct kernel boot never uses and which would dominate the bundle size.
-# Everything lands in the same libs_dir as the dylibs and is located via -L
-# (see main.rs's `spawn_qemu`); QEMU looks up only the filenames it needs and
-# ignores the rest, so sharing the directory is harmless.
+# The x86_64 guest also needs its firmware/BIOS datadir (bios-256k.bin for
+# SeaBIOS, which the q35 machine model runs before a direct -kernel boot;
+# plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
+# default VGA device even with no display output). Copies every small file
+# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
+# ROMs QEMU actually loads depends on the configured devices. Excludes the
+# ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board needs
+# no firmware for a direct kernel boot, and they'd otherwise dominate the
+# bundle size. Bundled into the same libs_dir as the dylib dependencies and
+# located via -L (see qemu.rs's `spawn_qemu`); QEMU looks up specific
+# filenames there and ignores everything else, so co-locating it with
+# unrelated files is harmless. The arm64 host leg never reaches this block.
 #
 # Run once per architecture, from the emulator repo root, on that
 # architecture's own machine. arm64 Homebrew and x86_64 Homebrew are separate

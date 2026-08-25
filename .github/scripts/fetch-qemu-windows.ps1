@@ -7,7 +7,7 @@
 # fetch, silent-install, and copy. DLLs go into launcher/qemu-libs/ (bundled
 # as a Tauri resource, same as the other two platforms) rather than next to
 # the exes, and the launcher prepends that directory onto PATH before
-# spawning (see main.rs's `prepend_library_path`), which is how Windows'
+# spawning (see platform.rs's `prepend_library_path`), which is how Windows'
 # default DLL search order picks up a directory that isn't the exe's own.
 #
 # Only the QEMU system emulator matching the build host's own architecture is
@@ -15,7 +15,7 @@
 # qemu-system-*.exe that is depends on the host). Bundling both guest
 # architectures would double the installer size for no benefit to most
 # users; a source build still gets both via a PATH-installed QEMU (see
-# main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
+# qemu.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
 # bundled.
 #
 # Run from the emulator repo root:
@@ -74,7 +74,7 @@ foreach ($name in $binaries.Keys) {
 # q35 machine model, which SeaBIOS runs before a direct -kernel boot); their
 # exact subdirectory within the installer varies by version, so search
 # recursively rather than hardcoding a path. All land in the same libsDir the
-# launcher points -L at (see main.rs's `spawn_qemu`); QEMU looks up specific
+# launcher points -L at (see qemu.rs's `spawn_qemu`); QEMU looks up specific
 # filenames there and ignores everything else.
 Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force

@@ -7,7 +7,7 @@
 # qemu-system-* binary that is depends on the host). Bundling both guest
 # architectures would double the installer size for no benefit to most
 # users; a source build still gets both via a PATH-installed QEMU (see
-# main.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
+# qemu.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
 # bundled.
 #
 # QEMU comes from apt, dynamically linked against the base system's glibc
@@ -15,8 +15,8 @@
 # distros. This is the classic AppImage portability problem. This copies
 # every non-base-system dependency into launcher/qemu-libs/ (bundled as a
 # Tauri resource) and relies on LD_LIBRARY_PATH (set at spawn time by the
-# launcher, see main.rs's `prepend_library_path`) rather than patching rpaths.
-# The ELF NEEDED entries `ldd` resolves here are bare sonames (e.g.
+# launcher, see platform.rs's `prepend_library_path`) rather than patching
+# rpaths. The ELF NEEDED entries `ldd` resolves here are bare sonames (e.g.
 # "libglib-2.0.so.0"), which the dynamic linker re-resolves against
 # LD_LIBRARY_PATH on every run, so no binary patching is required. glibc and
 # the loader itself are deliberately NOT bundled: they must match the host
