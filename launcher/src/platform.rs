@@ -99,15 +99,17 @@ fn native_accel_flags() -> &'static [&'static str] {
 
 #[cfg(windows)]
 fn native_accel_flags() -> &'static [&'static str] {
-    if whpx_available() {
-        &["-accel", "whpx", "-accel", "tcg"]
-    } else {
-        eprintln!(
-            "[launcher] Windows Hypervisor Platform unavailable; falling back \
-             to software emulation, which will be slower. Enable it with: \
-             DISM /online /Enable-Feature /FeatureName:HypervisorPlatform /All"
-        );
-        &["-accel", "tcg"]
+    match whpx_probe() {
+        Ok(()) => &["-accel", "whpx", "-accel", "tcg"],
+        Err(reason) => {
+            eprintln!(
+                "[launcher] Windows Hypervisor Platform unusable ({reason}); falling \
+                 back to software emulation, which will be slower. If the feature is \
+                 simply switched off, enable it with: DISM /online /Enable-Feature \
+                 /FeatureName:HypervisorPlatform /All"
+            );
+            &["-accel", "tcg"]
+        }
     }
 }
 
@@ -133,39 +135,75 @@ fn hvf_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether Windows Hypervisor Platform is usable, via
-/// `WHvGetCapability(WHvCapabilityCodeHypervisorPresent)`. The feature is off
-/// by default, and QEMU is not trusted to fall through its `-accel whpx,tcg`
-/// list for the same reason as [`hvf_available`], so every failure path here
-/// returns false and the caller emits plain TCG.
+/// Whether Windows Hypervisor Platform is usable, established by building the
+/// same partition QEMU will build and then tearing it down again. Returns the
+/// reason it is not, for the caller to report.
+///
+/// Asking `WHvGetCapability(WHvCapabilityCodeHypervisorPresent)` on its own is
+/// not enough, and that is not a theoretical gap: a Windows guest inside
+/// another hypervisor answers that a hypervisor is present, and only refuses
+/// once the partition is actually configured. QEMU is not trusted to fall
+/// through its `-accel whpx,tcg` list for the same reason as
+/// [`hvf_available`], and it demonstrably does not. It reports falling back to
+/// TCG, keeps the WHPX interrupt controller it had already selected, and then
+/// dies calling into it.
+///
+/// Nested virtualization is requested here because QEMU requests it for this
+/// guest and treats a refusal as fatal. A probe that skipped it would succeed
+/// on exactly the machines where QEMU still fails, which is the whole
+/// scenario this exists to catch.
 ///
 /// Loaded dynamically because `WinHvPlatform.dll` is absent entirely when the
 /// feature is disabled: a static import would fail at process load and the
 /// launcher would never start.
 #[cfg(windows)]
-fn whpx_available() -> bool {
+fn whpx_probe() -> Result<(), String> {
     use std::ffi::c_void;
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
     type GetCapability = unsafe extern "system" fn(u32, *mut c_void, u32, *mut u32) -> i32;
-    const HYPERVISOR_PRESENT: u32 = 0;
+    type CreatePartition = unsafe extern "system" fn(*mut *mut c_void) -> i32;
+    type SetProperty = unsafe extern "system" fn(*mut c_void, u32, *const c_void, u32) -> i32;
+    type WithPartition = unsafe extern "system" fn(*mut c_void) -> i32;
+
+    // WHV_CAPABILITY_CODE and WHV_PARTITION_PROPERTY_CODE values, from
+    // WinHvPlatformDefs.h. Spelled out rather than pulled from a binding
+    // crate, to keep this on the same dynamic-load path as the calls.
+    const HYPERVISOR_PRESENT: u32 = 0x0000_0000;
+    const NESTED_VIRTUALIZATION: u32 = 0x0000_0004;
+    const PROCESSOR_COUNT: u32 = 0x0000_1fff;
 
     let dll: Vec<u16> = "WinHvPlatform.dll".encode_utf16().chain(Some(0)).collect();
 
     // SAFETY: the module handle is deliberately leaked rather than freed, so
-    // the resolved pointer stays valid for the call. Both are standard Win32
-    // dynamic-load calls with null-terminated names, and the capability
-    // buffer is sized from the type being written into it.
+    // the resolved pointers stay valid for the calls below. Each is a standard
+    // Win32 dynamic-load or WHPX entry point called with a null-terminated
+    // name and the signature it is documented with; every property buffer is
+    // sized from the type being read out of it; and the partition handle is
+    // only ever handed back to WHPX, on every path including the failing ones.
     unsafe {
         let module = LoadLibraryW(dll.as_ptr());
         if module.is_null() {
-            return false;
+            return Err("WinHvPlatform.dll is not installed".into());
         }
-        let Some(symbol) = GetProcAddress(module, c"WHvGetCapability".as_ptr() as *const u8) else {
-            return false;
-        };
-        let get_capability: GetCapability = std::mem::transmute(symbol);
 
+        macro_rules! entry_point {
+            ($name:literal, $signature:ty) => {
+                match GetProcAddress(module, concat!($name, "\0").as_ptr()) {
+                    Some(symbol) => std::mem::transmute::<_, $signature>(symbol),
+                    None => return Err(format!("WinHvPlatform.dll exports no {}", $name)),
+                }
+            };
+        }
+
+        let get_capability = entry_point!("WHvGetCapability", GetCapability);
+        let create_partition = entry_point!("WHvCreatePartition", CreatePartition);
+        let set_property = entry_point!("WHvSetPartitionProperty", SetProperty);
+        let setup_partition = entry_point!("WHvSetupPartition", WithPartition);
+        let delete_partition = entry_point!("WHvDeletePartition", WithPartition);
+
+        // Cheap early out: the feature is off by default, and there is no
+        // point building a partition to discover that.
         let mut present: u32 = 0;
         let mut written: u32 = 0;
         let hr = get_capability(
@@ -174,6 +212,47 @@ fn whpx_available() -> bool {
             std::mem::size_of::<u32>() as u32,
             &mut written,
         );
-        hr >= 0 && written as usize == std::mem::size_of::<u32>() && present != 0
+        if hr < 0 || written as usize != std::mem::size_of::<u32>() || present == 0 {
+            return Err("no hypervisor present".into());
+        }
+
+        let mut partition: *mut c_void = std::ptr::null_mut();
+        let hr = create_partition(&mut partition);
+        if hr < 0 {
+            return Err(format!("WHvCreatePartition failed, hr={hr:08x}"));
+        }
+
+        let processors: u32 = 1;
+        let hr = set_property(
+            partition,
+            PROCESSOR_COUNT,
+            std::ptr::addr_of!(processors).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        if hr < 0 {
+            delete_partition(partition);
+            return Err(format!("processor count refused, hr={hr:08x}"));
+        }
+
+        let nested: u32 = 1;
+        let hr = set_property(
+            partition,
+            NESTED_VIRTUALIZATION,
+            std::ptr::addr_of!(nested).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        if hr < 0 {
+            delete_partition(partition);
+            return Err(format!("nested virtualization unavailable, hr={hr:08x}"));
+        }
+
+        let hr = setup_partition(partition);
+        if hr < 0 {
+            delete_partition(partition);
+            return Err(format!("WHvSetupPartition failed, hr={hr:08x}"));
+        }
+
+        delete_partition(partition);
+        Ok(())
     }
 }
