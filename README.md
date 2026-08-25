@@ -34,8 +34,10 @@ Each platform has both an installed and a no-install option:
 Each asset has a `.sha256` file published alongside it; verify with
 `sha256sum -c` (Linux/Windows) or `shasum -a 256 -c` (macOS).
 
-They're currently unsigned (no Apple Developer ID / Windows code-signing
-certificate yet), so your OS will flag them on first run:
+The macOS builds are ad-hoc signed, which is enough to execute on Apple
+Silicon but is not an Apple Developer ID and carries no notarization. The
+Windows builds are unsigned outright. Either way your OS will flag them on
+first run:
 
 - **macOS**: Gatekeeper blocks the app on first launch. Open **System
   Settings** → **Privacy & Security** → **Security**, click **Open Anyway**
@@ -109,6 +111,7 @@ Run with `--help` for the full list.
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
 | `launcher/tauri.release.conf.json` | Adds the bundled QEMU and firmware to the base Tauri config. Applied by CI only, so a source build stays free of them. |
-| `.github/scripts/` | CI-only: gather a relocatable, host-arch QEMU and the pinned firmware release for packaging. |
+| `.github/scripts/` | CI-only: gather a relocatable, host-arch QEMU and the pinned firmware release for packaging, and code-sign what macOS requires signed. |
+| `launcher/entitlements.plist` | macOS entitlements. Restores what the Hardened Runtime takes away: hardware acceleration, the TCG JIT, and `DYLD_LIBRARY_PATH`. |
 | `.github/workflows/release.yml` | Tag-triggered CI: builds macOS/Windows/Linux installers and attaches them to a GitHub Release. |
 

@@ -99,6 +99,34 @@ jobs:
         # scripts had been run.
         run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
+      - name: Verify macOS signature
+        # Checks the whole signed tree, not just the main executable, since
+        # the bundler signs sidecars and resources through different paths
+        # (resources not at all: see fetch-qemu-macos.sh). Each dylib is
+        # verified by name because codesign seals a loose .dylib under
+        # Resources/ as data rather than as nested code, so --deep alone would
+        # report a bundle full of unsigned libraries as valid.
+        #
+        # The two --display calls are logging, not assertions. The sidecar's
+        # is the interesting one: it is the process that needs
+        # allow-dyld-environment-variables to find the bundled dylibs at all.
+        #
+        # spctl is the real Gatekeeper verdict and is expected to reject an
+        # ad-hoc build, so it is reported rather than enforced. It is the one
+        # check here that flips to green once a Developer ID identity and
+        # notarization credentials exist.
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          for lib in "$app/Contents/Resources/qemu-libs"/*.dylib; do
+            codesign --verify --strict "$lib"
+          done
+          codesign --display --entitlements - "$app"
+          codesign --display --entitlements - "$app/Contents/MacOS/qemu-system-guest"
+          spctl --assess --type exec --verbose=4 "$app" \
+            || echo "not accepted by Gatekeeper: ad-hoc signed, not notarized"
+
       - name: Zip portable macOS app
         # ditto (not zip -r) is Apple's recommended way to archive a .app:
         # plain zip can mangle extended attributes and resource forks.

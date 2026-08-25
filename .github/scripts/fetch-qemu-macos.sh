@@ -5,13 +5,14 @@
 # `brew install qemu` links its binaries against dylibs under the Homebrew
 # Cellar (e.g. /opt/homebrew/Cellar/... or /usr/local/Cellar/...), which
 # isn't portable to a machine without that exact Homebrew layout. Rather than
-# rewriting each binary's load commands with install_name_tool (which also
-# invalidates their code signature, requiring a re-sign), this copies every
-# non-system dylib dependency into launcher/qemu-libs/ (bundled as a Tauri
-# resource) unmodified and relies on DYLD_LIBRARY_PATH (set at spawn time by
-# the launcher, see platform.rs's `prepend_library_path`): dyld searches
-# DYLD_LIBRARY_PATH/<basename> before a dependency's recorded install-name
-# path, even when that path is absolute, so no binary patching is required.
+# rewriting each binary's load commands with install_name_tool, this copies
+# every non-system dylib dependency into launcher/qemu-libs/ (bundled as a
+# Tauri resource) unmodified and relies on DYLD_LIBRARY_PATH (set at spawn
+# time by the launcher, see platform.rs's `prepend_library_path`): dyld
+# searches DYLD_LIBRARY_PATH/<basename> before a dependency's recorded
+# install-name path, even when that path is absolute, so no binary patching is
+# required. The app bundle entitles the sidecars to read DYLD_* variables,
+# which the Hardened Runtime would otherwise strip (see entitlements.plist).
 #
 # Only the QEMU system emulator matching the build host's own architecture is
 # bundled, as the generic "qemu-system-guest" sidecar name (which real
@@ -152,6 +153,32 @@ while [ "$cur_count" -ne "$prev_count" ]; do
     [ -f "$lib" ] && collect_deps "$lib"
   done
   cur_count="$(find "$libs_dir" -type f | wc -l)"
+done
+
+# Sign the bundled dylibs. Tauri's bundler signs the sidecars and the .app
+# itself, but never the files it copies in as resources, which is where these
+# land. They arrive carrying Homebrew's own ad-hoc signature, so they do load
+# as-is; what rejects them is notarization, which refuses any nested Mach-O
+# not signed with the bundle's identity under the Hardened Runtime. Signing
+# them here rather than post-hoc keeps them ahead of the bundle signature that
+# seals them, which is the order Apple requires. Nothing else in libs_dir is
+# Mach-O; the BIOS and option ROMs are plain data.
+#
+# Defaults to an ad-hoc signature, which needs no Apple account and is enough
+# to execute on Apple Silicon, but which no amount of stapling can make
+# Gatekeeper accept: that needs a Developer ID identity and notarization. Set
+# APPLE_SIGNING_IDENTITY to sign for real. The Tauri bundler reads the same
+# variable for the sidecars and the .app, so one value covers the bundle.
+# Ad-hoc signatures cannot carry a secure timestamp, hence the split.
+identity="${APPLE_SIGNING_IDENTITY:--}"
+if [ "$identity" = "-" ]; then
+  timestamp="--timestamp=none"
+else
+  timestamp="--timestamp"
+fi
+for lib in "$libs_dir"/*.dylib; do
+  [ -f "$lib" ] || continue
+  codesign --force --options runtime "$timestamp" --sign "$identity" "$lib"
 done
 
 echo "populated $bin_dir (triple $triple) and $libs_dir:"

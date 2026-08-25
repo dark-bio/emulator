@@ -37,6 +37,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "licenseFile": "../LICENSE"
+    "licenseFile": "../LICENSE",
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
+    }
   }
 }
