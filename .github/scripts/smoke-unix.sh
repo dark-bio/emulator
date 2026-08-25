@@ -37,10 +37,16 @@
 #
 #   .github/scripts/smoke-unix.sh <executable> [launcher args...]
 #
-# Env: SMOKE_TIMEOUT (seconds, default 60), SMOKE_MARKER, SMOKE_LOG.
+# The default deadline is two minutes rather than something tighter because
+# the guest usually has no hardware acceleration to lean on: a CI runner
+# cannot open /dev/kvm and has no nested virtualization to give WHPX, so it
+# boots under TCG. A run that succeeds exits the moment the marker appears, so
+# a generous ceiling costs a passing run nothing.
+#
+# Env: SMOKE_TIMEOUT (seconds, default 120), SMOKE_MARKER, SMOKE_LOG.
 set -euo pipefail
 
-timeout="${SMOKE_TIMEOUT:-60}"
+timeout="${SMOKE_TIMEOUT:-120}"
 marker="${SMOKE_MARKER:-Starting runcore}"
 log="${SMOKE_LOG:-smoke.log}"
 

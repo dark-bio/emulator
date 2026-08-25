@@ -81,7 +81,30 @@ pub(crate) fn accel_flags(native: bool) -> &'static [&'static str] {
 
 #[cfg(target_os = "linux")]
 fn native_accel_flags() -> &'static [&'static str] {
-    &["-accel", "kvm", "-accel", "tcg"]
+    if kvm_available() {
+        &["-accel", "kvm", "-accel", "tcg"]
+    } else {
+        eprintln!(
+            "[launcher] /dev/kvm is not accessible; falling back to software \
+             emulation, which will be slower. Access normally comes from \
+             membership of the kvm group."
+        );
+        &["-accel", "tcg"]
+    }
+}
+
+/// Whether KVM is usable, meaning `/dev/kvm` exists and this user may open it
+/// for reading and writing, which normally comes from the `kvm` group.
+///
+/// Probed for the same reason as [`hvf_available`] and [`whpx_probe`]: QEMU's
+/// `-accel kvm,tcg` list is not the clean fallback it looks like, and a
+/// refused `/dev/kvm` is much the most common way for a Linux host to end up
+/// without acceleration.
+#[cfg(target_os = "linux")]
+fn kvm_available() -> bool {
+    // SAFETY: a null-terminated literal in, a status code out. `access` reads
+    // nothing through the pointer beyond the string itself.
+    unsafe { libc::access(c"/dev/kvm".as_ptr(), libc::R_OK | libc::W_OK) == 0 }
 }
 
 #[cfg(target_os = "macos")]

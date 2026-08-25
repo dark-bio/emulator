@@ -146,6 +146,41 @@ for f in $required_firmware; do
   fi
 done
 
+# QEMU can be built with its accelerators, block drivers and UI backends as
+# dlopen'd modules rather than linked in, and Debian and Ubuntu build it that
+# way. ldd cannot see a dlopen, so these never turn up through collect_deps,
+# and the launcher points QEMU at them with QEMU_MODULE_DIR (see qemu.rs's
+# `spawn_qemu`). They go into libs_dir with everything else, ahead of the
+# dependency walk below, so the modules' own dependencies get collected too.
+#
+# Missing them is not a corner case. Without the TCG module a machine with no
+# QEMU installed has no software emulation to fall back on the moment KVM is
+# unavailable, which is every user not in the kvm group, and QEMU aborts on an
+# assertion inside its accelerator setup rather than failing cleanly.
+module_dir=""
+for candidate in /usr/lib/*/qemu /usr/lib/qemu /usr/lib64/qemu; do
+  [ -d "$candidate" ] || continue
+  if [ -n "$(find "$candidate" -maxdepth 1 -name '*.so' -print -quit)" ]; then
+    module_dir="$candidate"
+    break
+  fi
+done
+
+if [ -n "$module_dir" ]; then
+  find "$module_dir" -maxdepth 1 -name '*.so' -exec cp -L {} "$libs_dir/" \;
+  # Asserted for the same reason as the firmware above: a silent miss only
+  # surfaces later, on a machine with no QEMU to fall back to.
+  accel_module="accel-tcg-${native_qemu#qemu-system-}.so"
+  if [ ! -f "$libs_dir/$accel_module" ]; then
+    echo "$accel_module not found in $module_dir" >&2
+    exit 1
+  fi
+  echo "bundled $(find "$module_dir" -maxdepth 1 -name '*.so' | wc -l) QEMU modules from $module_dir"
+else
+  # A distro that links everything in has nothing here to collect.
+  echo "this QEMU build has no loadable modules"
+fi
+
 # Bundled libraries can depend on each other, so keep walking until a pass
 # copies nothing new.
 prev_count=-1

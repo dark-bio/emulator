@@ -18,7 +18,13 @@
 #
 #   pwsh .github/scripts/smoke-windows.ps1 -Executable <path> [-Arguments ...]
 #
-# Env: SMOKE_TIMEOUT (seconds, default 60), SMOKE_MARKER, SMOKE_LOG.
+# The default deadline is two minutes rather than something tighter because
+# the guest usually has no hardware acceleration to lean on: a CI runner
+# cannot open /dev/kvm and has no nested virtualization to give WHPX, so it
+# boots under TCG. A run that succeeds exits the moment the marker appears, so
+# a generous ceiling costs a passing run nothing.
+#
+# Env: SMOKE_TIMEOUT (seconds, default 120), SMOKE_MARKER, SMOKE_LOG.
 param(
     [Parameter(Mandatory = $true)]
     [string]$Executable,
@@ -28,7 +34,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$timeout = if ($env:SMOKE_TIMEOUT) { [int]$env:SMOKE_TIMEOUT } else { 60 }
+$timeout = if ($env:SMOKE_TIMEOUT) { [int]$env:SMOKE_TIMEOUT } else { 120 }
 $marker  = if ($env:SMOKE_MARKER)  { $env:SMOKE_MARKER }        else { "Starting runcore" }
 $log     = if ($env:SMOKE_LOG)     { $env:SMOKE_LOG }           else { "smoke.log" }
 $errLog  = [IO.Path]::ChangeExtension($log, ".err.log")

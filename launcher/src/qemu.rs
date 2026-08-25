@@ -82,6 +82,13 @@ const DISK_BYTES: u64 = 127_731_564_544;
 /// build host.
 const QEMU_SIDECAR: &str = "qemu-system-guest";
 
+/// Where QEMU looks for the accelerators, block drivers and UI backends that
+/// some distributions build as `dlopen`'d modules rather than linking in. The
+/// bundling scripts drop them in alongside the shared libraries, so this
+/// points at the same directory. Harmless on a build that has no modules, and
+/// on a source build there is nothing bundled to point at.
+const QEMU_MODULE_DIR: &str = "QEMU_MODULE_DIR";
+
 /// Lazily creates the backing qcow2 disk image if missing. Idempotent; to
 /// reset device state, delete the file and re-launch.
 pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<(), Box<dyn Error>> {
@@ -99,6 +106,7 @@ pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<(), B
     suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
         cmd.env(library_path_var(), prepend_library_path(libs));
+        cmd.env(QEMU_MODULE_DIR, libs);
     }
     let output = cmd
         .args(["create", "-f", "qcow2"])
@@ -156,6 +164,7 @@ pub(crate) fn spawn_qemu(
     if let Some(libs) = qemu_libs {
         eprintln!("[launcher] passing -L {} to QEMU", libs.display());
         cmd.env(library_path_var(), prepend_library_path(libs));
+        cmd.env(QEMU_MODULE_DIR, libs);
         // -L points QEMU at its firmware/BIOS/keymap datadir, e.g.
         // bios-256k.bin, which the q35 machine model needs even for a direct
         // -kernel boot since SeaBIOS still runs first. QEMU looks up only the
