@@ -111,7 +111,10 @@ Run with `--help` for the full list.
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
 | `launcher/tauri.release.conf.json` | Adds the bundled QEMU and firmware to the base Tauri config. Applied by CI only, so a source build stays free of them. |
-| `.github/scripts/` | CI-only: gather a relocatable, host-arch QEMU and the pinned firmware release for packaging, and code-sign what macOS requires signed. |
+| `.github/scripts/fetch-*` | CI-only: gather a relocatable, host-arch QEMU and the pinned firmware release for packaging, and code-sign what macOS requires signed. |
+| `.github/scripts/smoke-*` | Launch a built emulator and wait for the emulated device to finish booting. Used by CI, runnable by hand. |
 | `launcher/entitlements.plist` | macOS entitlements. Restores what the Hardened Runtime takes away: hardware acceleration, the TCG JIT, and `DYLD_LIBRARY_PATH`. |
-| `.github/workflows/release.yml` | Tag-triggered CI: builds macOS/Windows/Linux installers and attaches them to a GitHub Release. |
+| `.github/workflows/build.yml` | The pipeline: builds macOS/Windows/Linux installers, then smoke tests each platform's no-install artifact on a clean machine. Called by the two below. |
+| `.github/workflows/test-and-build.yml` | Runs the pipeline on every push to a pull request. |
+| `.github/workflows/release.yml` | Runs the pipeline on a tag, then attaches the installers to a GitHub Release. |
 
