@@ -28,7 +28,7 @@ Each platform has both an installed and a no-install option:
 | Platform | Installed | No-install |
 |---|---|---|
 | Linux | `.deb` | `.AppImage`: mark it executable and run it |
-| macOS | `.dmg` | `.app.zip`: unzip, the `.app` runs from anywhere |
+| macOS | `.dmg` | `.zip`: unzip, the `.app` inside runs from anywhere |
 | Windows | NSIS `.exe` installer | `.zip`: unzip, run `Ark Emulator.exe` from inside |
 
 Each asset has a `.sha256` file published alongside it; verify with

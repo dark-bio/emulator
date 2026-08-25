@@ -160,7 +160,7 @@ jobs:
           prefix="dist/ark-emulator-${version}-${os_name}-${ARCH}"
 
           for f in target/release/bundle/dmg/*.dmg; do cp "$f" "${prefix}.dmg"; done
-          for f in target/release/bundle/macos/*.app.zip; do cp "$f" "${prefix}.app.zip"; done
+          for f in target/release/bundle/macos/*.app.zip; do cp "$f" "${prefix}.zip"; done
           for f in target/release/bundle/nsis/*.exe; do cp "$f" "${prefix}.exe"; done
           for f in target/release/portable/*.zip; do cp "$f" "${prefix}.zip"; done
           for f in target/release/bundle/deb/*.deb; do cp "$f" "${prefix}.deb"; done
