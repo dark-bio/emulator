@@ -292,15 +292,23 @@ jobs:
           name: installers-${{ matrix.os }}
           path: dist
 
-      - name: Install the AppImage runtime requirement
-        # libfuse2 is AppImage's own requirement for mounting itself, not a
-        # dependency of this app, and the runner images stopped shipping it.
-        # It is the only thing this job is allowed to install; anything the
-        # emulator itself needs has to come out of the bundle.
+      - name: Install what a desktop Linux has and a runner image does not
+        # Neither of these is a dependency of this app, and between them they
+        # are everything this job is allowed to install. Whatever the emulator
+        # itself needs, QEMU and its libraries and the firmware, has to come
+        # out of the bundle or the smoke test is not testing anything.
+        #
+        # libfuse2 is what an AppImage needs to mount itself. The graphics
+        # libraries are the host's driver stack, which AppImage deliberately
+        # never bundles because a driver has to match the machine it runs on,
+        # the same reason fetch-qemu-linux.sh refuses to bundle glibc. Any
+        # desktop has them; a server image has no reason to.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse2
+          sudo apt-get install -y \
+            libfuse2 \
+            libegl1 libgl1 libgles2 libglx-mesa0 libgl1-mesa-dri libgbm1
 
       - name: Smoke test the portable AppImage
         # The launcher is a Tauri GUI app with no headless mode, so it needs
@@ -308,6 +316,13 @@ jobs:
         # rather than the AppImage so the whole process tree shares one
         # ephemeral server; -a picks a free display number.
         if: runner.os == 'Linux'
+        env:
+          # Xvfb exposes no DRI device, so WebKitGTK's DMA-BUF renderer has
+          # nothing to allocate against and Mesa has no GPU to drive. Both of
+          # these are headless-CI workarounds; neither is anything a desktop
+          # user would set, and neither affects whether the guest boots.
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           app="$(echo dist/*.AppImage)"
           chmod +x "$app"
