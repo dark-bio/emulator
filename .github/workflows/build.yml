@@ -1,29 +1,23 @@
 name: Build and Smoke Test (Reusable)
 
-# Builds installers for macOS (arm64 + x86_64), Windows, and Linux, then
-# smoke tests the no-install artifact of each on a clean machine. Called by
-# test-and-build.yml on pull requests and by release.yml on tags, so both
-# paths compile and verify identically and a release cannot ship a portable
-# build that fails to launch.
+# Builds installers for macOS (arm64 + x86_64), Windows, and Linux, then smoke
+# tests the no-install artifact of each on a clean machine. Called by
+# build-and-smoke.yml on pull requests and by release.yml on tags, so a release
+# cannot ship a portable build that fails to launch.
 #
-# Each platform builds natively (no cross-compilation) and bundles its own
-# QEMU plus the pinned firmware release for its own host architecture only,
-# not both guest architectures (see .github/scripts/fetch-qemu-*), so the
-# resulting installers work standalone with nothing to install, and stay
-# smaller. The firmware fetch runs per job rather than once shared, since
-# which architecture's release assets it needs now depends on each job's own
-# host.
+# Each platform builds natively and bundles QEMU and firmware for its own host
+# architecture only (see .github/scripts/qemu-common.sh), so both fetches run
+# per job rather than once shared.
 #
-# Also produces a no-install artifact per platform: the AppImage on Linux,
-# the raw .app on macOS, and a hand-assembled portable .zip on Windows
-# (NSIS has no portable mode; Tauri gives no other way to get one).
+# The no-install artifact is the AppImage on Linux, the raw .app on macOS, and a
+# hand-assembled portable .zip on Windows: NSIS has no portable mode, and Tauri
+# gives no other way to get one.
 on:
   workflow_call:
 
 env:
-  # Firmware images are published to the public dark-bio/emulator-images
-  # repo (see fetch-firmware.sh); bumping the bundled firmware is just
-  # updating this one value.
+  # Firmware images are published to the public dark-bio/emulator-images repo
+  # (see fetch-firmware.sh); bumping the bundled firmware is updating this value.
   FIRMWARE_TAG: "v0.11.4"
 
 permissions:
@@ -55,26 +49,19 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Skipped on tags so a release always builds from scratch, matching
-      # what the firmware repo does for its production images.
       - name: Cache Rust artifacts
+        # Skipped on tags so a release always builds from scratch.
         if: github.ref_type != 'tag'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
 
-      # Swatinem/rust-cache covers the target directory and the registry, but
-      # not ~/.cargo/bin, so tauri-cli would otherwise be compiled from source
-      # on all four runners on every run. `cargo install` exits successfully
-      # and near-instantly when the requested version is already present, so
-      # it stays as the cache-miss path rather than being skipped.
-      #
-      # A consequence worth knowing: because any cached 2.x satisfies the "^2"
-      # requirement, a restored cache pins the tool at whatever version it was
-      # first populated with until the entry is evicted for going a week
-      # untouched. Tags skip this cache entirely, so a release is never built
-      # by a silently outdated tauri-cli.
       - name: Cache tauri-cli
+        # Swatinem/rust-cache covers the target directory and the registry but
+        # not ~/.cargo/bin, so tauri-cli would otherwise be compiled from source
+        # on all four runners every run. A restored cache pins the tool at
+        # whatever 2.x it was populated with, since any of them satisfies "^2";
+        # tags skip this cache, so a release is never built by a stale one.
         if: github.ref_type != 'tag'
         uses: actions/cache@v4
         with:
@@ -84,6 +71,8 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-tauri-cli-v2
 
       - name: Install tauri-cli
+        # Exits successfully and near-instantly when the version is already
+        # present, so this doubles as the cache-miss path.
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Install Linux build dependencies
@@ -94,7 +83,7 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-            qemu-system-arm qemu-system-x86 qemu-utils ipxe-qemu
+            qemu-system-x86 qemu-utils ipxe-qemu
 
       - name: Fetch bundled QEMU (Linux)
         if: runner.os == 'Linux'
@@ -110,13 +99,12 @@ jobs:
         run: .github/scripts/fetch-qemu-windows.ps1
 
       - name: Fetch pinned firmware release
-        # shell: bash is GitHub Actions' own documented cross-platform
-        # option: on Windows it runs via the Git for Windows bash already on
-        # the runner, the same interpreter fetch-firmware.sh needs, so one
-        # step covers all three OSes without a pwsh wrapper subprocess.
+        # shell: bash is GitHub Actions' own documented cross-platform option:
+        # on Windows it runs via the Git for Windows bash already on the runner,
+        # so one step covers all three OSes without a pwsh wrapper subprocess.
         #
-        # dark-bio/emulator-images is public, so no secret is needed here;
-        # the ambient GITHUB_TOKEN is only for the API rate limit.
+        # dark-bio/emulator-images is public, so no secret is needed; the
+        # ambient GITHUB_TOKEN is only for the API rate limit.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,23 +113,16 @@ jobs:
       - name: Build
         # tauri.release.conf.json adds the bundled QEMU/firmware to the base
         # config (JSON merge patch, so it only adds those keys). They're kept
-        # out of tauri.conf.json because tauri-build validates externalBin
-        # paths and resource globs on every cargo invocation, which would
-        # make a plain `cargo run` from a fresh clone fail until the fetch
-        # scripts had been run.
+        # out of tauri.conf.json because tauri-build validates externalBin paths
+        # and resource globs on every cargo invocation, which would make a plain
+        # `cargo run` from a fresh clone fail until the fetch scripts had run.
         run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
       - name: Verify macOS signature
-        # Checks the whole signed tree, not just the main executable, since
-        # the bundler signs sidecars and resources through different paths
-        # (resources not at all: see fetch-qemu-macos.sh). Each dylib is
-        # verified by name because codesign seals a loose .dylib under
-        # Resources/ as data rather than as nested code, so --deep alone would
-        # report a bundle full of unsigned libraries as valid.
-        #
-        # The two --display calls are logging, not assertions. The sidecar's
-        # is the interesting one: it is the process that needs
-        # allow-dyld-environment-variables to find the bundled dylibs at all.
+        # The per-dylib loop is not redundant with --deep: codesign seals a loose
+        # .dylib under Resources/ as data rather than as nested code, so --deep
+        # alone reports a bundle full of unsigned libraries as valid. The two
+        # --display calls are logging, not assertions.
         #
         # spctl is the real Gatekeeper verdict and is expected to reject an
         # ad-hoc build, so it is reported rather than enforced. It is the one
@@ -160,12 +141,10 @@ jobs:
             || echo "not accepted by Gatekeeper: ad-hoc signed, not notarized"
 
       - name: Zip portable macOS app
-        # ditto (not zip -r) is Apple's recommended way to archive a .app:
-        # plain zip can mangle extended attributes and resource forks.
-        # --keepParent so extracting drops a plain "Ark Emulator.app", not
-        # its contents loose in the current directory. Named generically
-        # here; the final release-asset name is assigned in "Stage
-        # artifacts" below.
+        # ditto (not zip -r) is Apple's recommended way to archive a .app: plain
+        # zip can mangle extended attributes and resource forks. --keepParent so
+        # extracting drops a plain "Ark Emulator.app", not its contents loose in
+        # the current directory.
         if: runner.os == 'macOS'
         run: |
           app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
@@ -173,12 +152,11 @@ jobs:
             "target/release/bundle/macos/Ark-Emulator.app.zip"
 
       - name: Build portable Windows zip
-        # Tauri's own resource staging only happens inside the NSIS
-        # installer's payload, not as a loose directory on disk, so this
-        # reassembles the same flat layout by hand: main exe + sidecar exes
-        # + qemu-libs/firmware all as siblings, matching both a real install
-        # and what BaseDirectory::Resource resolves relative to current_exe()
-        # regardless of whether the app was installed or just unzipped.
+        # Tauri's resource staging only happens inside the NSIS installer's
+        # payload, not as a loose directory on disk, so this reassembles the same
+        # flat layout by hand: main exe + sidecar exes + qemu-libs/firmware as
+        # siblings, matching both a real install and what BaseDirectory::Resource
+        # resolves relative to current_exe().
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -189,28 +167,22 @@ jobs:
           Copy-Item "target/release/qemu-img.exe" $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
           Copy-Item "launcher/firmware" (Join-Path $portableDir "firmware") -Recurse
-          # Named generically; the final release-asset name is assigned in
-          # "Stage artifacts" below.
           Compress-Archive -Path $portableDir `
             -DestinationPath "target/release/portable/Ark-Emulator-portable.zip"
 
       - name: Stage artifacts
-        # actions/upload-artifact computes the least common ancestor across
-        # every line of a multi-pattern `path:` and preserves the directory
-        # structure below it, so pointing it straight at bundle/dmg/,
-        # bundle/deb/, etc. produces an artifact with deb/ and appimage/ as
-        # actual subdirectories rather than flat files. gh release create
-        # then tries to upload a directory as an asset and fails. Staging
-        # everything flat here first sidesteps that entirely.
+        # actions/upload-artifact computes the least common ancestor across every
+        # line of a multi-pattern `path:` and preserves the directory structure
+        # below it, so pointing it straight at bundle/dmg/, bundle/deb/, etc.
+        # produces an artifact with those as real subdirectories. gh release
+        # create then tries to upload a directory as an asset and fails. Staging
+        # everything flat here sidesteps that.
         #
-        # Also assigns the final release-asset name here, consistently
-        # across every artifact on every platform:
-        # ark-emulator-{version}-{os}-{arch}.{ext}, os one of
-        # linux/macos/windows, arch one of amd64/arm64. Only a tag carries a
-        # version, and GITHUB_REF_NAME is a "<pr>/merge" path fragment on a
-        # pull request, so anything else is named after its commit instead.
-        # nullglob so a pattern that doesn't apply to this OS (e.g. *.dmg on
-        # Linux) just contributes nothing instead of erroring under -e.
+        # This is also where every artifact gets its final release-asset name,
+        # ark-emulator-{version}-{os}-{arch}.{ext}. Only a tag carries a version,
+        # and GITHUB_REF_NAME is a "<pr>/merge" path fragment on a pull request,
+        # so anything else is named after its commit. nullglob so a pattern that
+        # doesn't apply to this OS contributes nothing instead of erroring.
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
@@ -235,27 +207,13 @@ jobs:
           ls -la dist/
 
       - name: Generate checksums
-        # Matches the convention already used for the bundled firmware
-        # images (see fetch-firmware.sh's verification): a same-named
-        # .sha256 file per asset, so anyone downloading a release can verify
-        # it themselves. macOS has no sha256sum by default (shasum -a 256
-        # instead); Linux and Git for Windows' bundled coreutils both do.
         shell: bash
-        run: |
-          cd dist
-          for f in *; do
-            if command -v sha256sum >/dev/null; then
-              sha256sum "$f" > "$f.sha256"
-            else
-              shasum -a 256 "$f" > "$f.sha256"
-            fi
-          done
-          ls -la
+        run: .github/scripts/checksums.sh dist
 
       - name: Upload installers
         # Uploaded on every run, not just tags: the smoke job downloads these
-        # rather than rebuilding, so the artifact it tests is bit-for-bit the
-        # one a release would publish.
+        # rather than rebuilding, so the artifact it tests is bit-for-bit the one
+        # a release would publish.
         uses: actions/upload-artifact@v6
         with:
           name: installers-${{ matrix.os }}
@@ -263,24 +221,18 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Launches each platform's no-install artifact on a runner that never had
-  # the build job's dependencies installed on it, and waits for the emulated
-  # device to finish booting. The build job apt-installs QEMU and webkit and
-  # brew-installs QEMU, so it is the wrong machine to test the "nothing to
-  # install" claim on; a fresh runner per leg is the whole point. Nothing is
-  # installed here beyond AppImage's own FUSE requirement, and no flags are
-  # passed to the launcher, so this is a user's first launch: bundled
+  # Launches each platform's no-install artifact on a runner that never had the
+  # build job's dependencies installed on it. The build job apt-installs QEMU and
+  # webkit and brew-installs QEMU, so it is the wrong machine to test the
+  # "nothing to install" claim on; a fresh runner per leg is the point. No flags
+  # are passed to the launcher, so this is a user's first launch: bundled
   # firmware, an empty app data directory, and a qcow2 created from scratch.
   smoke:
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-26
-          - os: macos-26-intel
-          - os: windows-2022
-          - os: ubuntu-22.04
+        os: [macos-26, macos-26-intel, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -293,16 +245,14 @@ jobs:
           path: dist
 
       - name: Install what a desktop Linux has and a runner image does not
-        # Neither of these is a dependency of this app, and between them they
-        # are everything this job is allowed to install. Whatever the emulator
-        # itself needs, QEMU and its libraries and the firmware, has to come
-        # out of the bundle or the smoke test is not testing anything.
+        # Neither of these is a dependency of this app, and between them they are
+        # everything this job is allowed to install. Whatever the emulator itself
+        # needs has to come out of the bundle or this tests nothing.
         #
         # libfuse2 is what an AppImage needs to mount itself. The graphics
-        # libraries are the host's driver stack, which AppImage deliberately
-        # never bundles because a driver has to match the machine it runs on,
-        # the same reason fetch-qemu-linux.sh refuses to bundle glibc. Any
-        # desktop has them; a server image has no reason to.
+        # libraries are the host's driver stack, which AppImage deliberately never
+        # bundles because a driver has to match the machine it runs on, the same
+        # reason fetch-qemu-linux.sh refuses to bundle glibc.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -311,16 +261,15 @@ jobs:
             libegl1 libgl1 libgles2 libglx-mesa0 libgl1-mesa-dri libgbm1
 
       - name: Smoke test the portable AppImage
-        # The launcher is a Tauri GUI app with no headless mode, so it needs
-        # a display to get past window creation. xvfb-run wraps the script
-        # rather than the AppImage so the whole process tree shares one
-        # ephemeral server; -a picks a free display number.
+        # The launcher is a Tauri GUI app with no headless mode, so it needs a
+        # display to get past window creation. xvfb-run wraps the script rather
+        # than the AppImage so the whole process tree shares one ephemeral
+        # server; -a picks a free display number.
         if: runner.os == 'Linux'
         env:
           # Xvfb exposes no DRI device, so WebKitGTK's DMA-BUF renderer has
-          # nothing to allocate against and Mesa has no GPU to drive. Both of
-          # these are headless-CI workarounds; neither is anything a desktop
-          # user would set, and neither affects whether the guest boots.
+          # nothing to allocate against and Mesa has no GPU to drive. Both are
+          # headless-CI workarounds; neither affects whether the guest boots.
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -331,8 +280,8 @@ jobs:
       - name: Smoke test the portable app bundle
         # Runs the bundle's own executable rather than going through `open`,
         # which returns immediately and leaves no pid to poll or redirect.
-        # Artifacts fetched by download-artifact carry no quarantine
-        # attribute, and the ad-hoc signature is enough to execute.
+        # Artifacts fetched by download-artifact carry no quarantine attribute,
+        # and the ad-hoc signature is enough to execute.
         if: runner.os == 'macOS'
         run: |
           unzip -q dist/*.zip -d unpacked

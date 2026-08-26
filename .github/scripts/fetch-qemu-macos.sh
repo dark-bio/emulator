@@ -1,39 +1,19 @@
 #!/usr/bin/env bash
-# fetch-qemu-macos.sh: populate launcher/binaries/ and launcher/qemu-libs/
-# with a relocatable QEMU, for both CI and local development.
+# fetch-qemu-macos.sh: populate launcher/binaries/ and launcher/qemu-libs/ with
+# a relocatable QEMU. The macOS half of qemu-common.sh, which carries the
+# skeleton and the bundling rules both platforms share.
 #
 # `brew install qemu` links its binaries against dylibs under the Homebrew
-# Cellar (e.g. /opt/homebrew/Cellar/... or /usr/local/Cellar/...), which
-# isn't portable to a machine without that exact Homebrew layout. Rather than
-# rewriting each binary's load commands with install_name_tool, this copies
-# every non-system dylib dependency into launcher/qemu-libs/ (bundled as a
-# Tauri resource) unmodified and relies on DYLD_LIBRARY_PATH (set at spawn
-# time by the launcher, see platform.rs's `prepend_library_path`): dyld
-# searches DYLD_LIBRARY_PATH/<basename> before a dependency's recorded
-# install-name path, even when that path is absolute, so no binary patching is
-# required. The app bundle entitles the sidecars to read DYLD_* variables,
-# which the Hardened Runtime would otherwise strip (see entitlements.plist).
-#
-# Only the QEMU system emulator matching the build host's own architecture is
-# bundled, as the generic "qemu-system-guest" sidecar name (which real
-# qemu-system-* binary that is depends on the host). Bundling both guest
-# architectures would double the installer size for no benefit to most
-# users; a source build still gets both via a PATH-installed QEMU (see
-# qemu.rs's `spawn_qemu`). qemu-img has no per-arch variant and is always
-# bundled.
-#
-# The x86_64 guest also needs its firmware/BIOS datadir (bios-256k.bin for
-# SeaBIOS, which the q35 machine model runs before a direct -kernel boot;
-# plus option ROMs like vgabios-stdvga.bin, since -nographic still implies a
-# default VGA device even with no display output). Copies every small file
-# (<5MB) from QEMU's datadir rather than hand-picking filenames, since which
-# ROMs QEMU actually loads depends on the configured devices. Excludes the
-# ~64MB ARM UEFI blobs (edk2-arm-{code,vars}.fd): the arm64 virt board needs
-# no firmware for a direct kernel boot, and they'd otherwise dominate the
-# bundle size. Bundled into the same libs_dir as the dylib dependencies and
-# located via -L (see qemu.rs's `spawn_qemu`); QEMU looks up specific
-# filenames there and ignores everything else, so co-locating it with
-# unrelated files is harmless. The arm64 host leg never reaches this block.
+# Cellar (e.g. /opt/homebrew/Cellar/... or /usr/local/Cellar/...), which isn't
+# portable to a machine without that exact Homebrew layout. Rather than
+# rewriting each binary's load commands with install_name_tool, every non-system
+# dylib dependency is copied into launcher/qemu-libs/ (bundled as a Tauri
+# resource) unmodified and found at run time through DYLD_LIBRARY_PATH (set by
+# the launcher, see platform.rs's `prepend_library_path`): dyld searches
+# DYLD_LIBRARY_PATH/<basename> before a dependency's recorded install-name path,
+# even when that path is absolute. The app bundle entitles the sidecars to read
+# DYLD_* variables, which the Hardened Runtime would otherwise strip (see
+# entitlements.plist).
 #
 # Run once per architecture, from the emulator repo root, on that
 # architecture's own machine. arm64 Homebrew and x86_64 Homebrew are separate
@@ -41,10 +21,7 @@
 #   .github/scripts/fetch-qemu-macos.sh
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-bin_dir="$repo_root/launcher/binaries"
-libs_dir="$repo_root/launcher/qemu-libs"
-mkdir -p "$bin_dir" "$libs_dir"
+. "$(dirname "${BASH_SOURCE[0]}")/qemu-common.sh"
 
 if ! command -v brew >/dev/null; then
   echo "Homebrew is required (https://brew.sh)" >&2
@@ -53,15 +30,9 @@ fi
 
 brew list qemu >/dev/null 2>&1 || brew install qemu
 
-triple="$(rustc -vV | sed -n 's/^host: //p')"
-if [ -z "$triple" ]; then
-  echo "could not determine host target triple via 'rustc -vV'" >&2
-  exit 1
-fi
-
 # System frameworks/dylibs are never bundled: they ship with every macOS
-# install. Whether dyld would check DYLD_LIBRARY_PATH for them is moot,
-# since we never copy them in the first place.
+# install. Whether dyld would check DYLD_LIBRARY_PATH for them is moot, since we
+# never copy them in the first place.
 is_system_lib() {
   case "$1" in
     /usr/lib/*|/System/*) return 0 ;;
@@ -69,107 +40,41 @@ is_system_lib() {
   esac
 }
 
-# Copies $1's non-system dylib dependencies into libs_dir (skips ones
-# already copied).
+# Copies $1's non-system dylib dependencies into libs_dir (skips ones already
+# copied).
 collect_deps() {
-  local bin="$1"
+  local bin="$1" install_name
+  # A dylib's first `otool -L` entry is its own install name; skip
+  # self-references so we don't try to copy the binary onto itself.
+  install_name="$(otool -D "$bin" 2>/dev/null | tail -n +2)"
   otool -L "$bin" | tail -n +2 | awk '{print $1}' | while read -r dep; do
     is_system_lib "$dep" && continue
-    # A dylib's first `otool -L` entry is its own install name; skip
-    # self-references so we don't try to copy the binary onto itself.
-    [ "$dep" = "$(otool -D "$bin" 2>/dev/null | tail -n +2)" ] && continue
+    [ "$dep" = "$install_name" ] && continue
     dest="$libs_dir/$(basename "$dep")"
     [ -e "$dest" ] || cp -L "$dep" "$dest"
   done
 }
 
-case "$triple" in
-  aarch64-*) native_qemu=qemu-system-aarch64 ;;
-  x86_64-*)  native_qemu=qemu-system-x86_64 ;;
-  *)
-    echo "unsupported host architecture in triple $triple" >&2
-    exit 1 ;;
-esac
+bundle_binary qemu-system-guest "$native_qemu"
+bundle_binary qemu-img qemu-img
 
-# Not an associative array: macOS runners resolve plain `bash` to Apple's
-# pre-installed bash 3.2 (frozen pre-GPLv3), which predates `declare -A`
-# (bash 4.0+). Two explicit calls instead.
-fetch_binary() {
-  local name="$1" bin="$2" src
-  # `command -v` prints nothing and returns non-zero on failure; caught
-  # explicitly here so a missing binary reports a clear cause instead of
-  # `set -e` killing the script with no output.
-  src="$(command -v "$bin" || true)"
-  if [ -z "$src" ]; then
-    echo "$bin not found on PATH (needed for the $name sidecar); is qemu installed?" >&2
-    exit 1
-  fi
-  cp -L "$src" "$bin_dir/${name}-${triple}"
-  collect_deps "$src"
-}
+bundle_firmware
 
-fetch_binary "qemu-system-guest" "$native_qemu"
-fetch_binary "qemu-img" "qemu-img"
-
-# Ask QEMU which datadirs it searches rather than guessing at Homebrew's
-# layout, whose prefix is a symlink into the Cellar. Queried through the
-# system binary on PATH, not the copy already in bin_dir, since these paths
-# are reported relative to the binary's own location. -L on find follows any
-# symlinks inside them.
-qemu_datadirs="$("$native_qemu" -L help 2>/dev/null || true)"
-if [ -z "$qemu_datadirs" ]; then
-  echo "could not determine QEMU's firmware datadirs via '$native_qemu -L help'" >&2
-  exit 1
-fi
-while IFS= read -r dir; do
-  [ -d "$dir" ] || continue
-  find -L "$dir" -maxdepth 1 \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) -size -5M \
-    -exec cp -L {} "$libs_dir/" \;
-done <<EOF
-$qemu_datadirs
-EOF
-
-# Assert per guest arch, since a silent miss here only surfaces later as an
-# opaque QEMU firmware error on a machine that has no QEMU to fall back to.
-required_firmware="efi-virtio.rom"
-if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-  required_firmware="$required_firmware bios-256k.bin vgabios-stdvga.bin"
-fi
-for f in $required_firmware; do
-  if [ ! -f "$libs_dir/$f" ]; then
-    echo "$f not found in any QEMU datadir:" >&2
-    echo "$qemu_datadirs" >&2
-    exit 1
-  fi
-done
-
-# Bundled dylibs can depend on each other, so keep walking until a pass
-# copies nothing new.
-prev_count=-1
-cur_count="$(find "$libs_dir" -type f | wc -l)"
-while [ "$cur_count" -ne "$prev_count" ]; do
-  prev_count="$cur_count"
-  for lib in "$libs_dir"/*.dylib; do
-    [ -f "$lib" ] && collect_deps "$lib"
-  done
-  cur_count="$(find "$libs_dir" -type f | wc -l)"
-done
+close_deps '*.dylib'
 
 # Sign the bundled dylibs. Tauri's bundler signs the sidecars and the .app
 # itself, but never the files it copies in as resources, which is where these
 # land. They arrive carrying Homebrew's own ad-hoc signature, so they do load
-# as-is; what rejects them is notarization, which refuses any nested Mach-O
-# not signed with the bundle's identity under the Hardened Runtime. Signing
-# them here rather than post-hoc keeps them ahead of the bundle signature that
-# seals them, which is the order Apple requires. Nothing else in libs_dir is
-# Mach-O; the BIOS and option ROMs are plain data.
+# as-is; what rejects them is notarization, which refuses any nested Mach-O not
+# signed with the bundle's identity under the Hardened Runtime. Signing them
+# here rather than post-hoc keeps them ahead of the bundle signature that seals
+# them, which is the order Apple requires. Nothing else in libs_dir is Mach-O;
+# the BIOS and option ROMs are plain data.
 #
-# Defaults to an ad-hoc signature, which needs no Apple account and is enough
-# to execute on Apple Silicon, but which no amount of stapling can make
-# Gatekeeper accept: that needs a Developer ID identity and notarization. Set
-# APPLE_SIGNING_IDENTITY to sign for real. The Tauri bundler reads the same
-# variable for the sidecars and the .app, so one value covers the bundle.
-# Ad-hoc signatures cannot carry a secure timestamp, hence the split.
+# APPLE_SIGNING_IDENTITY takes precedence over tauri.conf.json's own
+# signingIdentity in the Tauri bundler, so setting it covers the sidecars and
+# the .app as well as these. Ad-hoc signatures cannot carry a secure timestamp,
+# hence the split.
 identity="${APPLE_SIGNING_IDENTITY:--}"
 if [ "$identity" = "-" ]; then
   timestamp="--timestamp=none"

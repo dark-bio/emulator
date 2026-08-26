@@ -1,36 +1,30 @@
 #!/usr/bin/env bash
-# fetch-firmware.sh: populate launcher/firmware/<arch>/{kernel,initrd.gz}
-# from the pinned firmware release, for the build host's own architecture
-# only. This matches the single QEMU guest arch fetch-qemu-* bundles; see
-# those scripts. Cross-arch guests aren't supported by a packaged installer;
-# a source build passes its own --kernel/--initrd instead.
+# fetch-firmware.sh: populate launcher/firmware/<arch>/{kernel,initrd.gz} from
+# the pinned firmware release, for the build host's own architecture only, to
+# match the single QEMU guest arch qemu-common.sh bundles.
 #
 # Firmware images are published to dark-bio/emulator-images, a public repo
-# dedicated to that purpose, so no token is needed to read its releases (gh
-# still works better authenticated, for the API rate limit; the workflow
-# passes the ambient GITHUB_TOKEN for that, nothing needs to be created or
-# configured for it). FIRMWARE_TAG is still mandatory and has no default
-# here, so the pinned version lives solely in the workflow's env, not
-# duplicated into this script.
+# dedicated to that purpose, so no token is needed to read its releases. gh
+# still works better authenticated, for the API rate limit, and the workflow
+# passes the ambient GITHUB_TOKEN for that; nothing has to be created or
+# configured. FIRMWARE_TAG has no default here, so the pinned version lives
+# solely in the workflow's env rather than being duplicated into this script.
 #
-# Asset names embed the firmware's version and build commit
-# (arkos-<version>-<commit>-emulator-kernel.<arch>), neither of which this
-# script assumes. FIRMWARE_TAG alone pins the release, so both are matched
+# Asset names embed the firmware's version, which this script does not assume:
+# FIRMWARE_TAG alone pins the release, and the kernel and initrd are matched
 # with a wildcard. Bumping the bundled firmware is therefore just updating
-# FIRMWARE_TAG in the workflow; nothing here needs to change.
+# FIRMWARE_TAG in the workflow.
 #
-# Each asset has a same-named .sha256 file published alongside it, checked
-# here since `gh release download` doesn't verify one itself: HTTPS covers
-# tampering in transit, not a corrupted/truncated download completing
-# anyway, or a release's assets being silently replaced under an unchanged
-# filename without FIRMWARE_TAG changing. Verifying against a checksum
-# published in the same release isn't a defense against that release itself
-# being compromised, since both files could be replaced together; it's a
-# correctness check, not a trust boundary.
+# Each asset has a same-named .sha256 published alongside it, checked here since
+# `gh release download` verifies nothing itself. This catches a truncated
+# download that completed anyway, not a compromised release: both files could be
+# replaced together. It is a correctness check, not a trust boundary.
 #
 # Run from the emulator repo root:
 #   FIRMWARE_TAG=<tag> .github/scripts/fetch-firmware.sh
 set -euo pipefail
+
+. "$(dirname "${BASH_SOURCE[0]}")/checksums.sh"
 
 firmware_repo="dark-bio/emulator-images"
 : "${FIRMWARE_TAG:?set FIRMWARE_TAG to the firmware release tag to pin, e.g. v0.11.4}"
@@ -39,29 +33,6 @@ if ! command -v gh >/dev/null; then
   echo "the GitHub CLI (gh) is required" >&2
   exit 1
 fi
-
-# macOS has no sha256sum by default (shasum -a 256 instead); Linux and Git
-# for Windows' bundled coreutils both have sha256sum.
-sha256_of() {
-  if command -v sha256sum >/dev/null; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-
-# Compares against the first whitespace-delimited field of $1.sha256 rather
-# than feeding the file to `sha256sum -c` directly, so this doesn't depend
-# on the checksum file's recorded filename matching our own local path.
-verify_checksum() {
-  local file="$1" recorded actual
-  recorded="$(awk '{print $1}' "${file}.sha256")"
-  actual="$(sha256_of "$file")"
-  if [ "$recorded" != "$actual" ]; then
-    echo "checksum mismatch for $(basename "$file"): expected $recorded, got $actual" >&2
-    exit 1
-  fi
-}
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$triple" in

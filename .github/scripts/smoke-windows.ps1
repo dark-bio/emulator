@@ -1,7 +1,7 @@
 # smoke-windows.ps1: launch a built emulator and wait for the emulated device
-# to finish booting, for both CI and local development. The Windows half of
-# smoke-unix.sh; see that script's header for what this check is for and why
-# the boot marker is matched the way it is.
+# to finish booting. The Windows half of smoke-unix.sh; see that script's header
+# for what this check is for, why the boot marker is matched the way it is, and
+# what the timeout is sized for.
 #
 # Two log files rather than one, because Start-Process refuses to redirect
 # stdout and stderr to the same path. The split is not arbitrary: QEMU's
@@ -13,16 +13,7 @@
 # CREATE_NO_WINDOW only suppresses the console window, not the standard
 # handles, so QEMU still inherits the redirected ones from the launcher.
 #
-# Exits non-zero if the process dies before the marker appears, if the marker
-# never appears within the timeout, or if the service reports failure.
-#
 #   pwsh .github/scripts/smoke-windows.ps1 -Executable <path> [-Arguments ...]
-#
-# The default deadline is two minutes rather than something tighter because
-# the guest usually has no hardware acceleration to lean on: a CI runner
-# cannot open /dev/kvm and has no nested virtualization to give WHPX, so it
-# boots under TCG. A run that succeeds exits the moment the marker appears, so
-# a generous ceiling costs a passing run nothing.
 #
 # Env: SMOKE_TIMEOUT (seconds, default 120), SMOKE_MARKER, SMOKE_LOG.
 param(
@@ -43,11 +34,6 @@ if (-not (Test-Path $Executable)) {
     throw "$Executable does not exist"
 }
 
-# Strips ANSI colour and cursor-positioning escapes plus carriage returns,
-# then reattaches any status bracket left stranded at the start of a line to
-# the message above it, so a marker and its status share one line. Matching
-# across lines instead would let a later service's "[ ok ]" satisfy an
-# earlier service that never reported one.
 # Reads a file the launcher still holds open for writing. Get-Content would
 # fail on the sharing violation, and swallowing that error would look exactly
 # like a guest that never printed anything.
@@ -85,9 +71,9 @@ function Test-Marker([string]$status) {
 }
 
 function Write-Log {
-    Write-Host "----- $log -----"
+    Write-Host "----- $log + $errLog -----"
     Write-Host (Get-PlainLog)
-    Write-Host "----- end of $log -----"
+    Write-Host "----- end of logs -----"
 }
 
 New-Item -ItemType File -Force -Path $log, $errLog | Out-Null
