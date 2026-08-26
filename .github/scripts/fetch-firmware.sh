@@ -1,33 +1,24 @@
 #!/usr/bin/env bash
 # fetch-firmware.sh: populate launcher/firmware/<arch>/{kernel,initrd.gz} from
-# the pinned firmware release, for the build host's own architecture only, to
-# match the single QEMU guest arch qemu-common.sh bundles.
+# the pinned firmware release, for the build host's own architecture only.
 #
-# Firmware images are published to dark-bio/emulator-images, a public repo
-# dedicated to that purpose, so no token is needed to read its releases. gh
-# still works better authenticated, for the API rate limit, and the workflow
-# passes the ambient GITHUB_TOKEN for that; nothing has to be created or
-# configured. FIRMWARE_TAG has no default here, so the pinned version lives
-# solely in the workflow's env rather than being duplicated into this script.
-#
-# Asset names embed the firmware's version, which this script does not assume:
-# FIRMWARE_TAG alone pins the release, and the kernel and initrd are matched
-# with a wildcard. Bumping the bundled firmware is therefore just updating
-# FIRMWARE_TAG in the workflow.
+# dark-bio/emulator-images is public, so no token is needed to read its
+# releases. gh still works better authenticated, for the API rate limit.
+# FIRMWARE_TAG has no default, so the pinned version lives solely in the
+# workflow rather than being duplicated here. Asset names embed the version,
+# so the kernel and initrd are matched with a wildcard.
 #
 # Each asset has a same-named .sha256 published alongside it, checked here since
 # `gh release download` verifies nothing itself. This catches a truncated
-# download that completed anyway, not a compromised release: both files could be
-# replaced together. It is a correctness check, not a trust boundary.
+# download, not a compromised release: both files could be replaced together.
 #
-# Run from the emulator repo root:
 #   FIRMWARE_TAG=<tag> .github/scripts/fetch-firmware.sh
 set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/checksums.sh"
 
 firmware_repo="dark-bio/emulator-images"
-: "${FIRMWARE_TAG:?set FIRMWARE_TAG to the firmware release tag to pin, e.g. v0.11.4}"
+: "${FIRMWARE_TAG:?set FIRMWARE_TAG to the firmware release tag to pin}"
 
 if ! command -v gh >/dev/null; then
   echo "the GitHub CLI (gh) is required" >&2

@@ -1,49 +1,37 @@
 #!/usr/bin/env bash
 # smoke-unix.sh: launch a built emulator and wait for the emulated device to
-# finish booting, for both CI and local development. Covers Linux and macOS,
-# which differ only in how the workflow locates the executable and in needing
-# an X server; unlike the fetch-qemu-* scripts, the logic itself is shared.
+# finish booting. Covers Linux and macOS.
 #
-# The point of this check is the standalone claim a portable build makes: it
-# is meant to run on a machine with no QEMU, no webkit and no firmware on
-# disk. So run it on a clean machine, pass no flags, and let the launcher
-# resolve its own bundled firmware, create its own qcow2, and boot.
-#
-# QEMU is spawned with -serial stdio and inherits the launcher's handles, so
-# one redirection captures both the launcher's own "[launcher] ..."
-# diagnostics and the guest's console. Waiting for a specific line on that
+# The point is the standalone claim a portable build makes, so run it on a clean
+# machine, pass no flags, and let the launcher resolve its own bundled firmware,
+# create its own qcow2, and boot. Waiting for a specific line on the guest
 # console is a much stronger signal than waiting out a timer: it means QEMU
-# started, the bundled libraries resolved, the kernel booted, and the
-# firmware's services came up.
+# started, the bundled libraries resolved, the kernel booted, and the firmware's
+# services came up.
 #
-# OpenRC writes its status column by moving the cursor rather than by
-# printing the status next to the message, so on a real console "[ ok ]"
-# arrives after a cursor-up escape and ends up on a line of its own once
-# those escapes are stripped. Each status is therefore reattached to the
-# message above it before matching, which keeps the match within one line.
-# Matching across lines instead would let a later service's "[ ok ]" satisfy
-# an earlier service that never reported one. Stripping is done with perl,
-# not sed, because BSD sed does not understand \x1B escapes.
+# OpenRC writes its status column by moving the cursor, so on a real console
+# "[ ok ]" arrives after a cursor-up escape and lands on a line of its own once
+# the escapes are stripped. Each status is reattached to the message above it
+# before matching, keeping the match within one line; matching across lines
+# would let a later service's "[ ok ]" satisfy an earlier one that never
+# reported. Stripped with perl, not sed, because BSD sed cannot read \x1B.
 #
-# The stripped text is materialized to a file and grepped there rather than
-# piped into grep. Under `pipefail`, `grep -q` exiting on its first match
-# closes the pipe early, perl dies of SIGPIPE, and the pipeline reports
-# failure even though the pattern was found. That only bites once the log is
-# big enough for perl to still be writing, which is to say only on a real
-# boot.
+# The stripped text is written to a file and grepped there rather than piped
+# into grep. Under `pipefail`, `grep -q` exiting on its first match closes the
+# pipe early, perl dies of SIGPIPE, and the pipeline reports failure even though
+# the pattern was found. That only bites once the log is big enough for perl to
+# still be writing, which is to say only on a real boot.
 #
 # Exits non-zero if the process dies before the marker appears, if the marker
 # never appears within the timeout, or if the service reports failure.
 #
 #   .github/scripts/smoke-unix.sh <executable> [launcher args...]
 #
-# The default deadline is two minutes rather than something tighter because
-# the guest usually has no hardware acceleration to lean on: a CI runner
-# cannot open /dev/kvm and has no nested virtualization to give WHPX, so it
-# boots under TCG. A run that succeeds exits the moment the marker appears, so
-# a generous ceiling costs a passing run nothing.
+# The deadline is generous because a CI runner cannot open /dev/kvm and has no
+# nested virtualization to give WHPX, so the guest boots under TCG. A passing
+# run exits the moment the marker appears, so the ceiling costs it nothing.
 #
-# Env: SMOKE_TIMEOUT (seconds, default 120), SMOKE_MARKER, SMOKE_LOG.
+# Env: SMOKE_TIMEOUT (seconds), SMOKE_MARKER, SMOKE_LOG.
 set -euo pipefail
 
 timeout="${SMOKE_TIMEOUT:-120}"
@@ -67,8 +55,7 @@ pid=""
 
 cleanup() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    # The launcher ties QEMU's lifetime to its own, so killing the launcher
-    # is enough to tear the guest down too.
+    # The launcher ties QEMU's lifetime to its own, so this tears down the guest.
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do
       kill -0 "$pid" 2>/dev/null || break
@@ -80,11 +67,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Regenerates the matchable form of the log: ANSI colour and cursor
-# escapes and carriage returns removed, then any status bracket left
-# stranded at the start of a line reattached to the message above it. The
-# reattachment also handles a plain non-TTY layout, where the status is
-# printed on its own line with no escapes at all.
+# Regenerates the matchable form of the log. The reattachment also handles the
+# non-TTY layout, where the status is printed on its own line with no escapes.
 refresh() {
   perl -0777 -pe '
     s/\e\[[0-9;?]*[a-zA-Z]//g;
@@ -94,16 +78,14 @@ refresh() {
   ' "$log" > "$stripped"
 }
 
-# Whether the marker and the given status share a line, which after refresh
-# means the status belongs to that marker and not to some other service.
-# SMOKE_MARKER is used as an extended regular expression, not a literal.
+# After refresh, sharing a line means the status belongs to that marker and not
+# to some other service. SMOKE_MARKER is an extended regex, not a literal.
 matched() {
   grep -qE "$marker.*\[ *$1 *\]" "$stripped"
 }
 
-# Seen at all, regardless of outcome. Used to tell "never got there" apart
-# from "got there, but the status did not match", which are very different
-# failures to debug.
+# Tells "never got there" apart from "got there, but the status did not match",
+# which are very different failures to debug.
 seen_marker() {
   grep -qE "$marker" "$stripped"
 }

@@ -1,34 +1,25 @@
-# fetch-qemu-windows.ps1: populate launcher/binaries/ and launcher/qemu-libs/
-# with a relocatable QEMU. The Windows counterpart of fetch-qemu-linux.sh and
+# fetch-qemu-windows.ps1: the Windows counterpart of fetch-qemu-linux.sh and
 # fetch-qemu-macos.sh, which share a qemu-common.sh this cannot use.
 #
-# The official Windows build (qemu.weilnetz.de) already ships every DLL
-# qemu-system-*/qemu-img need side by side, with no Homebrew/apt-style
-# absolute-path linking to undo. Unlike the other two platforms, this is just
-# fetch, silent-install, and copy. DLLs go into launcher/qemu-libs/ (bundled as
-# a Tauri resource, same as elsewhere) rather than next to the exes, and the
-# launcher prepends that directory onto PATH before spawning (see platform.rs's
-# `prepend_library_path`), which is how Windows' default DLL search order picks
-# up a directory that isn't the exe's own.
+# The official Windows build already ships every DLL side by side, with no
+# absolute-path linking to undo, so this is just fetch, silent-install, and
+# copy. DLLs still go into launcher/qemu-libs/ rather than next to the exes, to
+# match the other two platforms.
 #
-# Only the QEMU system emulator matching the build host's own architecture is
-# bundled, under the generic "qemu-system-guest" sidecar name; see
-# qemu-common.sh for why. qemu-img is always bundled.
+# Only the host's own architecture is bundled, as the generic
+# "qemu-system-guest" sidecar; qemu-img is always bundled.
 #
-# Run from the emulator repo root:
 #   pwsh .github/scripts/fetch-qemu-windows.ps1
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 # Pinned rather than "newest on the index page", so a Windows build is
-# reproducible and every input to the installer is verified, the same way
-# FIRMWARE_TAG pins the firmware. To bump: pick a build from
-# https://qemu.weilnetz.de/w64/ and take the digest from its published .sha512.
+# reproducible. To bump, take a build and its published .sha512 from
+# https://qemu.weilnetz.de/w64/.
 #
-# That digest comes from the same server as the installer, so it pins the
-# artifact rather than vouching for it: from here on any change to the file is
-# caught, but the file was taken on trust once. There is no upstream signature
-# to check against, and the installer is not code-signed.
+# The digest comes from the same server as the installer, so it pins the
+# artifact rather than vouching for it. There is no upstream signature to check
+# against, and the installer is not code-signed.
 $QemuVersion = "20260811"
 $QemuSha512 = "5bcf9eed634e8575a37b74f445af41a2fe4106da512d0c30c368301d4c105037fdfab40a5287367a28a957624cddebbc8c07e16c88ab6634f554cdf3d16bf543"
 
@@ -72,23 +63,19 @@ foreach ($name in $binaries.Keys) {
     Copy-Item $src $dest -Force
 }
 
-# Copy every DLL rather than working out which of the exes needs which subset:
-# they're small relative to the qemu-system-* binaries, and this avoids
-# re-deriving Windows' own dependency graph.
+# Every DLL, rather than re-deriving Windows' own dependency graph to find the
+# subset the exes need. They are small next to the qemu-system-* binaries.
 Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force
 }
 
 # The firmware/BIOS files, whose subdirectory within the installer varies by
-# version, hence the recursive search. The 5MB cap excludes the ~64MB ARM UEFI
-# blobs (edk2-arm-{code,vars}.fd) if present, which a direct kernel boot never
-# uses. All land in the same libsDir the launcher points -L at (see qemu.rs's
-# `spawn_qemu`).
+# version, hence the recursive search. The size cap excludes the ARM UEFI blobs,
+# which a direct kernel boot never uses.
 #
-# Filtering by extension after an unrestricted -Recurse, rather than via
-# -Include, is deliberate: Get-ChildItem -Recurse -Include is unreliable unless
-# -Path itself ends in a wildcard, and a wrong pattern here matches nothing
-# without erroring.
+# Filtering by extension after an unrestricted -Recurse rather than via -Include
+# is deliberate: -Recurse -Include is unreliable unless -Path itself ends in a
+# wildcard, and a wrong pattern matches nothing without erroring.
 $firmwareExtensions = ".bin", ".rom", ".fd", ".dtb"
 $firmwareFiles = Get-ChildItem $installDir -Recurse -File |
     Where-Object { $_.Extension -in $firmwareExtensions -and $_.Length -lt 5MB }
@@ -96,10 +83,9 @@ foreach ($file in $firmwareFiles) {
     Copy-Item $file.FullName (Join-Path $libsDir $file.Name) -Force
 }
 
-# Asserted per guest arch, since a silent miss here only surfaces later as an
-# opaque QEMU firmware error on a machine that has no QEMU to fall back to.
-# efi-virtio.rom is the option ROM every virtio-pci device carries, so both
-# guests need it.
+# A silent miss only surfaces later as an opaque QEMU firmware error, on a
+# machine with no QEMU to fall back to. efi-virtio.rom is carried by every
+# virtio-pci device.
 $requiredFirmware = @("efi-virtio.rom")
 if ($nativeQemu -eq "qemu-system-x86_64.exe") {
     $requiredFirmware += "bios-256k.bin", "vgabios-stdvga.bin"

@@ -1,21 +1,17 @@
-# smoke-windows.ps1: launch a built emulator and wait for the emulated device
-# to finish booting. The Windows half of smoke-unix.sh; see that script's header
-# for what this check is for, why the boot marker is matched the way it is, and
-# what the timeout is sized for.
+# smoke-windows.ps1: the Windows half of smoke-unix.sh; see that script's header.
 #
 # Two log files rather than one, because Start-Process refuses to redirect
-# stdout and stderr to the same path. The split is not arbitrary: QEMU's
-# -serial stdio puts the guest console on stdout while the launcher's own
-# "[launcher] ..." diagnostics go to stderr, so both are needed to explain a
-# failure and both are matched against.
+# stdout and stderr to the same path. The split is not arbitrary: the guest
+# console arrives on stdout and the launcher's diagnostics on stderr, so both
+# are needed to explain a failure and both are matched against.
 #
 # A release build is linked as a GUI app and has no console of its own, but
-# CREATE_NO_WINDOW only suppresses the console window, not the standard
-# handles, so QEMU still inherits the redirected ones from the launcher.
+# CREATE_NO_WINDOW suppresses only the console window, not the standard handles,
+# so QEMU still inherits the redirected ones.
 #
 #   pwsh .github/scripts/smoke-windows.ps1 -Executable <path> [-Arguments ...]
 #
-# Env: SMOKE_TIMEOUT (seconds, default 120), SMOKE_MARKER, SMOKE_LOG.
+# Env: SMOKE_TIMEOUT (seconds), SMOKE_MARKER, SMOKE_LOG.
 param(
     [Parameter(Mandatory = $true)]
     [string]$Executable,
@@ -34,9 +30,8 @@ if (-not (Test-Path $Executable)) {
     throw "$Executable does not exist"
 }
 
-# Reads a file the launcher still holds open for writing. Get-Content would
-# fail on the sharing violation, and swallowing that error would look exactly
-# like a guest that never printed anything.
+# Reads a file the launcher still holds open. Get-Content fails on the sharing
+# violation, and swallowing that would look like a guest that printed nothing.
 function Read-SharedFile([string]$path) {
     if (-not (Test-Path $path)) { return "" }
     $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)

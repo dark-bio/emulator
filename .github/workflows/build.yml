@@ -5,10 +5,6 @@ name: Build and Smoke Test (Reusable)
 # build-and-smoke.yml on pull requests and by release.yml on tags, so a release
 # cannot ship a portable build that fails to launch.
 #
-# Each platform builds natively and bundles QEMU and firmware for its own host
-# architecture only (see .github/scripts/qemu-common.sh), so both fetches run
-# per job rather than once shared.
-#
 # The no-install artifact is the AppImage on Linux, the raw .app on macOS, and a
 # hand-assembled portable .zip on Windows: NSIS has no portable mode, and Tauri
 # gives no other way to get one.
@@ -16,8 +12,7 @@ on:
   workflow_call:
 
 env:
-  # Firmware images are published to the public dark-bio/emulator-images repo
-  # (see fetch-firmware.sh); bumping the bundled firmware is updating this value.
+  # Bumping the bundled firmware is updating this value.
   FIRMWARE_TAG: "v0.11.4"
 
 permissions:
@@ -57,11 +52,9 @@ jobs:
           workspaces: ". -> target"
 
       - name: Cache tauri-cli
-        # Swatinem/rust-cache covers the target directory and the registry but
-        # not ~/.cargo/bin, so tauri-cli would otherwise be compiled from source
-        # on all four runners every run. A restored cache pins the tool at
-        # whatever 2.x it was populated with, since any of them satisfies "^2";
-        # tags skip this cache, so a release is never built by a stale one.
+        # rust-cache covers the target directory and the registry but not
+        # ~/.cargo/bin, so tauri-cli would otherwise be built from source every
+        # run. A restored cache pins whatever 2.x it was populated with.
         if: github.ref_type != 'tag'
         uses: actions/cache@v4
         with:
@@ -71,8 +64,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-tauri-cli-v2
 
       - name: Install tauri-cli
-        # Exits successfully and near-instantly when the version is already
-        # present, so this doubles as the cache-miss path.
+        # A no-op when the cache hit, so this doubles as the cache-miss path.
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Install Linux build dependencies
@@ -99,35 +91,26 @@ jobs:
         run: .github/scripts/fetch-qemu-windows.ps1
 
       - name: Fetch pinned firmware release
-        # shell: bash is GitHub Actions' own documented cross-platform option:
-        # on Windows it runs via the Git for Windows bash already on the runner,
-        # so one step covers all three OSes without a pwsh wrapper subprocess.
-        #
-        # dark-bio/emulator-images is public, so no secret is needed; the
-        # ambient GITHUB_TOKEN is only for the API rate limit.
+        # shell: bash covers all three OSes: on Windows it runs via the Git for
+        # Windows bash already on the runner. The repo is public, so the ambient
+        # GITHUB_TOKEN is only for the API rate limit.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/fetch-firmware.sh
 
       - name: Build
-        # tauri.release.conf.json adds the bundled QEMU/firmware to the base
-        # config (JSON merge patch, so it only adds those keys). They're kept
-        # out of tauri.conf.json because tauri-build validates externalBin paths
-        # and resource globs on every cargo invocation, which would make a plain
-        # `cargo run` from a fresh clone fail until the fetch scripts had run.
+        # The release config is separate so that a plain `cargo run` from a fresh
+        # clone works: tauri-build validates externalBin paths and resource globs
+        # on every cargo invocation, before the fetch scripts have run.
         run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
       - name: Verify macOS signature
         # The per-dylib loop is not redundant with --deep: codesign seals a loose
-        # .dylib under Resources/ as data rather than as nested code, so --deep
-        # alone reports a bundle full of unsigned libraries as valid. The two
-        # --display calls are logging, not assertions.
-        #
-        # spctl is the real Gatekeeper verdict and is expected to reject an
-        # ad-hoc build, so it is reported rather than enforced. It is the one
-        # check here that flips to green once a Developer ID identity and
-        # notarization credentials exist.
+        # .dylib under Resources/ as data rather than nested code, so --deep alone
+        # passes a bundle full of unsigned libraries. The --display calls are
+        # logging. spctl is expected to reject an ad-hoc build, so it is reported
+        # rather than enforced.
         if: runner.os == 'macOS'
         run: |
           app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
@@ -141,10 +124,8 @@ jobs:
             || echo "not accepted by Gatekeeper: ad-hoc signed, not notarized"
 
       - name: Zip portable macOS app
-        # ditto (not zip -r) is Apple's recommended way to archive a .app: plain
-        # zip can mangle extended attributes and resource forks. --keepParent so
-        # extracting drops a plain "Ark Emulator.app", not its contents loose in
-        # the current directory.
+        # ditto, not zip -r, which can mangle extended attributes and resource
+        # forks. --keepParent so extracting drops the .app, not its contents.
         if: runner.os == 'macOS'
         run: |
           app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
@@ -152,11 +133,9 @@ jobs:
             "target/release/bundle/macos/Ark-Emulator.app.zip"
 
       - name: Build portable Windows zip
-        # Tauri's resource staging only happens inside the NSIS installer's
-        # payload, not as a loose directory on disk, so this reassembles the same
-        # flat layout by hand: main exe + sidecar exes + qemu-libs/firmware as
-        # siblings, matching both a real install and what BaseDirectory::Resource
-        # resolves relative to current_exe().
+        # Tauri stages resources only inside the NSIS payload, never as a loose
+        # directory, so this reassembles the installed layout by hand: main exe +
+        # sidecar exes + qemu-libs/firmware as siblings.
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -171,18 +150,15 @@ jobs:
             -DestinationPath "target/release/portable/Ark-Emulator-portable.zip"
 
       - name: Stage artifacts
-        # actions/upload-artifact computes the least common ancestor across every
-        # line of a multi-pattern `path:` and preserves the directory structure
-        # below it, so pointing it straight at bundle/dmg/, bundle/deb/, etc.
-        # produces an artifact with those as real subdirectories. gh release
-        # create then tries to upload a directory as an asset and fails. Staging
-        # everything flat here sidesteps that.
+        # upload-artifact preserves the directory structure below the least common
+        # ancestor of its `path:` patterns, so pointing it at the bundle
+        # directories yields real subdirectories, which gh release create then
+        # fails to upload as assets. Staging flat sidesteps that.
         #
-        # This is also where every artifact gets its final release-asset name,
-        # ark-emulator-{version}-{os}-{arch}.{ext}. Only a tag carries a version,
-        # and GITHUB_REF_NAME is a "<pr>/merge" path fragment on a pull request,
-        # so anything else is named after its commit. nullglob so a pattern that
-        # doesn't apply to this OS contributes nothing instead of erroring.
+        # Also where each artifact gets its final name. Only a tag carries a
+        # version, and GITHUB_REF_NAME is a "<pr>/merge" fragment on a pull
+        # request, so anything else is named after its commit. nullglob so a
+        # pattern that doesn't apply to this OS contributes nothing.
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
@@ -211,9 +187,8 @@ jobs:
         run: .github/scripts/checksums.sh dist
 
       - name: Upload installers
-        # Uploaded on every run, not just tags: the smoke job downloads these
-        # rather than rebuilding, so the artifact it tests is bit-for-bit the one
-        # a release would publish.
+        # Uploaded on every run: the smoke job downloads these rather than
+        # rebuilding, so it tests bit-for-bit what a release would publish.
         uses: actions/upload-artifact@v6
         with:
           name: installers-${{ matrix.os }}
@@ -222,11 +197,9 @@ jobs:
           if-no-files-found: error
 
   # Launches each platform's no-install artifact on a runner that never had the
-  # build job's dependencies installed on it. The build job apt-installs QEMU and
-  # webkit and brew-installs QEMU, so it is the wrong machine to test the
-  # "nothing to install" claim on; a fresh runner per leg is the point. No flags
-  # are passed to the launcher, so this is a user's first launch: bundled
-  # firmware, an empty app data directory, and a qcow2 created from scratch.
+  # build job's dependencies installed on it, which is the point: the build job
+  # installs QEMU and webkit, so it cannot test the "nothing to install" claim.
+  # No flags are passed, so this is a user's first launch.
   smoke:
     needs: build
     strategy:
@@ -245,14 +218,12 @@ jobs:
           path: dist
 
       - name: Install what a desktop Linux has and a runner image does not
-        # Neither of these is a dependency of this app, and between them they are
-        # everything this job is allowed to install. Whatever the emulator itself
+        # Everything this job is allowed to install. Whatever the emulator itself
         # needs has to come out of the bundle or this tests nothing.
         #
-        # libfuse2 is what an AppImage needs to mount itself. The graphics
-        # libraries are the host's driver stack, which AppImage deliberately never
-        # bundles because a driver has to match the machine it runs on, the same
-        # reason fetch-qemu-linux.sh refuses to bundle glibc.
+        # libfuse2 is what an AppImage needs to mount itself; the rest is the
+        # host's graphics driver stack, which AppImage never bundles because a
+        # driver has to match the machine it runs on.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -261,15 +232,13 @@ jobs:
             libegl1 libgl1 libgles2 libglx-mesa0 libgl1-mesa-dri libgbm1
 
       - name: Smoke test the portable AppImage
-        # The launcher is a Tauri GUI app with no headless mode, so it needs a
-        # display to get past window creation. xvfb-run wraps the script rather
-        # than the AppImage so the whole process tree shares one ephemeral
-        # server; -a picks a free display number.
+        # The launcher is a GUI app with no headless mode, so it needs a display
+        # to get past window creation. xvfb-run wraps the script, not the
+        # AppImage, so the whole process tree shares one ephemeral server.
         if: runner.os == 'Linux'
         env:
-          # Xvfb exposes no DRI device, so WebKitGTK's DMA-BUF renderer has
-          # nothing to allocate against and Mesa has no GPU to drive. Both are
-          # headless-CI workarounds; neither affects whether the guest boots.
+          # Xvfb exposes no DRI device, so the DMA-BUF renderer has nothing to
+          # allocate against and Mesa has no GPU. Neither affects the guest.
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -278,10 +247,9 @@ jobs:
           xvfb-run -a .github/scripts/smoke-unix.sh "$app"
 
       - name: Smoke test the portable app bundle
-        # Runs the bundle's own executable rather than going through `open`,
-        # which returns immediately and leaves no pid to poll or redirect.
-        # Artifacts fetched by download-artifact carry no quarantine attribute,
-        # and the ad-hoc signature is enough to execute.
+        # The bundle's own executable rather than `open`, which returns
+        # immediately and leaves no pid to poll or redirect. Downloaded artifacts
+        # carry no quarantine attribute.
         if: runner.os == 'macOS'
         run: |
           unzip -q dist/*.zip -d unpacked
