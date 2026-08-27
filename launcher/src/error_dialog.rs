@@ -44,23 +44,23 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 /// the two read very differently to someone who had a working emulator a
 /// moment ago.
 pub(crate) fn show(app: &AppHandle, title: &str, err: anyhow::Error) {
-    let Some((headline, report)) = prepare(title, err) else {
+    let Some(report) = prepare(title, err) else {
         return;
     };
-    open_or_exit(app, &headline, &report);
+    open_or_exit(app, &report);
 }
 
 /// Report a fatal error from a background thread. Window creation has to happen
 /// on the main thread, so the work is handed to the event loop; only the stderr
 /// half runs here.
 pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error) {
-    let Some((headline, report)) = prepare(title, err) else {
+    let Some(report) = prepare(title, err) else {
         return;
     };
     let app = app.clone();
     let handle = app.clone();
     if handle
-        .run_on_main_thread(move || open_or_exit(&app, &headline, &report))
+        .run_on_main_thread(move || open_or_exit(&app, &report))
         .is_err()
     {
         // The event loop is gone, so no window is possible and nothing will
@@ -70,10 +70,10 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
 }
 
 /// Write the report to stderr and decide whether a window should follow.
-/// Returns the headline and report to show, or `None` if this failure is not
-/// getting a window: either something already reported one, or dialogs are
-/// switched off, in which case the process is exiting instead.
-fn prepare(title: &str, err: anyhow::Error) -> Option<(String, String)> {
+/// Returns the report to show, or `None` if this failure is not getting a
+/// window: either something already reported one, or dialogs are switched off,
+/// in which case the process is exiting instead.
+fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
     let report = diagnostics::report(title, &err);
     eprintln!("{report}");
 
@@ -86,34 +86,43 @@ fn prepare(title: &str, err: anyhow::Error) -> Option<(String, String)> {
         // the request. QEMU dies with us either way, via `orphan`.
         std::process::exit(1);
     }
-    Some((diagnostics::headline(&err), report))
+    Some(report)
 }
 
 /// Build the error window, falling back to exiting if even that fails.
-fn open_or_exit(app: &AppHandle, headline: &str, report: &str) {
-    if let Err(e) = open(app, headline, report) {
+fn open_or_exit(app: &AppHandle, report: &str) {
+    if let Err(e) = open(app, report) {
         eprintln!("could not open the error window: {e}");
         std::process::exit(1);
     }
 }
 
-fn open(app: &AppHandle, headline: &str, report: &str) -> tauri::Result<()> {
+fn open(app: &AppHandle, report: &str) -> tauri::Result<()> {
     // Same trick the hw-addr plugin uses for __HW_ADDR__: Rust's Debug for str
     // is a valid JS string literal, so the report crosses into the page as a
     // constant with no IPC and no capability to grant. An init script is not
     // inline HTML, so a `</script>` inside a QEMU error message is inert.
-    let script = format!("window.__ERROR__ = {headline:?}; window.__REPORT__ = {report:?};");
+    // __WIDTH__ lets the page solve its enclosure geometry for whatever size
+    // this window was given, so WIDTH and HEIGHT above stay the only place a
+    // size is written down.
+    let script = format!("window.__REPORT__ = {report:?}; window.__WIDTH__ = {WIDTH};");
 
     // Built before the device face is closed. Tauri exits once the last window
     // goes, so closing that one first would take the error window with it.
-    // Fixed size, so the page can lay itself out once and let only the report
-    // scroll. Keeps its native frame, unlike the device face: if the webview
-    // is itself part of what went wrong, the OS close button is the way out.
+    // Transparent and undecorated, like the device face, so the page can paint
+    // the enclosure itself with nothing square behind its rounded corners.
+    // That leaves no OS close button, so the page carries its own Close, its
+    // own Escape handler, and a drag region to move the window by.
+    //
+    // Fixed size, so the page lays itself out once and only the report scrolls.
     let window = WebviewWindowBuilder::new(app, ERROR_WINDOW, WebviewUrl::App("error.html".into()))
         .title("Ark Emulator")
         .inner_size(WIDTH, HEIGHT)
         .resizable(false)
         .maximizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
         .center()
         .initialization_script(script)
         .build()?;

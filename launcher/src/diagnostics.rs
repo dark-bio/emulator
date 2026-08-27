@@ -82,11 +82,6 @@ pub(crate) fn record_path(key: &'static str, path: &Path) {
     record(key, path.display().to_string());
 }
 
-/// The one-line summary of a failure, for the error window's headline.
-pub(crate) fn headline(err: &anyhow::Error) -> String {
-    err.to_string()
-}
-
 /// The full copyable report: what failed, why, what this build and host are,
 /// and the recent log. `title` says which kind of failure this was, since
 /// dying during startup and dying an hour in read very differently.
