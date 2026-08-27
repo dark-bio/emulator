@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the macOS app bundle, applied to the launcher, both QEMU
+  sidecars, and the bundle itself. The Hardened Runtime is mandatory for
+  notarization and turns each of the following from a default into an opt-in;
+  without them a signed build fails at runtime in ways a source build never
+  does, so every entry here restores behaviour the launcher already relies on
+  rather than granting it something new.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Hypervisor.framework, for `-accel hvf` on a native guest (see
+	  platform.rs's `native_accel_flags`). Losing it is not fatal, since the
+	  launcher falls back to TCG, but it costs roughly an order of magnitude
+	  in guest speed.
+	-->
+	<key>com.apple.security.hypervisor</key>
+	<true/>
+
+	<!--
+	  TCG, QEMU's software emulation, is a JIT. It is what a cross-architecture
+	  guest always uses and what a native guest falls back to when
+	  Hypervisor.framework is unavailable, so it has to work on both
+	  architectures: allow-jit covers the MAP_JIT mappings used on arm64,
+	  allow-unsigned-executable-memory the plain RWX ones used on x86_64.
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!--
+	  The Hardened Runtime makes dyld ignore every DYLD_* variable, which would
+	  silently break the entire bundled-QEMU scheme: the sidecars still record
+	  Homebrew Cellar paths for their dependencies and are pointed at the
+	  bundled copies purely through DYLD_LIBRARY_PATH (see
+	  platform.rs's `prepend_library_path`). The alternative is rewriting each
+	  binary's load commands with install_name_tool, which the fetch script
+	  deliberately avoids.
+	-->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+
+	<!--
+	  Library validation requires every loaded dylib to be signed by the same
+	  team as the binary loading it. An ad-hoc signature carries no team
+	  identifier at all, so QEMU would refuse to load its own bundled
+	  dependencies. A Developer ID build signs both sides with one identity and
+	  would not need this, but keeping it makes the ad-hoc and Developer ID
+	  builds behave identically.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

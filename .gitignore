@@ -1,3 +1,8 @@
 target/
 launcher/gen/schemas/
 disk.img
+
+# Populated by .github/scripts/fetch-*; never checked in.
+launcher/binaries/
+launcher/firmware/
+launcher/qemu-libs/

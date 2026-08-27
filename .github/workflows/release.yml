@@ -1,0 +1,36 @@
+name: Build and Release (Tag)
+
+# Attaches the installers to a GitHub Release. The build itself is build.yml,
+# the same pipeline pull requests run, so a release is cut from a path that
+# has already been exercised. build.yml smoke tests each portable artifact
+# before this workflow's release job runs, and a `uses:` job only succeeds
+# once every job in the called workflow does, so a portable build that fails
+# to launch never reaches a release.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installers-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --generate-notes

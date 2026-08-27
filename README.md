@@ -15,38 +15,65 @@ reset pin).
 > to the actual Ark hardware, not this emulator. For any workload where data
 > confidentiality matters, use a real Ark.
 
-## Prerequisites
+## Downloading a release
 
-All platforms also need a pair of ArkOS emulator firmware artifacts: a kernel
-image (`<base>-kernel.<arch>`) and a gzipped initramfs (`<base>-initrd.<arch>.gz`),
-built for either `arm64` or `amd64` by the firmware repo's
-`./arkos.sh build-emulator`. The launcher takes their paths via `--kernel` and
-`--initrd`, and their architecture via `--arch`, which defaults to the host's
-architecture and picks the matching QEMU system emulator.
+The artifacts attached to [GitHub Releases](../../releases) ship with QEMU
+and the ArkOS firmware bundled in for that platform's own host architecture
+only. There's nothing else to install and no flags to pass, but also no
+support for emulating a guest architecture other than the host's (that's a
+source-build, developer-only need; see [Prerequisites](#prerequisites)).
+
+Each platform has both an installed and a no-install option:
+
+| Platform | Installed | No-install |
+|---|---|---|
+| Linux | `.deb` | `.AppImage`: mark it executable and run it |
+| macOS | `.dmg` | `.zip`: unzip, the `.app` inside runs from anywhere |
+| Windows | NSIS `.exe` installer | `.zip`: unzip, run `Ark Emulator.exe` from inside |
+
+Each asset has a `.sha256` file published alongside it; verify with
+`sha256sum -c` (Linux/Windows) or `shasum -a 256 -c` (macOS).
+
+The macOS builds are ad-hoc signed, which is enough to execute on Apple
+Silicon but is not an Apple Developer ID and carries no notarization. The
+Windows builds are unsigned outright. Either way your OS will flag them on
+first run:
+
+- **macOS**: Gatekeeper blocks the app on first launch. Open **System
+  Settings** → **Privacy & Security** → **Security**, click **Open Anyway**
+  (only available for about an hour after the blocked attempt), then enter
+  your password to confirm. Only needed once.
+- **Windows**: SmartScreen shows "Windows protected your PC". Click **More
+  info**, then **Run anyway**.
+- **Linux**: no OS-level gatekeeping for an unsigned `.deb`/AppImage; nothing
+  extra needed.
+
+## Building from source
+
+### Prerequisites
+
+A source build uses whatever QEMU you have installed, and takes the firmware
+as flags. Nothing is bundled, so unlike a released installer it can emulate
+either guest architecture regardless of host.
+
+**QEMU**, which also provides `qemu-img`:
+
+- **Linux**: Arch: `pacman -S qemu-system-aarch64 qemu-system-x86 qemu-img`; Debian/Ubuntu: `apt install qemu-system-arm qemu-system-x86 qemu-utils`. Also needs `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
+- **macOS**: `brew install qemu`. WKWebView ships with the OS; nothing extra needed.
+- **Windows**: the official Windows installer. WebView2 runtime is preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
+
+**Firmware**: a kernel image (`<base>-kernel.<arch>`) and a gzipped initramfs
+(`<base>-initrd.<arch>.gz`), built for either `arm64` or `amd64` by the
+firmware repo's own build tooling. Pass their paths via `--kernel` and
+`--initrd` (see [Run](#run)).
 
 When the guest architecture matches the host's, the launcher enables hardware
 virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
 `kvm` group; HVF on macOS) and falls back to plain emulation if unavailable.
 Cross-architecture guests always run under plain emulation and boot noticeably
-slower.
+slower. `--arch` picks the guest architecture and defaults to the host's.
 
-### Linux
-
-- `qemu-system-aarch64` and/or `qemu-system-x86_64` (matching your firmware artifacts): Arch: `pacman -S qemu-system-aarch64 qemu-system-x86`; Debian/Ubuntu: `apt install qemu-system-arm qemu-system-x86`.
-- `qemu-img` (used to allocate the disk image): Arch: `pacman -S qemu-img`; Debian/Ubuntu: `apt install qemu-utils`.
-- `webkit2gtk-4.1` + `libsoup3`: Arch: `pacman -S webkit2gtk-4.1`; Debian/Ubuntu: `apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev`.
-
-### macOS
-
-- QEMU: `brew install qemu` (ships both `qemu-system-aarch64` and `qemu-system-x86_64`).
-- WKWebView ships with the OS; nothing extra needed.
-
-### Windows
-
-- QEMU: the official Windows installer (ships both `qemu-system-aarch64` and `qemu-system-x86_64`).
-- WebView2 runtime: preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
-
-## Run
+### Run
 
 ```sh
 cargo run --release -p launcher -- \
@@ -63,14 +90,14 @@ state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
-## Configuration
+### Configuration
 
 | flag | default | meaning |
 |---|---|---|
-| `--kernel` | *required* | path to the kernel image (`<base>-kernel.<arch>`) |
-| `--initrd` | *required* | path to the initramfs (`<base>-initrd.<arch>.gz`) |
+| `--kernel` | bundled firmware | path to the kernel image (`<base>-kernel.<arch>`); a source build has no bundled firmware, so pass this explicitly |
+| `--initrd` | bundled firmware | path to the initramfs (`<base>-initrd.<arch>.gz`); see `--kernel` |
 | `--arch` | host arch | CPU architecture of the firmware artifacts (`arm64` or `amd64`) |
-| `--disk` | `disk.img` | path to the backing disk; auto-allocated on first run |
+| `--disk` | this app's data directory | path to the backing disk; auto-allocated on first run. Deliberately not the current directory, which isn't reliably writable for a packaged app |
 | `--env` | `release` | cloud environment the device is bound to when its disk is first created; ignored for existing disks (the binding is burnt in) |
 | `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
@@ -81,6 +108,6 @@ Run with `--help` for the full list.
 
 | path | role |
 |---|---|
-| `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window. |
+| `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window, and carries the packaging config and macOS entitlements. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
-
+| `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. |

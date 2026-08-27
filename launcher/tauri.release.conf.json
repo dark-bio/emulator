@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "bundle": {
+    "externalBin": [
+      "binaries/qemu-system-guest",
+      "binaries/qemu-img"
+    ],
+    "resources": [
+      "firmware/**/*",
+      "qemu-libs/**/*"
+    ]
+  }
+}
