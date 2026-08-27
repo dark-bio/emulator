@@ -14,11 +14,12 @@
 //! AppImage's own AppRun moves it inside the read-only FUSE mount before the
 //! launcher runs.
 
-use std::error::Error;
 use std::path::PathBuf;
 
+use anyhow::{bail, Context as _, Result};
 use tauri::{path::BaseDirectory, Manager};
 
+use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
 use crate::qemu::GuestArch;
 use crate::Config;
@@ -29,29 +30,30 @@ pub(crate) fn resolve_firmware(
     app: &tauri::App,
     cfg: &Config,
     arch: GuestArch,
-) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+) -> Result<(PathBuf, PathBuf)> {
     match (&cfg.kernel, &cfg.initrd) {
         (Some(kernel), Some(initrd)) => return Ok((kernel.clone(), initrd.clone())),
         (None, None) => {}
-        _ => return Err("--kernel and --initrd must be passed together".into()),
+        _ => bail!("--kernel and --initrd must be passed together"),
     }
 
     let dir = arch.firmware_dir();
     let kernel = strip_verbatim_prefix(
         &app.path()
-            .resolve(format!("firmware/{dir}/kernel"), BaseDirectory::Resource)?,
+            .resolve(format!("firmware/{dir}/kernel"), BaseDirectory::Resource)
+            .context("could not resolve the bundled kernel's location")?,
     );
     let initrd = strip_verbatim_prefix(
         &app.path()
-            .resolve(format!("firmware/{dir}/initrd.gz"), BaseDirectory::Resource)?,
+            .resolve(format!("firmware/{dir}/initrd.gz"), BaseDirectory::Resource)
+            .context("could not resolve the bundled initramfs' location")?,
     );
     for (label, path) in [("kernel", &kernel), ("initrd", &initrd)] {
         if !path.exists() {
-            return Err(format!(
+            bail!(
                 "no bundled {label} for {dir}: pass --kernel and --initrd explicitly \
                  (a development build has no bundled firmware)"
-            )
-            .into());
+            );
         }
     }
     Ok((kernel, initrd))
@@ -61,12 +63,17 @@ pub(crate) fn resolve_firmware(
 /// app's own data directory and creating that directory if missing. An
 /// explicit `--disk` is absolutized against the current directory, which is a
 /// deliberate override typed at a shell.
-pub(crate) fn resolve_disk_path(app: &tauri::App, cfg: &Config) -> Result<PathBuf, Box<dyn Error>> {
+pub(crate) fn resolve_disk_path(app: &tauri::App, cfg: &Config) -> Result<PathBuf> {
     if let Some(disk) = &cfg.disk {
-        return Ok(std::path::absolute(disk)?);
+        return std::path::absolute(disk)
+            .with_context(|| format!("could not resolve --disk {}", disk.display()));
     }
-    let dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .context("could not locate this app's data directory")?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("could not create the data directory {}", dir.display()))?;
     Ok(dir.join("disk.img"))
 }
 
@@ -101,16 +108,16 @@ pub(crate) fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
     let dir = match app.path().resolve("qemu-libs", BaseDirectory::Resource) {
         Ok(dir) => strip_verbatim_prefix(&dir),
         Err(e) => {
-            eprintln!("[launcher] could not resolve qemu-libs resource directory: {e}");
+            log!("[launcher] could not resolve qemu-libs resource directory: {e}");
             return None;
         }
     };
     if !dir.exists() {
-        eprintln!("[launcher] no bundled qemu-libs, using QEMU's own search paths");
+        log!("[launcher] no bundled qemu-libs, using QEMU's own search paths");
         return None;
     }
     let count = std::fs::read_dir(&dir).map(|it| it.count()).unwrap_or(0);
-    eprintln!(
+    log!(
         "[launcher] using bundled qemu-libs at {} ({count} files)",
         dir.display()
     );

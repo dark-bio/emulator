@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ark Emulator</title>
+  <style>
+    /* Palette, type and control shapes follow the Ark Hub web interface, so a
+       user who has seen one recognises the other. Neutral greyscale surfaces,
+       one red reserved for the failure itself. Light by default, dark when the
+       OS asks for it, matching the "system" default the web interface ships
+       with. Fonts are named rather than fetched: the emulator has to render
+       this window with no network and no bundled webfont. */
+    :root {
+      color-scheme: light dark;
+
+      --background: 0 0% 96%;
+      --foreground: 0 0% 10%;
+      --card: 0 0% 100%;
+      --muted-foreground: 0 0% 45.1%;
+      --border: 0 0% 80%;
+      --primary: 0 0% 9%;
+      --primary-foreground: 0 0% 98%;
+      --accent: 0 0% 82%;
+      --destructive: 360 100% 45%;
+      --destructive-background: 359 100% 97%;
+      --destructive-border: 359 100% 94%;
+
+      --radius: 0.5rem;
+      --radius-md: calc(var(--radius) - 2px);
+      --transition: 0.25s ease;
+
+      --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: 0 0% 10%;
+        --foreground: 0 0% 96%;
+        --card: 0 0% 16%;
+        --muted-foreground: 0 0% 63.9%;
+        --border: 0 0% 25%;
+        --primary: 0 0% 96%;
+        --primary-foreground: 0 0% 10%;
+        --accent: 0 0% 30%;
+        --destructive: 358 100% 65%;
+        --destructive-background: 358 76% 10%;
+        --destructive-border: 357 89% 16%;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      /* The window is fixed size, so nothing here scrolls except the report. */
+      overflow: hidden;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+      padding: 1.5rem;
+      background: hsl(var(--background));
+      color: hsl(var(--foreground));
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      font-feature-settings: 'rlig' 1, 'calt' 1;
+    }
+
+    header {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .glyph {
+      flex: none;
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: hsl(var(--destructive-background));
+      color: hsl(var(--destructive));
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+      line-height: 1;
+      letter-spacing: -0.01em;
+    }
+
+    /* The house treatment for a failure message: tinted panel, tinted border,
+       the red used only here so the eye lands on what went wrong. */
+    .failure {
+      margin: 0;
+      padding: 0.65rem 0.8rem;
+      border: 1px solid hsl(var(--destructive-border));
+      border-radius: var(--radius);
+      background: hsl(var(--destructive-background));
+      color: hsl(var(--destructive));
+      line-height: 1.45;
+      overflow-y: auto;
+      max-height: 5.5rem;
+    }
+
+    /* The report is the point of this window: selectable so the user can send
+       it to us, and scrollable in both axes because paths and the emulator's
+       own log lines are long and must not be reflowed into nonsense. */
+    pre {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 0.75rem;
+      overflow: auto;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+      color: hsl(var(--foreground));
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      line-height: 1.55;
+      user-select: text;
+      white-space: pre;
+      tab-size: 4;
+    }
+
+    footer {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: flex-end;
+    }
+
+    .hint {
+      margin: 0;
+      color: hsl(var(--muted-foreground));
+      line-height: 1.4;
+    }
+
+    button {
+      height: 2.25rem;
+      padding: 0 1rem;
+      border: 1px solid transparent;
+      border-radius: var(--radius-md);
+      background: hsl(var(--primary));
+      color: hsl(var(--primary-foreground));
+      font-family: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    button.outline {
+      background: hsl(var(--background));
+      border-color: hsl(var(--border));
+      color: hsl(var(--foreground));
+    }
+
+    button.outline:hover {
+      opacity: 1;
+      background: hsl(var(--accent));
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <span class="glyph" aria-hidden="true">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 9v4" />
+        <path d="M10.363 3.591 2.257 17.125a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636-2.87L13.637 3.59a1.914 1.914 0 0 0-3.274 0" />
+        <path d="M12 16h.01" />
+      </svg>
+    </span>
+    <h1>The Ark emulator could not continue</h1>
+  </header>
+
+  <p class="failure" id="headline"></p>
+  <pre id="report"></pre>
+
+  <p class="hint" id="hint">Send us the details and we can tell you what went wrong.</p>
+
+  <footer>
+    <button class="outline" id="close">Close</button>
+    <button id="copy">Copy details</button>
+  </footer>
+
+  <script>
+    // Both constants are injected by the launcher before this script runs, the
+    // same way the device face receives __HW_ADDR__. Nothing is fetched and
+    // nothing is sent anywhere; copying is the user's decision.
+    const headline = window.__ERROR__ || 'An unknown error occurred.';
+    const report = window.__REPORT__ || headline;
+
+    document.getElementById('headline').textContent = headline;
+    document.getElementById('report').textContent = report;
+
+    const hint = document.getElementById('hint');
+    document.getElementById('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(report);
+        hint.textContent = 'Copied. Send us the details and we can tell you what went wrong.';
+      } catch {
+        // Clipboard access can be refused outright, and the text is already
+        // selectable, so say so rather than failing silently.
+        hint.textContent = 'Could not copy. Select the text above and copy it.';
+      }
+    });
+
+    const close = () => window.__TAURI__?.window.getCurrentWindow().close();
+    document.getElementById('close').addEventListener('click', close);
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') close();
+    });
+  </script>
+</body>
+
+</html>

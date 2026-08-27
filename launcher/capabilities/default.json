@@ -1,9 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0/capability",
   "identifier": "default",
-  "description": "Capabilities granted to the emulator window: dragging via data-tauri-drag-region and the Escape-to-close handler.",
+  "description": "Capabilities granted to the emulator windows: dragging via data-tauri-drag-region and the Escape-to-close handler, which the error window shares.",
   "windows": [
-    "main"
+    "main",
+    "error"
   ],
   "permissions": [
     "core:default",

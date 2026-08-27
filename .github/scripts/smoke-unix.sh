@@ -34,6 +34,10 @@
 # Env: SMOKE_TIMEOUT (seconds), SMOKE_MARKER, SMOKE_LOG.
 set -euo pipefail
 
+# A fatal error opens a window the launcher waits on, and nothing here can
+# dismiss it, so ask for the report on stderr and an immediate exit instead.
+export ARK_EMULATOR_NO_DIALOG=1
+
 timeout="${SMOKE_TIMEOUT:-120}"
 marker="${SMOKE_MARKER:-Starting runcore}"
 log="${SMOKE_LOG:-smoke.log}"

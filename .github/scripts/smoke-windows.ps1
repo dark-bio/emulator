@@ -21,6 +21,10 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+# A fatal error opens a window the launcher waits on, and nothing here can
+# dismiss it, so ask for the report on stderr and an immediate exit instead.
+$env:ARK_EMULATOR_NO_DIALOG = "1"
+
 $timeout = if ($env:SMOKE_TIMEOUT) { [int]$env:SMOKE_TIMEOUT } else { 120 }
 $marker  = if ($env:SMOKE_MARKER)  { $env:SMOKE_MARKER }        else { "Starting runcore" }
 $log     = if ($env:SMOKE_LOG)     { $env:SMOKE_LOG }           else { "smoke.log" }
