@@ -15,10 +15,12 @@
 //!     stdio handles and still prints there.
 //!   - **Acceleration**: KVM on Linux, Hypervisor.framework on macOS, WHPX on
 //!     Windows, each behind a runtime probe, falling back to TCG emulation.
+//!   - **Opening a URL**: `xdg-open`, `open` and `cmd /c start`, none of which
+//!     share a name across platforms.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::diagnostics::{self, log};
 
@@ -69,6 +71,41 @@ pub(crate) fn suppress_child_console(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 pub(crate) fn suppress_child_console(_cmd: &mut Command) {}
+
+/// Hand a URL to whatever the desktop has set as its browser. Spawned and
+/// left alone: the launcher has no use for the browser's exit status, and
+/// waiting on it would block for as long as the browser runs.
+pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {
+    let mut cmd = url_opener(url);
+    suppress_child_console(&mut cmd);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn url_opener(url: &str) -> Command {
+    let mut cmd = Command::new("xdg-open");
+    cmd.arg(url);
+    cmd
+}
+
+#[cfg(target_os = "macos")]
+fn url_opener(url: &str) -> Command {
+    let mut cmd = Command::new("open");
+    cmd.arg(url);
+    cmd
+}
+
+/// `start` is a `cmd` builtin rather than an executable, and it reads a leading
+/// quoted argument as the new window's title, so it gets an empty one before
+/// the URL or the URL itself would be swallowed as the title.
+#[cfg(windows)]
+fn url_opener(url: &str) -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", "start", "", url]);
+    cmd
+}
 
 /// QEMU `-accel` flags for this host. Cross-architecture guests get none,
 /// since only a native guest can use hardware acceleration and TCG is QEMU's

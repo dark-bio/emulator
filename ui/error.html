@@ -25,16 +25,10 @@
     })();
   </script>
   <style>
-    /* The error window is the device itself, not a dialog on top of it: a
-       transparent, undecorated window painting the same rounded enclosure the
-       device face draws, with the same silver corner brackets, and the four
-       corner LEDs lit red. Typography and controls inside follow the Ark Hub
-       web interface. Dark only, because the enclosure is black. */
     :root {
       color-scheme: dark;
 
       --foreground: 0 0% 96%;
-      --card: 0 0% 16%;
       --muted-foreground: 0 0% 63.9%;
       --primary: 0 0% 96%;
       --primary-foreground: 0 0% 10%;
@@ -50,30 +44,20 @@
       --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
       /* One unit of the 500-unit enclosure artwork, so the geometry below can
-         be written in the artwork's own coordinates: rx 63, bracket inset 53,
-         bracket box 92.5, LED 4.09% of the device across and centred 12.5% in.
-
-         Expressed against the viewport rather than in px, which is what keeps
-         this window and the device face drawing the same object at the same
-         size. A webview under a desktop DPI scale multiplies px but leaves
-         viewport units alone, so px geometry here would inflate by the scale
-         factor while the face, which is built entirely from vw/vmin/%, would
-         not.
-
-         The head script solves the fraction for this window's actual width, so
-         the enclosure holds its size whatever the launcher asks for. What is
-         left here is the fallback for opening the page on its own, and matches
-         a 1000px-wide window. */
+         use the artwork's own coordinates. Viewport-relative and not px: a
+         webview under a desktop DPI scale multiplies px but not vw, and the
+         device face is built entirely from vw/vmin/%. The head script solves
+         this for the real window width; the value here is the fallback for
+         opening the page on its own. */
       --u: 0.06703vw;
 
       --shell-radius: calc(63 * var(--u));
-      --bezel: calc(53 * var(--u));
-      --bracket: calc(92.5 * var(--u));
+      --inset-y: calc(42 * var(--u));
+      --inset-x: calc(102 * var(--u));
       --led: calc(20.45 * var(--u));
 
-      /* The LED centre and the corner arc's centre are the same point on the
-         artwork, which is what leaves the enclosure edge equidistant all the
-         way round the corner and stops the glow being clipped on one side. */
+      /* Equal to --shell-radius, which leaves the enclosure edge equidistant
+         round the corner and the glow unclipped. */
       --led-offset: calc(62.5 * var(--u));
     }
 
@@ -85,21 +69,17 @@
     body {
       height: 100%;
       margin: 0;
-      /* The window is fixed size and transparent: nothing here scrolls, and
-         nothing paints outside the enclosure below. */
       overflow: hidden;
       background: transparent;
     }
 
-    /* The enclosure. Radius, black body and centre-out sheen all mirror the
-       device artwork, widened from its square to this window's proportions. */
     .ark {
       position: relative;
       height: 100%;
       width: 100%;
       border-radius: var(--shell-radius);
-      /* Clips each LED's glow to the enclosure, so light never bleeds onto the
-         desktop through the transparent corners. */
+      /* Clips each LED's glow, which would otherwise bleed onto the desktop
+         through the transparent corners. */
       overflow: hidden;
       background:
         radial-gradient(ellipse at 50% 50%,
@@ -113,59 +93,21 @@
       font-feature-settings: 'rlig' 1, 'calt' 1;
     }
 
-    /* Corner brackets, drawn once and mirrored into the other three corners. */
-    .bracket {
-      position: absolute;
-      width: var(--bracket);
-      height: var(--bracket);
-      fill: #b5b5b5;
-      pointer-events: none;
-    }
-
-    .bracket.tl {
-      top: var(--bezel);
-      left: var(--bezel);
-    }
-
-    .bracket.tr {
-      top: var(--bezel);
-      right: var(--bezel);
-      transform: scaleX(-1);
-    }
-
-    .bracket.bl {
-      bottom: var(--bezel);
-      left: var(--bezel);
-      transform: scaleY(-1);
-    }
-
-    .bracket.br {
-      bottom: var(--bezel);
-      right: var(--bezel);
-      transform: scale(-1);
-    }
-
-    /* The four RGB LEDs, held red. On the real device they sit on the elbow of
-       each bracket, so they are placed from the window edge rather than from
-       the content box, and are the only thing here that says "error". */
     .led {
       position: absolute;
       width: var(--led);
       height: var(--led);
       border-radius: 50%;
       background: hsl(var(--destructive));
-      /* Two soft layers and no dark rim. The face outlines its LEDs to seat
-         them in the aluminium, but an outline under a glow reads as a shadow
-         cast on the light. Total reach stays under --shell-radius so the
-         rounded corner never clips one side of a glow and skews it. */
+      /* Reach stays under --shell-radius, or the rounded corner clips one
+         side of a glow and skews it. */
       box-shadow:
         0 0 calc(15 * var(--u)) calc(3 * var(--u)) hsl(var(--destructive) / 0.9),
         0 0 calc(36 * var(--u)) calc(9 * var(--u)) hsl(var(--destructive) / 0.45);
       pointer-events: none;
     }
 
-    /* Offsets place the LED's edge, the translate then pulls its centre onto
-       --led-offset, which is the centre of the bracket's stroke. */
+    /* The offset places the LED's edge; the translate pulls its centre onto it. */
     .led.tl {
       top: var(--led-offset);
       left: var(--led-offset);
@@ -190,40 +132,21 @@
       transform: translate(50%, 50%);
     }
 
-    /* Content sits inboard of the brackets: the horizontal padding clears
-       --bezel + --bracket, so the two never collide. */
     main {
       position: absolute;
       inset: 0;
       display: flex;
       flex-direction: column;
-      /* --bezel on every side, so the title and the actions land on the
-         brackets' own lines and the box is symmetric top to bottom. The sides
-         come inboard of a bracket, which the reserved bands above and below
-         make safe. Text inside stays in rem, so it still follows the desktop's
-         DPI scale the way the user asked it to.
-
-         No flex gap: the report's top inset has to be an exact multiple of
-         --u to match its side inset, and a gap in rem would drift from that
-         as the desktop scales the text. Spacing below the report is set per
-         child instead, where drifting with the text is fine. */
-      padding: calc(53 * var(--u)) calc(128 * var(--u));
+      /* No flex gap: the report's top inset has to be an exact multiple of --u
+         to match its side inset, and a gap in rem drifts as the desktop scales
+         the text. Spacing below the report is per child, where drift is fine. */
+      padding: var(--inset-y) var(--inset-x);
     }
 
-    /* Title and actions each reserve the band the corner brackets occupy, top
-       and bottom, and are centred in it. That is what lets everything between
-       them sit closer to the window edges than a bracket does without ever
-       meeting one, and it holds however large the desktop scales the text.
-       The title starts on the brackets' top line, the actions finish on their
-       bottom line, so the two read as mirrored halves of the bezel.
-
-       No icon on the title: the four red LEDs already say something is wrong,
-       and a second alarm glyph only competes. */
     h1 {
-      /* 53u of padding above plus 75u of band puts the report's top edge on
-         128u, the same inset it has from the sides. That lands in the open
-         inner corner of the bracket, past both of its arms. */
-      min-height: calc(75 * var(--u));
+      /* Spans the difference between the two insets, landing the report's top
+         edge on --inset-x. */
+      min-height: calc(var(--inset-x) - var(--inset-y));
       margin: 0;
       font-size: 1.125rem;
       font-weight: 600;
@@ -232,20 +155,19 @@
       text-align: center;
     }
 
-    /* The report is the point of this window: selectable so the user can send
-       it to us, and scrollable in both axes because paths and the emulator's
-       own log lines are long and must not be reflowed into nonsense. */
+    /* white-space: pre, not wrap: reflowing long paths and log lines makes
+       them unreadable, so the block scrolls in both axes instead. */
     pre {
       flex: 1;
       min-height: 0;
       margin: 0;
-      padding: 0.75rem;
+      padding: 0.5rem;
       overflow: auto;
-      background: hsl(var(--card));
+      background: hsl(0 0% 100% / 0.1);
       border-radius: var(--radius);
       color: hsl(var(--foreground));
       font-family: var(--font-mono);
-      font-size: 0.6875rem;
+      font-size: 0.8rem;
       line-height: 1.55;
       user-select: text;
       white-space: pre;
@@ -287,8 +209,13 @@
       opacity: 0.9;
     }
 
-    /* The action that is not the default one. Filled rather than outlined, so
-       it still reads as a button against the black enclosure. */
+    /* :focus and not :focus-visible: Close is focused from script, which does
+       not satisfy the focus-visible heuristic. */
+    button:focus {
+      outline: 2px solid hsl(var(--foreground));
+      outline-offset: 2px;
+    }
+
     button.secondary {
       background: hsl(var(--secondary));
       color: hsl(var(--foreground));
@@ -305,18 +232,6 @@
   <!-- No window chrome, so the enclosure and its header are the drag handle
        and the Close button is the way out, alongside Escape. -->
   <div class="ark" data-tauri-drag-region>
-    <svg class="bracket tl" viewBox="53 53 92.5 92.5" aria-hidden="true">
-      <path d="M64 145.5H58C55.2386 145.5 53 143.261 53 140.5V110.044C53 108.734 53.5143 107.476 54.4322 106.541L105.53 54.497C106.47 53.5395 107.756 53 109.098 53H140.5C143.261 53 145.5 55.2386 145.5 58V63.5C145.5 66.2614 143.261 68.5 140.5 68.5H115.12C113.765 68.5 112.468 69.0501 111.526 70.0242L70.4057 112.546C69.504 113.479 69 114.722 69 116.019V140.505C69 143.266 66.7614 145.5 64 145.5Z" />
-    </svg>
-    <svg class="bracket tr" viewBox="53 53 92.5 92.5" aria-hidden="true">
-      <path d="M64 145.5H58C55.2386 145.5 53 143.261 53 140.5V110.044C53 108.734 53.5143 107.476 54.4322 106.541L105.53 54.497C106.47 53.5395 107.756 53 109.098 53H140.5C143.261 53 145.5 55.2386 145.5 58V63.5C145.5 66.2614 143.261 68.5 140.5 68.5H115.12C113.765 68.5 112.468 69.0501 111.526 70.0242L70.4057 112.546C69.504 113.479 69 114.722 69 116.019V140.505C69 143.266 66.7614 145.5 64 145.5Z" />
-    </svg>
-    <svg class="bracket bl" viewBox="53 53 92.5 92.5" aria-hidden="true">
-      <path d="M64 145.5H58C55.2386 145.5 53 143.261 53 140.5V110.044C53 108.734 53.5143 107.476 54.4322 106.541L105.53 54.497C106.47 53.5395 107.756 53 109.098 53H140.5C143.261 53 145.5 55.2386 145.5 58V63.5C145.5 66.2614 143.261 68.5 140.5 68.5H115.12C113.765 68.5 112.468 69.0501 111.526 70.0242L70.4057 112.546C69.504 113.479 69 114.722 69 116.019V140.505C69 143.266 66.7614 145.5 64 145.5Z" />
-    </svg>
-    <svg class="bracket br" viewBox="53 53 92.5 92.5" aria-hidden="true">
-      <path d="M64 145.5H58C55.2386 145.5 53 143.261 53 140.5V110.044C53 108.734 53.5143 107.476 54.4322 106.541L105.53 54.497C106.47 53.5395 107.756 53 109.098 53H140.5C143.261 53 145.5 55.2386 145.5 58V63.5C145.5 66.2614 143.261 68.5 140.5 68.5H115.12C113.765 68.5 112.468 69.0501 111.526 70.0242L70.4057 112.546C69.504 113.479 69 114.722 69 116.019V140.505C69 143.266 66.7614 145.5 64 145.5Z" />
-    </svg>
 
     <span class="led tl"></span>
     <span class="led tr"></span>
@@ -329,8 +244,9 @@
       <p class="hint" id="hint">Send us the details and we can tell you what went wrong.</p>
 
       <footer>
-        <button class="secondary" id="close">Close</button>
-        <button id="copy">Copy details</button>
+        <button class="secondary" id="copy">Copy details</button>
+        <button class="secondary" id="report-issue">Report issue</button>
+        <button id="close">Close</button>
       </footer>
     </main>
   </div>
@@ -355,8 +271,17 @@
       }
     });
 
+    // The launcher holds the address; no URL crosses from here.
+    document.getElementById('report-issue').addEventListener('click', () => {
+      window.__TAURI__?.core.invoke('report_issue');
+    });
+
     const close = () => window.__TAURI__?.window.getCurrentWindow().close();
-    document.getElementById('close').addEventListener('click', close);
+    const closeButton = document.getElementById('close');
+    closeButton.addEventListener('click', close);
+    // Focused explicitly rather than with the autofocus attribute, which a
+    // webview does not reliably honour on load.
+    closeButton.focus();
     window.addEventListener('keydown', e => {
       if (e.key === 'Escape') close();
     });

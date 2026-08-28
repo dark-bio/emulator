@@ -18,10 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-use crate::{diagnostics, MAIN_WINDOW};
+use crate::diagnostics::{self, log};
+use crate::MAIN_WINDOW;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
+
+/// Where the "Report issue" button sends the user.
+const ISSUES_URL: &str = "https://github.com/dark-bio/emulator/issues";
 
 /// Fixed size of the error window, in logical pixels. Wide enough that neither
 /// a long path nor a QEMU log line wraps, and tall enough that a typical report
@@ -38,6 +42,21 @@ const NO_DIALOG: &str = "ARK_EMULATOR_NO_DIALOG";
 /// are not mutually exclusive, and the second one to arrive must not stack a
 /// window on top of the first.
 static REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Open the issue tracker in the user's browser, for the error window's
+/// "Report issue" button.
+///
+/// Takes no argument on purpose. The page could just as well pass the address,
+/// but then the launcher would be offering to open anything a page asked it
+/// to, and this way the only address it can ever open is the one above.
+/// Failure is logged rather than surfaced: the dialog it would be reported in
+/// is the one already on screen.
+#[tauri::command]
+pub(crate) fn report_issue() {
+    if let Err(e) = crate::platform::open_url(ISSUES_URL) {
+        log!("[launcher] could not open {ISSUES_URL}: {e}");
+    }
+}
 
 /// Report a fatal error from the main thread, which is where Tauri's `setup`
 /// hook runs. `title` distinguishes failing to start from failing later, since

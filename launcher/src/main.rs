@@ -108,6 +108,7 @@ fn main() {
                 .js_init_script(hw_addr)
                 .build(),
         )
+        .invoke_handler(tauri::generate_handler![error_dialog::report_issue])
         .setup(move |app| {
             if let Err(err) = start(app, &cfg) {
                 error_dialog::show(app.handle(), "could not start", err);
