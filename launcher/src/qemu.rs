@@ -10,11 +10,13 @@
 //! stdio, no monitor and no graphics. Host port 18181 forwarded through SLIRP
 //! is the entire interface the UI and the dashboard talk to.
 
-use std::error::Error;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
+
+use anyhow::{bail, Context as _, Result};
 
 use crate::bundle::resolve_sidecar;
+use crate::diagnostics::{self, log};
 use crate::orphan;
 use crate::platform::{
     accel_flags, library_path_var, prepend_library_path, suppress_child_console,
@@ -60,13 +62,19 @@ impl GuestArch {
         }
     }
 
-    /// Subdirectory under the bundled `firmware` resource holding this
-    /// architecture's kernel/initrd, matching the CI layout.
-    pub(crate) fn firmware_dir(self) -> &'static str {
+    /// Name of this architecture in the docker-style vocabulary the firmware
+    /// build uses, which is also the value `--arch` takes.
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Arm64 => "arm64",
             Self::Amd64 => "amd64",
         }
+    }
+
+    /// Subdirectory under the bundled `firmware` resource holding this
+    /// architecture's kernel/initrd, matching the CI layout.
+    pub(crate) fn firmware_dir(self) -> &'static str {
+        self.name()
     }
 }
 
@@ -91,11 +99,11 @@ const QEMU_MODULE_DIR: &str = "QEMU_MODULE_DIR";
 
 /// Lazily creates the backing qcow2 disk image if missing. Idempotent; to
 /// reset device state, delete the file and re-launch.
-pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<(), Box<dyn Error>> {
+pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    println!("[launcher] disk image missing, creating qcow2 (grows on demand)");
+    log!("[launcher] disk image missing, creating qcow2 (grows on demand)");
     // qcow2 is sparse on every host, including Windows NTFS where a raw
     // set_len would zero-fill the whole file. Delegated to qemu-img rather
     // than hand-writing the format. The bare byte count is read as bytes.
@@ -112,15 +120,21 @@ pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<(), B
         .args(["create", "-f", "qcow2"])
         .arg(path)
         .arg(DISK_BYTES.to_string())
-        .output()?;
+        .output()
+        .context("could not run qemu-img; is it bundled or installed and on PATH?")?;
     if !output.status.success() {
-        return Err(format!(
-            "qemu-img create failed ({:?}); is qemu-img bundled or installed and on PATH?\nstdout: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        )
-        .into());
+        // qemu-img says what it could not do and why on stderr; its stdout is
+        // just the format line, which belongs in the log rather than in front
+        // of the user.
+        log!(
+            "[qemu-img] {}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match stderr.trim() {
+            "" => bail!("qemu-img create failed ({})", output.status),
+            reason => bail!("qemu-img create failed ({}): {reason}", output.status),
+        }
     }
     Ok(())
 }
@@ -139,30 +153,32 @@ pub(crate) fn spawn_qemu(
     initrd: &Path,
     disk: &Path,
     qemu_libs: Option<&Path>,
-) -> Child {
+) -> Result<Child> {
     let native = arch.host();
     // Only the host-native architecture is ever bundled, so a cross-arch
     // request always falls through to a PATH-installed QEMU, which a packaged
     // build will not have.
     let mut cmd = match native.then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
         Some(bundled) => {
-            eprintln!(
+            log!(
                 "[launcher] using bundled QEMU sidecar at {}",
                 bundled.display()
             );
+            diagnostics::record("QEMU", format!("{} (bundled)", bundled.display()));
             Command::new(bundled)
         }
         None => {
-            eprintln!(
+            log!(
                 "[launcher] no bundled QEMU sidecar found, falling back to {} on PATH",
                 arch.qemu_binary()
             );
+            diagnostics::record("QEMU", format!("{} (on PATH)", arch.qemu_binary()));
             Command::new(arch.qemu_binary())
         }
     };
     suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
-        eprintln!("[launcher] passing -L {} to QEMU", libs.display());
+        log!("[launcher] passing -L {} to QEMU", libs.display());
         cmd.env(library_path_var(), prepend_library_path(libs));
         cmd.env(QEMU_MODULE_DIR, libs);
         // -L points QEMU at its firmware/BIOS/keymap datadir, e.g.
@@ -219,8 +235,13 @@ pub(crate) fn spawn_qemu(
             "none",
         ]);
 
-    orphan::guard(cmd).spawn().unwrap_or_else(|e| {
-        eprintln!("failed to spawn {}: {e}", arch.qemu_binary());
-        std::process::exit(1);
-    })
+    // Captured rather than inherited so a packaged build, which has no console
+    // to print to, can still put QEMU's own complaint in a crash report. The
+    // caller must drain it or QEMU blocks once the pipe fills. Only stderr is
+    // taken: `-serial stdio` above is the guest console and needs stdout.
+    cmd.stderr(Stdio::piped());
+
+    orphan::guard(cmd)
+        .spawn()
+        .with_context(|| format!("could not start {}", arch.qemu_binary()))
 }

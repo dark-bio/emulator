@@ -9,6 +9,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
+anyhow = "1"
 
 # Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; macOS uses a
 # death pipe + /bin/sh (std only). Windows needs windows-sys for a Job Object,

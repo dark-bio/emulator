@@ -19,6 +19,7 @@
         "shadow": false,
         "transparent": true,
         "alwaysOnTop": true,
+        "visible": false,
         "url": "index.html"
       }
     ],

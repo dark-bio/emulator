@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ark Emulator</title>
+  <script>
+    // Size the enclosure to match the device face, whatever width the launcher
+    // gave this window. The face fits the 500-unit artwork into a 335.2px box
+    // (a 366px window, less twice its 4vmin padding, capped by the 220:286
+    // scene), so one artwork unit is 0.67px there.
+    //
+    // Solved in vw rather than px on purpose: a vw is one hundredth of the
+    // window's width however the webview scales its CSS pixels, so the result
+    // holds under a desktop DPI scale that px would follow. Runs in <head> so
+    // the first paint is already the right size.
+    (() => {
+      const FACE_PX_PER_UNIT = 335.2 / 500;
+      const width = window.__WIDTH__;
+      if (typeof width === 'number' && width > 0) {
+        document.documentElement.style.setProperty(
+          '--u', (100 * FACE_PX_PER_UNIT / width) + 'vw');
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+
+      --foreground: 0 0% 96%;
+      --muted-foreground: 0 0% 63.9%;
+      --primary: 0 0% 96%;
+      --primary-foreground: 0 0% 10%;
+      --secondary: 0 0% 20%;
+      --secondary-hover: 0 0% 27%;
+      --destructive: 358 100% 65%;
+
+      --radius: 0.5rem;
+      --radius-md: calc(var(--radius) - 2px);
+      --transition: 0.25s ease;
+
+      --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+      /* One unit of the 500-unit enclosure artwork, so the geometry below can
+         use the artwork's own coordinates. Viewport-relative and not px: a
+         webview under a desktop DPI scale multiplies px but not vw, and the
+         device face is built entirely from vw/vmin/%. The head script solves
+         this for the real window width; the value here is the fallback for
+         opening the page on its own. */
+      --u: 0.06703vw;
+
+      --shell-radius: calc(63 * var(--u));
+      --inset-y: calc(42 * var(--u));
+      --inset-x: calc(102 * var(--u));
+      --led: calc(20.45 * var(--u));
+
+      /* Equal to --shell-radius, which leaves the enclosure edge equidistant
+         round the corner and the glow unclipped. */
+      --led-offset: calc(62.5 * var(--u));
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    .ark {
+      position: relative;
+      height: 100%;
+      width: 100%;
+      border-radius: var(--shell-radius);
+      /* Clips each LED's glow, which would otherwise bleed onto the desktop
+         through the transparent corners. */
+      overflow: hidden;
+      background:
+        radial-gradient(ellipse at 50% 50%,
+          rgba(140, 145, 156, 0.2) 28%,
+          rgba(95, 99, 106, 0.2) 80%,
+          rgba(63, 58, 58, 0.2) 100%),
+        #000;
+      color: hsl(var(--foreground));
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      font-feature-settings: 'rlig' 1, 'calt' 1;
+    }
+
+    .led {
+      position: absolute;
+      width: var(--led);
+      height: var(--led);
+      border-radius: 50%;
+      background: hsl(var(--destructive));
+      /* Reach stays under --shell-radius, or the rounded corner clips one
+         side of a glow and skews it. */
+      box-shadow:
+        0 0 calc(15 * var(--u)) calc(3 * var(--u)) hsl(var(--destructive) / 0.9),
+        0 0 calc(36 * var(--u)) calc(9 * var(--u)) hsl(var(--destructive) / 0.45);
+      pointer-events: none;
+    }
+
+    /* The offset places the LED's edge; the translate pulls its centre onto it. */
+    .led.tl {
+      top: var(--led-offset);
+      left: var(--led-offset);
+      transform: translate(-50%, -50%);
+    }
+
+    .led.tr {
+      top: var(--led-offset);
+      right: var(--led-offset);
+      transform: translate(50%, -50%);
+    }
+
+    .led.bl {
+      bottom: var(--led-offset);
+      left: var(--led-offset);
+      transform: translate(-50%, 50%);
+    }
+
+    .led.br {
+      bottom: var(--led-offset);
+      right: var(--led-offset);
+      transform: translate(50%, 50%);
+    }
+
+    main {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      /* No flex gap: the report's top inset has to be an exact multiple of --u
+         to match its side inset, and a gap in rem drifts as the desktop scales
+         the text. Spacing below the report is per child, where drift is fine. */
+      padding: var(--inset-y) var(--inset-x);
+    }
+
+    h1 {
+      /* Spans the difference between the two insets, landing the report's top
+         edge on --inset-x. */
+      min-height: calc(var(--inset-x) - var(--inset-y));
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+      line-height: 1;
+      letter-spacing: -0.01em;
+      text-align: center;
+    }
+
+    /* white-space: pre, not wrap: reflowing long paths and log lines makes
+       them unreadable, so the block scrolls in both axes instead. */
+    pre {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 0.5rem;
+      overflow: auto;
+      background: hsl(0 0% 100% / 0.1);
+      border-radius: var(--radius);
+      color: hsl(var(--foreground));
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.55;
+      user-select: text;
+      white-space: pre;
+      tab-size: 4;
+    }
+
+    .hint {
+      margin: 0.85rem 0 0;
+      color: hsl(var(--muted-foreground));
+      line-height: 1.4;
+      text-align: center;
+    }
+
+    footer {
+      display: flex;
+      min-height: calc(92.5 * var(--u));
+      margin-top: 0.85rem;
+      gap: 0.5rem;
+      justify-content: center;
+      align-items: flex-end;
+    }
+
+    button {
+      height: 2.25rem;
+      padding: 0 1rem;
+      border: 0;
+      border-radius: var(--radius-md);
+      background: hsl(var(--primary));
+      color: hsl(var(--primary-foreground));
+      font-family: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    /* :focus and not :focus-visible: Close is focused from script, which does
+       not satisfy the focus-visible heuristic. */
+    button:focus {
+      outline: 2px solid hsl(var(--foreground));
+      outline-offset: 2px;
+    }
+
+    button.secondary {
+      background: hsl(var(--secondary));
+      color: hsl(var(--foreground));
+    }
+
+    button.secondary:hover {
+      opacity: 1;
+      background: hsl(var(--secondary-hover));
+    }
+  </style>
+</head>
+
+<body>
+  <!-- No window chrome, so the enclosure and its header are the drag handle
+       and the Close button is the way out, alongside Escape. -->
+  <div class="ark" data-tauri-drag-region>
+
+    <span class="led tl"></span>
+    <span class="led tr"></span>
+    <span class="led bl"></span>
+    <span class="led br"></span>
+
+    <main>
+      <h1 data-tauri-drag-region>The Ark Emulator could not continue</h1>
+      <pre id="report"></pre>
+      <p class="hint" id="hint">Send us the details and we can tell you what went wrong.</p>
+
+      <footer>
+        <button class="secondary" id="copy">Copy details</button>
+        <button class="secondary" id="report-issue">Report issue</button>
+        <button id="close">Close</button>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // Injected by the launcher before this script runs, the same way the device
+    // face receives __HW_ADDR__. Nothing is fetched and nothing is sent
+    // anywhere; copying is the user's decision.
+    const report = window.__REPORT__ || 'An unknown error occurred.';
+
+    document.getElementById('report').textContent = report;
+
+    const hint = document.getElementById('hint');
+    document.getElementById('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(report);
+        hint.textContent = 'Copied. Send us the details and we can tell you what went wrong.';
+      } catch {
+        // Clipboard access can be refused outright, and the text is already
+        // selectable, so say so rather than failing silently.
+        hint.textContent = 'Could not copy. Select the text above and copy it.';
+      }
+    });
+
+    // The launcher holds the address; no URL crosses from here.
+    document.getElementById('report-issue').addEventListener('click', () => {
+      window.__TAURI__?.core.invoke('report_issue');
+    });
+
+    const close = () => window.__TAURI__?.window.getCurrentWindow().close();
+    const closeButton = document.getElementById('close');
+    closeButton.addEventListener('click', close);
+    // Focused explicitly rather than with the autofocus attribute, which a
+    // webview does not reliably honour on load.
+    closeButton.focus();
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') close();
+    });
+  </script>
+</body>
+
+</html>
