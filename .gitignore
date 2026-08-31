@@ -6,6 +6,3 @@ disk.img
 launcher/binaries/
 launcher/firmware/
 launcher/qemu-libs/
-
-# Written by the release workflow when it merges in the signing identity.
-launcher/tauri.signed.conf.json

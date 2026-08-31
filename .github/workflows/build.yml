@@ -60,9 +60,12 @@ jobs:
       # APPLE_CERTIFICATE in the environment, and this workflow has to do that
       # import earlier, before the QEMU fetch signs the bundled dylibs.
       SIGN_MACOS: ${{ secrets.APPLE_CERTIFICATE != '' }}
-      # Read by fetch-qemu-macos.sh for those dylibs, and by the build and
-      # verify steps below. Empty on an unsigned run, which selects ad-hoc.
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      # Read by fetch-qemu-macos.sh for those dylibs and by Tauri's bundler,
+      # which prefers this over bundle.macOS.signingIdentity in the config. It
+      # has to fall back to the config's own "-" rather than to empty: an
+      # unsigned bundle will not execute on Apple Silicon at all, and codesign
+      # reads a set-but-empty identity as "no identity found".
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -162,21 +165,8 @@ jobs:
         # clone works: tauri-build validates externalBin paths and resource globs
         # on every cargo invocation, before the fetch scripts have run.
         #
-        # The identity is merged in here rather than committed to either config
-        # because the committed "-" is load bearing for a source build: an
-        # unsigned bundle will not execute on Apple Silicon at all. The merged
-        # file is written next to the other configs so its relative externalBin
-        # and resource paths resolve the same way.
-        shell: bash
-        run: |
-          config=launcher/tauri.release.conf.json
-          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-            jq --arg identity "$APPLE_SIGNING_IDENTITY" \
-              '.bundle.macOS.signingIdentity = $identity' \
-              "$config" > launcher/tauri.signed.conf.json
-            config=launcher/tauri.signed.conf.json
-          fi
-          cargo tauri build --config "$config" --bundles ${{ matrix.bundles }}
+        # Signing identity comes from APPLE_SIGNING_IDENTITY in the job env.
+        run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
       - name: Notarize and staple
         # Before the .app is zipped, so the zip carries the ticket: a ticket
@@ -238,7 +228,7 @@ jobs:
           codesign --display --entitlements - "$app"
           codesign --display --entitlements - "$app/Contents/MacOS/qemu-system-guest"
 
-          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+          if [ "$SIGN_MACOS" = "true" ]; then
             dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
             # stapler is the offline half: spctl alone also passes on an
             # unstapled build for as long as this runner can reach Apple.
