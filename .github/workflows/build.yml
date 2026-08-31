@@ -412,8 +412,10 @@ jobs:
           unzip -q dist/*.zip -d gatekeeper
           app="$(find gatekeeper -maxdepth 1 -name '*.app')"
           # upload-artifact does not preserve extended attributes, so the flag a
-          # browser would have set is applied by hand.
-          xattr -w -r com.apple.quarantine \
+          # browser would have set is applied by hand. On the bundle only, the
+          # way a download carries it: writing an xattr needs write permission
+          # on the file, and the QEMU payload arrives from Homebrew read-only.
+          xattr -w com.apple.quarantine \
             "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$app"
           spctl --assess --type exec --verbose=4 "$app"
           xcrun stapler validate "$app"
