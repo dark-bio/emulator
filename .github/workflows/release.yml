@@ -14,6 +14,10 @@ on:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    # Only a tag signs and notarizes. build-and-smoke.yml deliberately passes
+    # nothing, so pull requests keep building ad-hoc: notarization is a round
+    # trip to Apple that would otherwise run on every push.
+    secrets: inherit
 
   release:
     needs: build

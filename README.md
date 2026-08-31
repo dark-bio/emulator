@@ -34,15 +34,13 @@ Each platform has both an installed and a no-install option:
 Each asset has a `.sha256` file published alongside it; verify with
 `sha256sum -c` (Linux/Windows) or `shasum -a 256 -c` (macOS).
 
-The macOS builds are ad-hoc signed, which is enough to execute on Apple
-Silicon but is not an Apple Developer ID and carries no notarization. The
-Windows builds are unsigned outright. Either way your OS will flag them on
+The macOS builds are signed with an Apple Developer ID and notarized, so they
+open normally. The Windows builds are unsigned, and your OS will flag them on
 first run:
 
-- **macOS**: Gatekeeper blocks the app on first launch. Open **System
-  Settings** → **Privacy & Security** → **Security**, click **Open Anyway**
-  (only available for about an hour after the blocked attempt), then enter
-  your password to confirm. Only needed once.
+- **macOS**: nothing to do. Builds from source are ad-hoc signed instead, and
+  those Gatekeeper does block: open **System Settings** → **Privacy &
+  Security** → **Security** and click **Open Anyway**.
 - **Windows**: SmartScreen shows "Windows protected your PC". Click **More
   info**, then **Run anyway**.
 - **Linux**: no OS-level gatekeeping for an unsigned `.deb`/AppImage; nothing
@@ -110,4 +108,5 @@ Run with `--help` for the full list.
 |---|---|
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window, and carries the packaging config and macOS entitlements. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
+| `docs/` | Maintainer documentation. Currently the one-time Apple Developer setup the macOS signing in CI depends on. |
 | `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. |
