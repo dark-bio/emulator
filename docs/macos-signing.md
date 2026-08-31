@@ -1,8 +1,9 @@
 # Setting up macOS signing
 
 Everything in the release workflow is already wired for Developer ID signing
-and notarization. What it needs is six repository secrets, and only the Apple
-Developer **Account Holder** can produce two of them. This is the runbook for
+and notarization. What it needs is six secrets in the
+`github-action-releaser` environment, and only the Apple Developer **Account
+Holder** can produce two of them. This is the runbook for
 that person. It is a one-time setup, plus a certificate renewal every five
 years.
 
@@ -88,26 +89,38 @@ Keys** → **+**. Give it the **Developer** role.
 Download the `.p8`. **It can only be downloaded once.** Note the **Key ID**
 next to it and the **Issuer ID** shown above the key list.
 
-## 3. Add the repository secrets
+## 3. Add the environment secrets
 
-Under **Settings** → **Secrets and variables** → **Actions** →
-**New repository secret**:
+Under **Settings** → **Environments** → **github-action-releaser** →
+**Add environment secret**:
 
 | Secret | Value |
 |---|---|
 | `APPLE_CERTIFICATE` | `base64 -w0 devid.p12` (on macOS: `base64 -i devid.p12`) |
 | `APPLE_CERTIFICATE_PASSWORD` | the export password you chose in step 1 |
 | `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Dark Bio AG (A1B2C3D4E5)` |
-| `APPLE_API_KEY` | `base64 -w0 AuthKey_XXXXXXXXXX.p8` |
-| `APPLE_API_KEY_ID` | the key's Key ID, e.g. `XXXXXXXXXX` |
-| `APPLE_API_ISSUER_ID` | the Issuer ID, a UUID |
+| `APPLE_API_KEY_P8` | `base64 -w0 AuthKey_XXXXXXXXXX.p8` |
+| `APPLE_API_KEY` | the key's Key ID, e.g. `XXXXXXXXXX` |
+| `APPLE_API_ISSUER` | the Issuer ID, a UUID |
 
-They must be **repository** secrets, not environment secrets: `release.yml`
-forwards them with `secrets: inherit`, which does not reach an environment.
+`APPLE_API_KEY` and `APPLE_API_KEY_P8` are easy to fill in the wrong way round;
+the workflow checks that the second one decodes to a private key and says so if
+it does not.
 
-All six are read only by the macOS legs of the build. Adding a subset does
-nothing useful: `APPLE_CERTIFICATE` alone is what switches the signing path on,
-and the notarization step will then fail for want of the API key.
+The environment name is what turns signing on. `release.yml` passes
+`signing-environment: github-action-releaser` to the build workflow, and the
+build job declares that environment, which is the only way a reusable workflow
+can read environment secrets at all. Renaming the environment means editing
+`release.yml` to match.
+
+Because the environment gates the secrets, any deployment protection rule on it
+also gates every release build. A required reviewer will pause the macOS jobs
+until someone approves; a branch or tag rule that does not admit `v*.*.*` will
+make them build unsigned rather than fail, so check the rules there if a tag
+comes out ad-hoc signed.
+
+All six are read only by the macOS legs of the build, and a partial set does not
+degrade gracefully: the run will sign and then fail at notarization.
 
 ## 4. Verify
 
