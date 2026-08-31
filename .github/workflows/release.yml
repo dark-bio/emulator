@@ -17,8 +17,14 @@ jobs:
     # Only a tag signs and notarizes. build-and-smoke.yml names no environment,
     # so pull requests keep building ad-hoc: notarization is a round trip to
     # Apple that would otherwise run on every push.
+    #
+    # `secrets: inherit` carries none of the signing secrets, which live in the
+    # environment rather than on the repository. It is still required: it is
+    # what grants the called workflow the right to resolve a secrets context at
+    # all, and without it the environment resolves to nothing.
     with:
       signing-environment: github-action-releaser
+    secrets: inherit
 
   release:
     needs: build

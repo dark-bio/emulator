@@ -108,10 +108,11 @@ the workflow checks that the second one decodes to a private key and says so if
 it does not.
 
 The environment name is what turns signing on. `release.yml` passes
-`signing-environment: github-action-releaser` to the build workflow, and the
-build job declares that environment, which is the only way a reusable workflow
-can read environment secrets at all. Renaming the environment means editing
-`release.yml` to match.
+`signing-environment: github-action-releaser` to the build workflow along with
+`secrets: inherit`, and the build job declares that environment. All three are
+needed: a reusable workflow can only read environment secrets by declaring the
+environment itself, and only if the caller inherited secrets to it. Renaming the
+environment means editing `release.yml` to match.
 
 Because the environment gates the secrets, any deployment protection rule on it
 also gates every release build. A required reviewer will pause the macOS jobs

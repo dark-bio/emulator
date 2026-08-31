@@ -12,10 +12,15 @@ on:
   workflow_call:
     inputs:
       # The GitHub environment holding the Apple signing secrets, or empty to
-      # build unsigned. Passing a name is what makes a run sign: an environment
-      # secret is only readable by a job that declares that environment, and a
-      # `uses:` job cannot declare one, so `secrets: inherit` does not reach
-      # them. release.yml names it; build-and-smoke.yml passes nothing, so pull
+      # build unsigned. Passing a name is what makes a run sign. Reading those
+      # secrets takes both halves of an awkward contract: the job below has to
+      # declare the environment, because `on.workflow_call` has no `environment`
+      # keyword for the caller to use, and the caller has to pass
+      # `secrets: inherit` anyway, which grants the right to resolve a secrets
+      # context rather than carrying any value. With one half missing the
+      # context is empty and every secret reads as "".
+      #
+      # release.yml names it; build-and-smoke.yml passes nothing, so pull
       # requests and forks keep the ad-hoc signature they have always had.
       signing-environment:
         type: string
@@ -114,7 +119,26 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # Presence only, never a value, so an empty secrets context reports
+          # itself instead of failing later inside security(1).
+          SECRETS_SEEN: >-
+            APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE != '' }}
+            APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+            APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+            APPLE_API_KEY=${{ secrets.APPLE_API_KEY != '' }}
+            APPLE_API_KEY_P8=${{ secrets.APPLE_API_KEY_P8 != '' }}
+            APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER != '' }}
         run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "no Apple signing secrets reached this job" >&2
+            echo "  repository:  ${{ github.repository }}" >&2
+            echo "  environment: ${{ inputs.signing-environment }}" >&2
+            echo "  visible:     $SECRETS_SEEN" >&2
+            echo "A fork cannot read the upstream repository's secrets, and an" >&2
+            echo "environment that does not exist here is created empty." >&2
+            exit 1
+          fi
+
           keychain="$RUNNER_TEMP/signing.keychain-db"
           certificate="$RUNNER_TEMP/certificate.p12"
           password="$(openssl rand -base64 24)"
