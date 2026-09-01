@@ -12,7 +12,8 @@ signing pipeline runs on GitHub's macOS runners.
 
 ## What CI does with these
 
-On a tag, `release.yml` passes the secrets to `build.yml`, which then:
+On a tag, `release.yml` names the signing environment for `build.yml`, which
+then:
 
 1. imports the certificate into a throwaway keychain on each macOS runner,
 2. signs the bundled QEMU dylibs (`fetch-qemu-macos.sh` does this, before the
@@ -25,9 +26,10 @@ On a tag, `release.yml` passes the secrets to `build.yml`, which then:
    on the build runner and again on a clean runner that never held the
    certificate.
 
-Until the secrets exist, all of that is skipped and macOS builds stay ad-hoc
-signed, exactly as they were. Nothing breaks in the meantime, and pull requests
-from forks keep working after the secrets are added.
+What decides all of that is the environment name, not the secrets: pull
+requests name none, so they stay ad-hoc signed exactly as they were. A run that
+does name one and then finds the secrets missing fails rather than falling back,
+so a half-configured environment cannot ship an unsigned release.
 
 ## 1. Create the Developer ID Application certificate
 
@@ -116,12 +118,12 @@ environment means editing `release.yml` to match.
 
 Because the environment gates the secrets, any deployment protection rule on it
 also gates every release build. A required reviewer will pause the macOS jobs
-until someone approves; a branch or tag rule that does not admit `v*.*.*` will
-make them build unsigned rather than fail, so check the rules there if a tag
-comes out ad-hoc signed.
+until someone approves; a branch or tag rule that does not admit `v*.*.*`
+leaves the secrets empty, which the build reports as "the signing environment
+supplied no complete set of secrets" rather than quietly building unsigned.
 
-All six are read only by the macOS legs of the build, and a partial set does not
-degrade gracefully: the run will sign and then fail at notarization.
+All six are read only by the macOS legs of the build, and a partial set is
+rejected up front rather than failing later at notarization.
 
 ## 4. Verify
 

@@ -55,11 +55,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     environment: ${{ inputs.signing-environment }}
     env:
-      # A step-level `if` cannot read the `inputs` context, so whether this run
-      # signs is hoisted into env here. Deliberately not the certificate itself:
-      # Tauri's bundler runs a keychain import of its own whenever it finds
-      # APPLE_CERTIFICATE in the environment, and this workflow has to do that
-      # import earlier, before the QEMU fetch signs the bundled dylibs.
+      # Hoisted into env because the verify step needs it in the shell as well
+      # as in a step `if`, and the smoke job reads the same value. Deliberately
+      # not the certificate itself: Tauri's bundler runs a keychain import of
+      # its own whenever it finds APPLE_CERTIFICATE in the environment, and this
+      # workflow has to do that import earlier, before the QEMU fetch signs the
+      # bundled dylibs.
       SIGN_MACOS: ${{ inputs.signing-environment != '' }}
       # Read by fetch-qemu-macos.sh for those dylibs and by Tauri's bundler,
       # which prefers this over bundle.macOS.signingIdentity in the config. It
@@ -132,8 +133,13 @@ jobs:
             APPLE_API_KEY_P8=${{ secrets.APPLE_API_KEY_P8 != '' }}
             APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER != '' }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "no Apple signing secrets reached this job" >&2
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ] \
+            || [ -z "$APPLE_API_KEY" ] || [ -z "$APPLE_API_KEY_P8" ] \
+            || [ -z "$APPLE_API_ISSUER" ] || [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then
+            # The identity is checked against its fallback rather than against
+            # empty: absent, it silently ad-hoc signs a run that then fails on
+            # the far side, at notarization.
+            echo "the signing environment supplied no complete set of secrets" >&2
             echo "  repository:  ${{ github.repository }}" >&2
             echo "  environment: ${{ inputs.signing-environment }}" >&2
             echo "  visible:     $SECRETS_SEEN" >&2
@@ -373,7 +379,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Delete the signing keychain
+      - name: Delete the signing credentials
         # Runners are ephemeral, but a failed build must not leave a private key
         # readable to anything else scheduled onto this one first.
         if: always() && runner.os == 'macOS' && env.SIGN_MACOS == 'true'
