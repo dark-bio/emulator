@@ -278,11 +278,21 @@ jobs:
             # moment. Without this a build that tickets only the loose .app
             # looks healthy here.
             mount="$RUNNER_TEMP/dmg-check"
+            rm -rf "$mount"
             mkdir -p "$mount"
-            hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -quiet
-            inner="$(find "$mount" -maxdepth 1 -name '*.app')"
-            xcrun stapler validate "$inner" && status=0 || status=$?
-            hdiutil detach "$mount" -quiet
+            hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly
+
+            status=0
+            inner="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
+            if [ -z "$inner" ]; then
+              echo "no .app at the root of $dmg" >&2
+              ls -la "$mount" >&2
+              status=1
+            else
+              xcrun stapler validate "$inner" || status=$?
+            fi
+
+            hdiutil detach "$mount" || hdiutil detach "$mount" -force
             [ "$status" -eq 0 ]
           else
             spctl --assess --type exec --verbose=4 "$app" \
