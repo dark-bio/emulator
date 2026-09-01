@@ -31,9 +31,6 @@ Each platform has both an installed and a no-install option:
 | macOS | `.dmg` | `.zip`: unzip, the `.app` inside runs from anywhere |
 | Windows | NSIS `.exe` installer | `.zip`: unzip, run `Ark Emulator.exe` from inside |
 
-Each asset has a `.sha256` file published alongside it; verify with
-`sha256sum -c` (Linux/Windows) or `shasum -a 256 -c` (macOS).
-
 The macOS builds are signed with an Apple Developer ID and notarized, so they
 open normally. The Windows builds are unsigned, and your OS will flag them on
 first run:

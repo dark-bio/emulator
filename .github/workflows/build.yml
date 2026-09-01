@@ -348,10 +348,6 @@ jobs:
 
           ls -la dist/
 
-      - name: Generate checksums
-        shell: bash
-        run: .github/scripts/checksums.sh dist
-
       - name: Upload installers
         # Uploaded on every run: the smoke job downloads these rather than
         # rebuilding, so it tests bit-for-bit what a release would publish.
