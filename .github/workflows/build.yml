@@ -280,7 +280,12 @@ jobs:
             mount="$RUNNER_TEMP/dmg-check"
             rm -rf "$mount"
             mkdir -p "$mount"
-            hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly
+            # The image embeds LICENSE as a click-through agreement, so
+            # attaching it prompts and cancels on EOF. Answering it also prints
+            # the whole license, which is what the redirect is for.
+            printf 'Y\n' \
+              | hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly \
+                > /dev/null
 
             status=0
             inner="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
