@@ -40,10 +40,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-26
+          # The macOS runner's own version is the floor for everything the app
+          # can run on: fetch-qemu-macos.sh bundles Homebrew bottles, which are
+          # built per OS version, so QEMU and its dylibs record this runner's
+          # version as their minimum and dyld refuses them on anything older.
+          # Raising these labels means raising bundle.macOS.minimumSystemVersion
+          # in launcher/tauri.conf.json to match.
+          - os: macos-15
             arch: arm64
             bundles: dmg,app
-          - os: macos-26-intel
+          - os: macos-15-intel
             arch: amd64
             bundles: dmg,app
           - os: windows-2022
@@ -396,7 +402,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, macos-26-intel, windows-2022, ubuntu-22.04]
+        os: [macos-15, macos-15-intel, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     env:
       SIGN_MACOS: ${{ inputs.signing-environment != '' }}
