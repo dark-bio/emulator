@@ -41,6 +41,7 @@
     "licenseFile": "../LICENSE",
     "macOS": {
       "signingIdentity": "-",
+      "minimumSystemVersion": "15.0",
       "hardenedRuntime": true,
       "entitlements": "entitlements.plist"
     }
