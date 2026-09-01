@@ -19,8 +19,8 @@ On a tag, `release.yml` passes the secrets to `build.yml`, which then:
    app bundle seals them, which is the order Apple requires),
 3. builds with `hardenedRuntime` and the entitlements in
    `launcher/entitlements.plist`,
-4. submits the `.dmg` to `notarytool`, waits, and staples both the `.dmg` and
-   the `.app`,
+4. notarizes and staples the `.app` during bundling, before it is sealed into
+   the `.dmg`, then submits the `.dmg` itself and staples that too,
 5. fails the build unless `spctl` and `stapler validate` accept both artifacts,
    on the build runner and again on a clean runner that never held the
    certificate.

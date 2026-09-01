@@ -111,7 +111,7 @@ jobs:
         if: runner.os == 'Linux'
         run: .github/scripts/fetch-qemu-linux.sh
 
-      - name: Import the Developer ID certificate
+      - name: Import the Apple signing credentials
         # A throwaway keychain rather than the login one, which on a runner is
         # unlocked with a published password. It has to exist before the QEMU
         # fetch, which signs the bundled dylibs with this identity.
@@ -119,6 +119,9 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           # Presence only, never a value, so an empty secrets context reports
           # itself instead of failing later inside security(1).
           SECRETS_SEEN: >-
@@ -162,6 +165,25 @@ jobs:
             $(security list-keychains -d user | tr -d '"')
           security find-identity -v -p codesigning "$keychain"
 
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+
+          # Guards against the two key secrets being filled in the other way
+          # round, which otherwise surfaces as an opaque auth failure.
+          if ! grep -q 'BEGIN PRIVATE KEY' "$key"; then
+            echo "APPLE_API_KEY_P8 does not decode to a .p8 private key" >&2
+            exit 1
+          fi
+
+          # Exported here rather than named on the build step so they stay
+          # undefined on a run that does not sign: Tauri reads a defined but
+          # empty credential as present and fails on it.
+          {
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$key"
+          } >> "$GITHUB_ENV"
+
       - name: Fetch bundled QEMU (macOS)
         if: runner.os == 'macOS'
         run: .github/scripts/fetch-qemu-macos.sh
@@ -185,38 +207,21 @@ jobs:
         # clone works: tauri-build validates externalBin paths and resource globs
         # on every cargo invocation, before the fetch scripts have run.
         #
-        # Signing identity comes from APPLE_SIGNING_IDENTITY in the job env.
+        # Signing identity and notarization credentials come from the job env.
+        # Tauri notarizes and staples the .app between building it and sealing
+        # it into the .dmg, which is the only moment the copy inside the image
+        # can be given a ticket. It stops there and never notarizes the .dmg,
+        # which is the next step's job.
         run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
-      - name: Notarize and staple
-        # Before the .app is zipped, so the zip carries the ticket: a ticket
-        # fetched from Apple covers a first launch, a stapled one also covers a
-        # machine that is offline when it happens.
-        #
-        # One submission per runner. The .app inside the .dmg is notarized as
-        # part of it, so Apple already holds a ticket for the bundle's cdhash and
-        # stapling it directly needs no second submission.
+      - name: Notarize and staple the disk image
+        # The .app is already done, by the build. A .dmg is assessed on its own
+        # when a browser hands one to a user, so it needs its own ticket.
         if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
-        env:
-          # APPLE_API_KEY is the key's ten character id, APPLE_API_KEY_P8 the
-          # base64 of the .p8 file itself, matching how Tauri names the two.
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          key="$RUNNER_TEMP/notary.p8"
+          key="$APPLE_API_KEY_PATH"
           result="$RUNNER_TEMP/submission.json"
-          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
-          trap 'rm -f "$key"' EXIT
 
-          # Cheap guard against the two key secrets being filled in the other
-          # way round, which otherwise surfaces as an opaque auth failure.
-          if ! grep -q 'BEGIN PRIVATE KEY' "$key"; then
-            echo "APPLE_API_KEY_P8 does not decode to a .p8 private key" >&2
-            exit 1
-          fi
-
-          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
           dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
 
           # --wait polls until Apple answers. The reported status is what decides
@@ -240,7 +245,10 @@ jobs:
           fi
 
           xcrun stapler staple "$dmg"
-          xcrun stapler staple "$app"
+
+          # Last use of the key. The cleanup step at the end of the job is the
+          # backstop for the paths that exit before here.
+          rm -f "$key"
 
       - name: Verify macOS signature
         # The per-dylib loop is not redundant with --deep: codesign seals a loose
@@ -265,6 +273,17 @@ jobs:
             xcrun stapler validate "$dmg"
             spctl --assess --type exec --verbose=4 "$app"
             spctl --assess --type install --verbose=4 "$dmg"
+
+            # A different file from the .app above, stapled at a different
+            # moment. Without this a build that tickets only the loose .app
+            # looks healthy here.
+            mount="$RUNNER_TEMP/dmg-check"
+            mkdir -p "$mount"
+            hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -quiet
+            inner="$(find "$mount" -maxdepth 1 -name '*.app')"
+            xcrun stapler validate "$inner" && status=0 || status=$?
+            hdiutil detach "$mount" -quiet
+            [ "$status" -eq 0 ]
           else
             spctl --assess --type exec --verbose=4 "$app" \
               || echo "not accepted by Gatekeeper: ad-hoc signed, not notarized"
