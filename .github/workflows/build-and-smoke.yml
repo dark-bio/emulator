@@ -1,8 +1,9 @@
 name: Build and Smoke Test (PR, Push)
 
-# Compiles and smoke tests every platform on each push to a pull request, so a
-# broken build or a portable artifact that will not launch is caught before a tag
-# exists. The pipeline itself lives in build.yml, which release.yml calls too.
+# Lints, tests, compiles and smoke tests every platform on each push to a pull
+# request, so a broken build or a portable artifact that will not launch is
+# caught before a tag exists. The pipeline itself lives in build.yml, which
+# release.yml calls too.
 on:
   pull_request:
     branches: [ "main" ]

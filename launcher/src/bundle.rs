@@ -59,22 +59,17 @@ pub(crate) fn resolve_firmware(
     Ok((kernel, initrd))
 }
 
-/// Resolve the backing disk image's path, defaulting to `disk.img` under this
-/// app's own data directory and creating that directory if missing. An
-/// explicit `--disk` is absolutized against the current directory, which is a
-/// deliberate override typed at a shell.
-pub(crate) fn resolve_disk_path(app: &tauri::App, cfg: &Config) -> Result<PathBuf> {
-    if let Some(disk) = &cfg.disk {
-        return std::path::absolute(disk)
-            .with_context(|| format!("could not resolve --disk {}", disk.display()));
-    }
+/// Resolve this app's own data directory, creating it if missing. It holds
+/// everything the launcher writes: the settings file, and the disk image when
+/// that is where the user keeps it.
+pub(crate) fn app_data_dir(app: &tauri::App) -> Result<PathBuf> {
     let dir = app
         .path()
         .app_data_dir()
         .context("could not locate this app's data directory")?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("could not create the data directory {}", dir.display()))?;
-    Ok(dir.join("disk.img"))
+    Ok(dir)
 }
 
 /// Resolve a bundled sidecar binary next to the launcher's own executable,

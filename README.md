@@ -77,11 +77,14 @@ cargo run --release -p launcher -- \
 ```
 
 The window shows the device face. The reset pin is a real button; the four
-corner LEDs render whatever the firmware streams from its RGB-LED driver. The
-backing disk is created automatically on first launch as a dynamically growing
-qcow2 image: it starts a few hundred KB in size and grows on demand as the guest
-writes, up to a fixed virtual ceiling. Delete it to reset the emulated device's
-state.
+corner LEDs render whatever the firmware streams from its RGB-LED driver.
+
+The first launch asks where to keep the backing disk, unless `--disk` says.
+Whatever you choose is remembered in [the settings file](#settings) and reused
+from then on. The disk is a dynamically growing qcow2 image, created if it is
+not already there: it starts a few hundred KB in size and grows on demand as
+the guest writes, up to a fixed virtual ceiling. Delete it to reset the
+emulated device's state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
@@ -92,12 +95,37 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 | `--kernel` | bundled firmware | path to the kernel image (`<base>-kernel.<arch>`); a source build has no bundled firmware, so pass this explicitly |
 | `--initrd` | bundled firmware | path to the initramfs (`<base>-initrd.<arch>.gz`); see `--kernel` |
 | `--arch` | host arch | CPU architecture of the firmware artifacts (`arm64` or `amd64`) |
-| `--disk` | this app's data directory | path to the backing disk; auto-allocated on first run. Deliberately not the current directory, which isn't reliably writable for a packaged app |
+| `--disk` | the remembered disk | path to the backing disk, for this run only; auto-allocated if it isn't there yet. Overrides the settings file without changing it |
 | `--env` | `release` | cloud environment the device is bound to when its disk is first created; ignored for existing disks (the binding is burnt in) |
 | `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
 
 Run with `--help` for the full list.
+
+### Settings
+
+Anything the emulator remembers between runs lives in a `settings.toml` under
+its own data directory:
+
+| Platform | Path |
+|---|---|
+| Linux | `~/.local/share/bio.dark.emulator/settings.toml` |
+| macOS | `~/Library/Application Support/bio.dark.emulator/settings.toml` |
+| Windows | `%APPDATA%\bio.dark.emulator\settings.toml` |
+
+Nothing ships with the app. The file is written on first run, so a portable
+copy carried to another machine starts fresh there.
+
+```toml
+version = 1
+disk = "/home/you/arks/demo.img"
+```
+
+`version` is the schema version, and a file from a newer emulator than the one
+reading it is an error rather than something to overwrite. `disk` is the image
+to boot when `--disk` is not given; it appears once something has been chosen.
+Delete the file, or just that line, to be asked again. So does pointing it at
+an image that no longer exists.
 
 ## Layout
 

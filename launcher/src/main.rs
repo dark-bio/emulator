@@ -14,6 +14,8 @@
 //!
 //!   - `qemu`:         the QEMU command line, the guest it builds, and its disk.
 //!   - `bundle`:       where a packaged build's firmware, sidecars and libs live.
+//!   - `settings`:     what the launcher remembers between runs.
+//!   - `disk`:         which disk image the guest boots from, asking if need be.
 //!   - `platform`:     OS-specific quirks, so the other three stay cfg-free.
 //!   - `orphan`:       ties QEMU's lifetime to this process.
 //!   - `diagnostics`:  the log ring and facts a crash report is built from.
@@ -30,10 +32,12 @@
 
 mod bundle;
 mod diagnostics;
+mod disk;
 mod error_dialog;
 mod orphan;
 mod platform;
 mod qemu;
+mod settings;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -45,9 +49,10 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use clap::Parser;
 use tauri::{Manager, WindowEvent};
 
-use bundle::{resolve_disk_path, resolve_firmware, resolve_qemu_libs};
+use bundle::{app_data_dir, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
 use qemu::{ensure_disk, spawn_qemu, GuestArch};
+use settings::Settings;
 
 /// Launch configuration parsed from command-line arguments.
 #[derive(Parser)]
@@ -67,8 +72,9 @@ struct Config {
     #[arg(long, value_enum)]
     arch: Option<GuestArch>,
 
-    /// Path to the backing disk image; auto-allocated on first run. Defaults
-    /// to a `disk.img` under this app's data directory.
+    /// Path to the backing disk image; auto-allocated if it does not exist.
+    /// Defaults to the image remembered in the settings file, which the
+    /// launcher asks for the first time it needs one.
     #[arg(long)]
     disk: Option<PathBuf>,
 
@@ -148,13 +154,23 @@ fn start(app: &tauri::App, cfg: &Config) -> Result<()> {
     };
     diagnostics::record("Guest", arch.name());
 
+    let mut settings = Settings::load(&app_data_dir(app)?)?;
+    diagnostics::record_path("Settings", settings.path());
+
     let (kernel, initrd) = resolve_firmware(app, cfg, arch)?;
     diagnostics::record_path("Kernel", &kernel);
     diagnostics::record_path("Initrd", &initrd);
 
     let qemu_libs = resolve_qemu_libs(app);
 
-    let disk = resolve_disk_path(app, cfg)?;
+    let Some(disk) = disk::resolve(app, cfg, &mut settings)? else {
+        // The picker was dismissed, which is an answer rather than a failure:
+        // nothing to report and nothing to boot. Exiting the process directly
+        // for the reason `error_dialog` gives, that setup may still be running
+        // with no event loop to carry an app.exit. QEMU is spawned below this
+        // point, so there is nothing running to tear down.
+        std::process::exit(0);
+    };
     diagnostics::record_path("Disk", &disk);
     ensure_disk(&disk, qemu_libs.as_deref())
         .with_context(|| format!("failed to prepare the disk image at {}", disk.display()))?;

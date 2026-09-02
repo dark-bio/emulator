@@ -10,6 +10,18 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+# Default features on purpose. On Linux that is the XDG desktop portal (with a
+# zenity fallback), not the `gtk3` backend, which spawns a thread of its own to
+# iterate GTK's default main context for the rest of the process and would then
+# be racing the main thread's loop. The portal touches no GTK and works under
+# Wayland and inside sandboxed packaging.
+rfd = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
 
 # Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; macOS uses a
 # death pipe + /bin/sh (std only). Windows needs windows-sys for a Job Object,
