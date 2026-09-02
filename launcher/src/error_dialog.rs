@@ -33,10 +33,12 @@ const ISSUES_URL: &str = "https://github.com/dark-bio/emulator/issues";
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 750.0;
 
-/// Suppresses the window and exits immediately instead. Set by the CI smoke
-/// scripts, which run the app under a virtual display where a window nobody can
-/// dismiss would just stall until the job times out.
-const NO_DIALOG: &str = "ARK_EMULATOR_NO_DIALOG";
+/// Suppresses the window and exits immediately instead, and stands for the
+/// same thing wherever else the launcher would put a dialog in front of
+/// somebody (see [`crate::disk`]). Set by the CI smoke scripts, which run the
+/// app under a virtual display where a window nobody can dismiss would just
+/// stall until the job times out.
+pub(crate) const NO_DIALOG: &str = "ARK_EMULATOR_NO_DIALOG";
 
 /// Whether a failure has already been reported. Startup failing and QEMU dying
 /// are not mutually exclusive, and the second one to arrive must not stack a
