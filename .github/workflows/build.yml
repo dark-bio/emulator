@@ -1,9 +1,10 @@
 name: Build and Smoke Test (Reusable)
 
-# Builds installers for macOS (arm64 + x86_64), Windows, and Linux, then smoke
-# tests the no-install artifact of each on a clean machine. Called by
-# build-and-smoke.yml on pull requests and by release.yml on tags, so a release
-# cannot ship a portable build that fails to launch.
+# Lints and tests the crate once, builds installers for macOS (arm64 + x86_64),
+# Windows, and Linux, then smoke tests the no-install artifact of each on a
+# clean machine. Called by build-and-smoke.yml on pull requests and by
+# release.yml on tags, so a release cannot ship a portable build that fails to
+# launch or code that does not pass its own tests.
 #
 # The no-install artifact is the AppImage on Linux, the raw .app on macOS, and a
 # hand-assembled portable .zip on Windows: NSIS has no portable mode, and Tauri
@@ -40,6 +41,48 @@ permissions:
   contents: read
 
 jobs:
+  check:
+    # Lints and tests, on one runner rather than the build matrix's four. None
+    # of it is platform-specific, and the crate is compiled here against the
+    # default tauri.conf.json, which declares no externalBin and no resources,
+    # so this job needs neither the bundled QEMU nor the pinned firmware.
+    #
+    # Deliberately not a gate on `build`. Serializing would add its whole
+    # runtime to every green run to save four builds on a red one, and a
+    # failure here fails the workflow either way.
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust artifacts
+        # Skipped on tags so a release always builds from scratch.
+        if: github.ref_type != 'tag'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Linux build dependencies
+        # The build job's list without the QEMU packages, which only the
+        # bundling and the smoke test need.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
   build:
     strategy:
       fail-fast: false
