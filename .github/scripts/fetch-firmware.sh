@@ -4,15 +4,17 @@
 #
 # dark-bio/emulator-images is public, so no token is needed to read its
 # releases. gh still works better authenticated, for the API rate limit.
-# FIRMWARE_TAG has no default, so the pinned version lives solely in the
-# workflow rather than being duplicated here. Asset names embed the version,
-# so the kernel and initrd are matched with a wildcard.
+# Neither FIRMWARE_TAG nor the digests have a default, so the pin lives solely
+# in the workflow rather than being duplicated here. Asset names embed the
+# version, so the kernel and initrd are matched with a wildcard.
 #
-# Each asset has a same-named .sha256 published alongside it, checked here since
-# `gh release download` verifies nothing itself. This catches a truncated
-# download, not a compromised release: both files could be replaced together.
+# Each asset is checked against its pinned digest rather than against the
+# .sha256 the release publishes beside it, which a replaced release would carry
+# too. `gh release download` verifies nothing itself.
 #
-#   FIRMWARE_TAG=<tag> .github/scripts/fetch-firmware.sh
+#   FIRMWARE_TAG=<tag> \
+#   FIRMWARE_<ARCH>_KERNEL_SHA256=<hex> FIRMWARE_<ARCH>_INITRD_SHA256=<hex> \
+#     .github/scripts/fetch-firmware.sh
 set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/checksums.sh"
@@ -34,6 +36,14 @@ case "$triple" in
     exit 1 ;;
 esac
 
+# Only the host arch's two digests are needed, so the others may be unset. Bash
+# 3.2 has no associative arrays, hence the indirection through a name.
+arch_upper="$(echo "$arch" | tr '[:lower:]' '[:upper:]')"
+kernel_sha_var="FIRMWARE_${arch_upper}_KERNEL_SHA256"
+initrd_sha_var="FIRMWARE_${arch_upper}_INITRD_SHA256"
+kernel_sha256="${!kernel_sha_var:?set $kernel_sha_var to the pinned kernel digest}"
+initrd_sha256="${!initrd_sha_var:?set $initrd_sha_var to the pinned initrd digest}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out_dir="$repo_root/launcher/firmware/$arch"
 mkdir -p "$out_dir"
@@ -47,8 +57,6 @@ initrd_pattern="arkos-*-emulator-initrd.${arch}.gz"
 gh release download "$FIRMWARE_TAG" --repo "$firmware_repo" \
   --pattern "$kernel_pattern" \
   --pattern "$initrd_pattern" \
-  --pattern "${kernel_pattern}.sha256" \
-  --pattern "${initrd_pattern}.sha256" \
   --dir "$tmp"
 
 kernel="$(find "$tmp" -maxdepth 1 -name "$kernel_pattern" | head -1)"
@@ -57,13 +65,9 @@ if [ -z "$kernel" ] || [ -z "$initrd" ]; then
   echo "release $FIRMWARE_TAG has no assets matching $kernel_pattern / $initrd_pattern" >&2
   exit 1
 fi
-if [ ! -f "${kernel}.sha256" ] || [ ! -f "${initrd}.sha256" ]; then
-  echo "release $FIRMWARE_TAG is missing a .sha256 for the kernel or initrd asset" >&2
-  exit 1
-fi
 
-verify_checksum "$kernel"
-verify_checksum "$initrd"
+verify_checksum "$kernel" "$kernel_sha256"
+verify_checksum "$initrd" "$initrd_sha256"
 
 cp "$kernel" "$out_dir/kernel"
 cp "$initrd" "$out_dir/initrd.gz"
