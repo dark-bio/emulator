@@ -144,6 +144,126 @@
       -webkit-user-drag: none;
       user-select: none;
     }
+
+    /* Info tray. Closed it tucks --tuck under the device and reads as a notch
+     hanging off its bottom edge; open it drops clear of the device and runs to
+     the bottom of the window. --band is the notch's visible height, and the
+     header row the chevron sits in once open. Fractions of .scene's 220x286
+     box:
+     - closed : top 213/286 = 74.48%, 30/220 = 13.64% wide, centred
+     - open   : top 224/286 = 78.32%, a 4-unit gap below the device; flush with
+                its left edge and 176/220 = 80% wide, which stops short of the
+                reset pin at 184/220; tall enough to cover the rest of the
+                scene plus the body's padding, so the tray ends on the window's
+                own edge */
+    .info {
+      --tuck: 2.9vmin;
+      --band: 5.8vmin;
+      --gutter: 2.9vmin;
+      --row: 3.4vmin;
+      --chev: 3.2vmin;
+      position: absolute;
+      top: 74.48%;
+      left: 43.18%;
+      width: 13.64%;
+      height: calc(var(--tuck) + var(--band));
+      z-index: 1;
+      display: flex;
+      align-items: flex-start;
+      padding: var(--tuck) var(--gutter) 0;
+      border: 0;
+      border-radius: 2.2vmin;
+      background: #0d0c0c;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+      transition: top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        left 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        width 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        height 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        padding-top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+    }
+
+    /* The same nudge the reset pin answers a hover with. Translating rather
+     than growing keeps the notch's contents centred in what shows of it. */
+    .info:not(.open):hover {
+      transform: translateY(1.4vmin);
+    }
+
+    .info.open {
+      top: 78.32%;
+      left: 0;
+      width: 80%;
+      height: calc(21.68% + var(--pad));
+      padding-top: var(--gutter);
+    }
+
+    .info:focus-visible {
+      outline: 0;
+    }
+
+    /* Centred on the notch while closed, and on the far end of the header row
+     once open. The closed offset is a fraction of the tray's own width, so the
+     chevron rides the width animation rather than jumping across it. */
+    .info-chevron {
+      position: absolute;
+      top: calc(var(--tuck) + var(--band) / 2);
+      right: 50%;
+      width: var(--chev);
+      height: auto;
+      color: #6e7681;
+      transform: translate(50%, -50%);
+      transition: top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        right 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        transform 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        color 0.12s ease;
+    }
+
+    .info:hover .info-chevron {
+      color: #c9d1d9;
+    }
+
+    .info.open .info-chevron {
+      top: calc(var(--gutter) + var(--row) / 2);
+      right: var(--gutter);
+      transform: translate(0, -50%) rotate(180deg);
+    }
+
+    /* Too wide for the notch to hold, so it is faded rather than only clipped. */
+    .info-row {
+      flex: 1;
+      min-width: 0;
+      height: var(--row);
+      display: flex;
+      align-items: center;
+      gap: 1.6vmin;
+      padding-right: calc(var(--gutter) + var(--chev));
+      opacity: 0;
+      transition: opacity 0.1s ease;
+    }
+
+    .info.open .info-row {
+      opacity: 1;
+      transition-delay: 0.12s;
+    }
+
+    .info-label {
+      flex: none;
+      font-size: 2.2vmin;
+      color: #6e7681;
+    }
+
+    .info-value {
+      min-width: 0;
+      font-size: 2.6vmin;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
   </style>
 </head>
 
@@ -156,6 +276,16 @@
       <span class="led bl" data-tauri-drag-region></span>
       <span class="led br" data-tauri-drag-region></span>
     </div>
+    <button class="info" type="button" aria-label="device info" aria-expanded="false">
+      <span class="info-row">
+        <span class="info-label">disk</span>
+        <span class="info-value"></span>
+      </span>
+      <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
+        <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round" />
+      </svg>
+    </button>
     <button class="reset-pin" type="button" aria-label="reset button">
       <img src="assets/sim_removal_tool.svg" alt="" />
     </button>
@@ -307,6 +437,37 @@
       };
       pin.addEventListener('pointerup', release);
       pin.addEventListener('pointercancel', release);
+    })();
+
+    // Info tray: a notch on the device's bottom edge that opens into a strip
+    // naming what the emulated device is running on. The disk path is fetched
+    // on first open rather than at load, so the answer is never asked for
+    // while the launcher is still deciding (the first run puts a picker up).
+    (() => {
+      const tray = document.querySelector('.info');
+      const value = document.querySelector('.info-value');
+      let loaded = false;
+
+      async function loadDisk() {
+        if (loaded) return;
+        let path = null;
+        try {
+          path = await window.__TAURI__?.core.invoke('disk_path');
+        } catch { }
+        if (!path) {
+          value.textContent = 'unknown';
+          return;
+        }
+        loaded = true;
+        value.textContent = path.split(/[\\/]/).pop();
+        value.title = path;
+      }
+
+      tray.addEventListener('click', () => {
+        const open = tray.classList.toggle('open');
+        tray.setAttribute('aria-expanded', String(open));
+        if (open) loadDisk();
+      });
     })();
 
     // Window drag is handled natively by Tauri via the `data-tauri-drag-region`

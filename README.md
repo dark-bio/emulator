@@ -77,7 +77,9 @@ cargo run --release -p launcher -- \
 ```
 
 The window shows the device face. The reset pin is a real button; the four
-corner LEDs render whatever the firmware streams from its RGB-LED driver.
+corner LEDs render whatever the firmware streams from its RGB-LED driver. The
+notch under the device opens a tray naming the disk image this run is booted
+from, with the full path on hover.
 
 The first launch asks where to keep the backing disk, unless `--disk` says.
 Whatever you choose is remembered in [the settings file](#settings) and reused
