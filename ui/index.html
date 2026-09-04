@@ -341,10 +341,12 @@
     import { startBootAnimation } from './boot_anim.js';
 
     // Identity of the emulated device, pushed by the firmware once it has
-    // booted and again whenever the device is onboarded. The socket below
-    // receives it and the info tray draws it, so it is parked here between the
-    // two. Cached rather than asked for on demand, since the tray can be opened
-    // long before the firmware is far enough along to answer.
+    // booted and again whenever a claim changes, such as a rename or an
+    // onboarding. Frames are partial, so this is the accumulated picture rather
+    // than a copy of the last one. The socket below fills it in and the info
+    // tray draws it, so it is parked here between the two. Held rather than
+    // asked for on demand, since the tray can be opened long before the
+    // firmware is far enough along to answer.
     const deviceInfo = { known: false, env: null, name: null, serial: null, expiry: null };
     let onDeviceInfo = () => { };
 
@@ -442,12 +444,17 @@
                 id: env.id,
                 payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
               }));
-            } else if (env.d === 'device') {
+            } else if (env.d === 'identity') {
+              // A frame carries only the claims that changed, so merge it
+              // in rather than replacing: a claim it leaves out keeps the
+              // value it already has.
+              const claims = env.payload ?? {};
+              for (const claim of ['env', 'name', 'serial', 'expiry']) {
+                if (Object.hasOwn(claims, claim)) {
+                  deviceInfo[claim] = claims[claim] ?? null;
+                }
+              }
               deviceInfo.known = true;
-              deviceInfo.env = env.payload?.env ?? null;
-              deviceInfo.name = env.payload?.name ?? null;
-              deviceInfo.serial = env.payload?.serial ?? null;
-              deviceInfo.expiry = env.payload?.expiry ?? null;
               onDeviceInfo();
             }
             // Unrecognised driver tags no-op.
@@ -556,8 +563,10 @@
       // user has not named yet has no name.
       function renderDevice() {
         if (!deviceInfo.known) return;
-        rows.name.row.hidden = deviceInfo.name === null;
-        if (deviceInfo.name !== null) {
+        // An empty name is one the user cleared, which reads the same as
+        // never having set one.
+        rows.name.row.hidden = !deviceInfo.name;
+        if (deviceInfo.name) {
           rows.name.value.textContent = deviceInfo.name;
         }
         rows.serial.row.hidden = false;
