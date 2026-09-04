@@ -80,10 +80,12 @@ The window shows the device face. The reset pin is a real button; the four
 corner LEDs render whatever the firmware streams from its RGB-LED driver. The
 notch under the device opens a tray naming the disk image this run is booted
 from, with the full path on hover, alongside the serial the firmware reports
-for the emulated device and how long its identity stays valid. The exact expiry
-date is on hover. A device that has not been onboarded yet reads `not onboarded`
-and shows no expiry, and both rows stay blank until the firmware has booted far
-enough to report them.
+for the emulated device, how long its identity stays valid, and the environment
+the disk is bound to. The exact expiry date is on hover. A device that has not
+been onboarded yet reads `not onboarded` and shows no expiry, and the rows stay
+blank until the firmware has booted far enough to report them. The environment
+is the one read back off the running device, so it is what `--env` settled on
+when the disk was created rather than whatever this run happened to pass.
 
 The first launch asks where to keep the backing disk, unless `--disk` says.
 Whatever you choose is remembered in [the settings file](#settings) and reused

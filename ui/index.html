@@ -301,6 +301,10 @@
         <span class="info-label">expires</span>
         <span class="info-value"></span>
       </span>
+      <span class="info-row" data-row="env" hidden>
+        <span class="info-label">env</span>
+        <span class="info-value"></span>
+      </span>
       <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
         <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
@@ -317,7 +321,7 @@
     // receives it and the info tray draws it, so it is parked here between the
     // two. Cached rather than asked for on demand, since the tray can be opened
     // long before the firmware is far enough along to answer.
-    const deviceInfo = { known: false, serial: null, expiry: null };
+    const deviceInfo = { known: false, env: null, serial: null, expiry: null };
     let onDeviceInfo = () => { };
 
     // Hardware channel: driver frames stream in from the firmware, reset-pin
@@ -416,6 +420,7 @@
               }));
             } else if (env.d === 'device') {
               deviceInfo.known = true;
+              deviceInfo.env = env.payload?.env ?? null;
               deviceInfo.serial = env.payload?.serial ?? null;
               deviceInfo.expiry = env.payload?.expiry ?? null;
               onDeviceInfo();
@@ -524,6 +529,10 @@
         if (deviceInfo.expiry !== null) {
           rows.expires.value.textContent = expiresIn(deviceInfo.expiry);
           rows.expires.value.title = new Date(deviceInfo.expiry * 1000).toLocaleString();
+        }
+        rows.env.row.hidden = deviceInfo.env === null;
+        if (deviceInfo.env !== null) {
+          rows.env.value.textContent = deviceInfo.env;
         }
       }
       onDeviceInfo = renderDevice;
