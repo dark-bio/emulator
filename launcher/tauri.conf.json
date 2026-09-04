@@ -12,8 +12,8 @@
     "windows": [
       {
         "title": "Ark I emulator",
-        "width": 366,
-        "height": 465,
+        "width": 340,
+        "height": 459,
         "resizable": false,
         "decorations": false,
         "shadow": false,
