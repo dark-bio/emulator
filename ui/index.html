@@ -10,7 +10,6 @@
       color-scheme: dark;
       --bg: #0d1117;
       --led: #000000;
-      --pad: 4vmin;
     }
 
     * {
@@ -35,17 +34,17 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: var(--pad);
     }
 
-    /* Scene: a 220:286 box sized to fit the largest area available inside the
-     body's padding box, keeping aspect ratio. Sized via the smaller of the
-     two viewport-derived constraints so it never overflows. */
+    /* Scene: a 220:286 box holding the whole device face. The window is given
+     that same ratio so the two coincide and nothing is letterboxed, but the
+     size is still solved against both axes so an off-ratio window shrinks the
+     scene rather than overflowing it. */
     .scene {
       --aspect-w: 220;
       --aspect-h: 286;
-      width: min(calc(100vw - 2 * var(--pad)),
-          calc((100vh - 2 * var(--pad)) * var(--aspect-w) / var(--aspect-h)));
+      width: min(100vw,
+          calc(100vh * var(--aspect-w) / var(--aspect-h)));
       aspect-ratio: var(--aspect-w) / var(--aspect-h);
       position: relative;
     }
@@ -117,7 +116,8 @@
       border: 0;
       background: transparent;
       cursor: pointer;
-      z-index: 1;
+      /* Below the info tray, which covers the pin once open. */
+      z-index: 0;
       transform: translateY(18.5%);
       transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
     }
@@ -147,21 +147,20 @@
 
     /* Info tray. Closed it tucks --tuck under the device and reads as a notch
      hanging off its bottom edge; open it drops clear of the device and runs to
-     the bottom of the window. --band is the notch's visible height, and the
-     header row the chevron sits in once open. Fractions of .scene's 220x286
-     box:
+     the bottom right of the window, over the reset pin. --band is the notch's
+     visible height, and the header row the chevron sits in once open.
+     Fractions of .scene's 220x286 box:
      - closed : top 213/286 = 74.48%, 30/220 = 13.64% wide, centred
      - open   : top 224/286 = 78.32%, a 4-unit gap below the device; flush with
-                its left edge and 176/220 = 80% wide, which stops short of the
-                reset pin at 184/220; tall enough to cover the rest of the
-                scene plus the body's padding, so the tray ends on the window's
-                own edge */
+                its left edge, the full width of the scene, and tall enough to
+                cover the rest of it, so the tray ends on the window's own
+                edges */
     .info {
       --tuck: 2.9vmin;
       --band: 5.8vmin;
       --gutter: 2.9vmin;
-      --row: 3.4vmin;
-      --chev: 3.2vmin;
+      --row: 4.7vmin;
+      --chev: 4vmin;
       position: absolute;
       top: 74.48%;
       left: 43.18%;
@@ -169,10 +168,11 @@
       height: calc(var(--tuck) + var(--band));
       z-index: 1;
       display: flex;
-      align-items: flex-start;
+      flex-direction: column;
+      gap: 0.8vmin;
       padding: var(--tuck) var(--gutter) 0;
       border: 0;
-      border-radius: 2.2vmin;
+      border-radius: 3.2vmin;
       background: #0d0c0c;
       color: inherit;
       font: inherit;
@@ -196,8 +196,8 @@
     .info.open {
       top: 78.32%;
       left: 0;
-      width: 80%;
-      height: calc(21.68% + var(--pad));
+      width: 100%;
+      height: 21.68%;
       padding-top: var(--gutter);
     }
 
@@ -232,17 +232,29 @@
       transform: translate(0, -50%) rotate(180deg);
     }
 
-    /* Too wide for the notch to hold, so it is faded rather than only clipped. */
+    /* Too wide for the notch to hold, so it is faded rather than only clipped.
+     A fixed height rather than a flex share, so the rows stack at the top of
+     the open tray instead of spreading over its full height. */
     .info-row {
-      flex: 1;
+      flex: none;
       min-width: 0;
       height: var(--row);
       display: flex;
       align-items: center;
       gap: 1.6vmin;
-      padding-right: calc(var(--gutter) + var(--chev));
       opacity: 0;
       transition: opacity 0.1s ease;
+    }
+
+    /* Rows the firmware has not reported yet. Spelled out because the display
+     above outranks the one the `hidden` attribute carries. */
+    .info-row[hidden] {
+      display: none;
+    }
+
+    /* Only the top row shares its line with the chevron. */
+    .info-row:first-child {
+      padding-right: calc(var(--gutter) + var(--chev));
     }
 
     .info.open .info-row {
@@ -252,18 +264,18 @@
 
     .info-label {
       flex: none;
-      font-size: 2.2vmin;
+      min-width: 7ch;
+      font-size: 3.1vmin;
       color: #6e7681;
     }
 
     .info-value {
       min-width: 0;
-      font-size: 2.6vmin;
+      font-size: 3.6vmin;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-
   </style>
 </head>
 
@@ -277,13 +289,20 @@
       <span class="led br" data-tauri-drag-region></span>
     </div>
     <button class="info" type="button" aria-label="device info" aria-expanded="false">
-      <span class="info-row">
+      <span class="info-row" data-row="disk">
         <span class="info-label">disk</span>
         <span class="info-value"></span>
       </span>
+      <span class="info-row" data-row="serial" hidden>
+        <span class="info-label">serial</span>
+        <span class="info-value"></span>
+      </span>
+      <span class="info-row" data-row="expires" hidden>
+        <span class="info-label">expires</span>
+        <span class="info-value"></span>
+      </span>
       <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
-        <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-          stroke-linejoin="round" />
+        <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
     </button>
     <button class="reset-pin" type="button" aria-label="reset button">
@@ -292,6 +311,14 @@
   </div>
   <script type="module">
     import { startBootAnimation } from './boot_anim.js';
+
+    // Identity of the emulated device, pushed by the firmware once it has
+    // booted and again whenever the device is onboarded. The socket below
+    // receives it and the info tray draws it, so it is parked here between the
+    // two. Cached rather than asked for on demand, since the tray can be opened
+    // long before the firmware is far enough along to answer.
+    const deviceInfo = { known: false, serial: null, expiry: null };
+    let onDeviceInfo = () => { };
 
     // Hardware channel: driver frames stream in from the firmware, reset-pin
     // edges go out. Every /v1/hw message is wrapped in the bus envelope
@@ -387,6 +414,11 @@
                 id: env.id,
                 payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
               }));
+            } else if (env.d === 'device') {
+              deviceInfo.known = true;
+              deviceInfo.serial = env.payload?.serial ?? null;
+              deviceInfo.expiry = env.payload?.expiry ?? null;
+              onDeviceInfo();
             }
             // Unrecognised driver tags no-op.
           } catch { }
@@ -445,7 +477,10 @@
     // while the launcher is still deciding (the first run puts a picker up).
     (() => {
       const tray = document.querySelector('.info');
-      const value = document.querySelector('.info-value');
+      const rows = {};
+      for (const row of tray.querySelectorAll('.info-row')) {
+        rows[row.dataset.row] = { row, value: row.querySelector('.info-value') };
+      }
       let loaded = false;
 
       async function loadDisk() {
@@ -455,18 +490,53 @@
           path = await window.__TAURI__?.core.invoke('disk_path');
         } catch { }
         if (!path) {
-          value.textContent = 'unknown';
+          rows.disk.value.textContent = 'unknown';
           return;
         }
         loaded = true;
-        value.textContent = path.split(/[\\/]/).pop();
-        value.title = path;
+        rows.disk.value.textContent = path.split(/[\\/]/).pop();
+        rows.disk.value.title = path;
       }
+
+      // How much of the identity's validity is left, coarsened the way every
+      // other face of the device words it. Only the order of magnitude matters
+      // at a glance, so the date it actually lands on is left to the tooltip.
+      function expiresIn(expiry) {
+        const left = expiry * 1000 - Date.now();
+        if (left <= 0) return 'expired';
+        const days = Math.floor(left / 86_400_000);
+        if (days >= 2) return `${days} days`;
+        const hours = Math.floor(left / 3_600_000);
+        if (hours >= 2) return `${hours} hours`;
+        const minutes = Math.floor(left / 60_000);
+        return minutes >= 2 ? `${minutes} minutes` : '1 minute';
+      }
+
+      // Both rows stay hidden until the firmware reports an identity, so a
+      // firmware that never sends one leaves an honest single row rather than a
+      // placeholder waiting forever. A device that was never onboarded carries
+      // no trusted claims, hence no serial and no expiry to show.
+      function renderDevice() {
+        if (!deviceInfo.known) return;
+        rows.serial.row.hidden = false;
+        rows.serial.value.textContent = deviceInfo.serial || 'not onboarded';
+        rows.expires.row.hidden = deviceInfo.expiry === null;
+        if (deviceInfo.expiry !== null) {
+          rows.expires.value.textContent = expiresIn(deviceInfo.expiry);
+          rows.expires.value.title = new Date(deviceInfo.expiry * 1000).toLocaleString();
+        }
+      }
+      onDeviceInfo = renderDevice;
 
       tray.addEventListener('click', () => {
         const open = tray.classList.toggle('open');
         tray.setAttribute('aria-expanded', String(open));
-        if (open) loadDisk();
+        // Redrawn on every open so the countdown is current. A timer would keep
+        // it current while the tray is shut, which nobody can see.
+        if (open) {
+          loadDisk();
+          renderDevice();
+        }
       });
     })();
 
