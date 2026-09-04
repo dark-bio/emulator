@@ -36,20 +36,20 @@
       justify-content: center;
     }
 
-    /* Scene: a 220:286 box holding the whole device face. The window is given
+    /* Scene: a 220:297 box holding the whole device face. The window is given
      that same ratio so the two coincide and nothing is letterboxed, but the
      size is still solved against both axes so an off-ratio window shrinks the
      scene rather than overflowing it. */
     .scene {
       --aspect-w: 220;
-      --aspect-h: 286;
+      --aspect-h: 297;
       width: min(100vw,
           calc(100vh * var(--aspect-w) / var(--aspect-h)));
       aspect-ratio: var(--aspect-w) / var(--aspect-h);
       position: relative;
     }
 
-    /* Device fills the top portion of the scene (220/286 ≈ 76.9% of height). */
+    /* Device fills the top portion of the scene (220/297 ≈ 74.1% of height). */
     .device {
       position: relative;
       width: 100%;
@@ -96,10 +96,13 @@
       right: 10.45%;
     }
 
-    /* Reset pin. All measurements as a fraction of .scene's 220x286 box.
+    /* Reset pin. All measurements as a fraction of .scene's 220x297 box.
      - width: 18/220 = 8.18% of scene width
-     - height: 54/286 = 18.88% of scene height
-     - top: 220/286 = 76.92% (device's bottom edge)
+     - height: 54/297 = 18.18% of scene height
+     - top: 220/297 = 74.07% (device's bottom edge). The pin hangs off the
+            device rather than off the window, so it keeps its distance from
+            the device and leaves the height the open tray claimed below it
+            unused, which shows only while the tray is shut
      - right: 18/220 = 8.18% (mirrors the companion app's 42-of-500 offset)
      translateY uses pin's own height as 100%:
      - default: +10/54 = +18.5%  (gap below device)
@@ -108,10 +111,10 @@
                                    companion's reference for a less abrupt feel) */
     .reset-pin {
       position: absolute;
-      top: 76.92%;
+      top: 74.07%;
       right: 8.18%;
       width: 8.18%;
-      height: 18.88%;
+      height: 18.18%;
       padding: 0;
       border: 0;
       background: transparent;
@@ -119,7 +122,8 @@
       /* Below the info tray, which covers the pin once open. */
       z-index: 0;
       transform: translateY(18.5%);
-      transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+      transition: transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1),
+        opacity 0.22s cubic-bezier(0.2, 0.6, 0.2, 1);
     }
 
     .reset-pin:hover {
@@ -149,30 +153,35 @@
      hanging off its bottom edge; open it drops clear of the device and runs to
      the bottom right of the window, over the reset pin. --band is the notch's
      visible height, and the header row the chevron sits in once open.
-     Fractions of .scene's 220x286 box:
-     - closed : top 213/286 = 74.48%, 30/220 = 13.64% wide, centred
-     - open   : top 224/286 = 78.32%, a 4-unit gap below the device; flush with
-                its left edge, the full width of the scene, and tall enough to
-                cover the rest of it, so the tray ends on the window's own
-                edges */
+     Fractions of .scene's 220x297 box:
+     - closed : top 213/297 = 71.72%, 30/220 = 13.64% wide, centred
+     - open   : top 224/297 = 75.42%, a 4-unit gap below the device; flush with
+                its left edge and the full width of the scene. Its height is
+                solved from --rows rather than fixed, so the tray is only as
+                tall as what it has to show; the full set of rows works out at
+                the 24.58% that reaches the window's bottom edge, which is also
+                the cap */
     .info {
       --tuck: 2.9vmin;
       --band: 5.8vmin;
       --gutter: 2.9vmin;
-      --row: 4.7vmin;
+      --row: 4.8vmin;
+      --gap: 0.8vmin;
       --chev: 4vmin;
+      --radius: 3.2vmin;
+      --rows: 1;
       position: absolute;
-      top: 74.48%;
+      top: 71.72%;
       left: 43.18%;
       width: 13.64%;
       height: calc(var(--tuck) + var(--band));
       z-index: 1;
       display: flex;
       flex-direction: column;
-      gap: 0.8vmin;
+      gap: var(--gap);
       padding: var(--tuck) var(--gutter) 0;
       border: 0;
-      border-radius: 3.2vmin;
+      border-radius: 0 0 var(--radius) var(--radius);
       background: #0d0c0c;
       color: inherit;
       font: inherit;
@@ -184,6 +193,7 @@
         width 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         height 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         padding-top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        border-radius 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
     }
 
@@ -194,11 +204,21 @@
     }
 
     .info.open {
-      top: 78.32%;
+      border-radius: var(--radius);
+      top: 75.42%;
       left: 0;
       width: 100%;
-      height: 21.68%;
+      height: calc(2 * var(--gutter) + var(--rows) * var(--row) +
+          (var(--rows) - 1) * var(--gap));
+      max-height: 24.58%;
       padding-top: var(--gutter);
+    }
+
+    /* The tray is drawn over the pin, but only covers all of it at full
+     height, so the pin steps aside for as long as the tray is open. */
+    .info.open ~ .reset-pin {
+      opacity: 0;
+      pointer-events: none;
     }
 
     .info:focus-visible {
@@ -293,6 +313,10 @@
         <span class="info-label">disk</span>
         <span class="info-value"></span>
       </span>
+      <span class="info-row" data-row="name" hidden>
+        <span class="info-label">name</span>
+        <span class="info-value"></span>
+      </span>
       <span class="info-row" data-row="serial" hidden>
         <span class="info-label">serial</span>
         <span class="info-value"></span>
@@ -321,7 +345,7 @@
     // receives it and the info tray draws it, so it is parked here between the
     // two. Cached rather than asked for on demand, since the tray can be opened
     // long before the firmware is far enough along to answer.
-    const deviceInfo = { known: false, env: null, serial: null, expiry: null };
+    const deviceInfo = { known: false, env: null, name: null, serial: null, expiry: null };
     let onDeviceInfo = () => { };
 
     // Hardware channel: driver frames stream in from the firmware, reset-pin
@@ -421,6 +445,7 @@
             } else if (env.d === 'device') {
               deviceInfo.known = true;
               deviceInfo.env = env.payload?.env ?? null;
+              deviceInfo.name = env.payload?.name ?? null;
               deviceInfo.serial = env.payload?.serial ?? null;
               deviceInfo.expiry = env.payload?.expiry ?? null;
               onDeviceInfo();
@@ -517,12 +542,24 @@
         return minutes >= 2 ? `${minutes} minutes` : '1 minute';
       }
 
-      // Both rows stay hidden until the firmware reports an identity, so a
-      // firmware that never sends one leaves an honest single row rather than a
-      // placeholder waiting forever. A device that was never onboarded carries
-      // no trusted claims, hence no serial and no expiry to show.
+      // The tray is sized from the number of rows it ends up showing, so this
+      // runs after anything that reveals or hides one.
+      function syncRows() {
+        tray.style.setProperty(
+          '--rows', tray.querySelectorAll('.info-row:not([hidden])').length);
+      }
+
+      // The device rows stay hidden until the firmware reports an identity, so
+      // a firmware that never sends one leaves an honest single row rather than
+      // placeholders waiting forever. A device that was never onboarded carries
+      // no trusted claims, hence no serial and no expiry to show, and one the
+      // user has not named yet has no name.
       function renderDevice() {
         if (!deviceInfo.known) return;
+        rows.name.row.hidden = deviceInfo.name === null;
+        if (deviceInfo.name !== null) {
+          rows.name.value.textContent = deviceInfo.name;
+        }
         rows.serial.row.hidden = false;
         rows.serial.value.textContent = deviceInfo.serial || 'not onboarded';
         rows.expires.row.hidden = deviceInfo.expiry === null;
@@ -534,6 +571,7 @@
         if (deviceInfo.env !== null) {
           rows.env.value.textContent = deviceInfo.env;
         }
+        syncRows();
       }
       onDeviceInfo = renderDevice;
 
