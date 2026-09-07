@@ -22,6 +22,7 @@
 //! modal here blocks nothing and a dismissal has nothing to tear down.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result};
 
@@ -35,6 +36,17 @@ use crate::Config;
 /// picker's suggestion and as the answer when there is nobody to ask.
 const DEFAULT_DISK: &str = "ark-disk.img";
 
+/// The image this run settled on, so that the device face can name it.
+static BOOTED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Full path of the disk image backing the emulated device, for the info tray
+/// on the device face. `None` until one has been chosen, which the page can
+/// still observe if it asks while the picker is up.
+#[tauri::command]
+pub(crate) fn disk_path() -> Option<String> {
+    BOOTED.get().map(|disk| disk.display().to_string())
+}
+
 /// Work out which image to boot, asking the user if nothing is known yet and
 /// remembering the answer. `Ok(None)` means the picker was dismissed, which is
 /// a decision to not start rather than a failure.
@@ -43,6 +55,16 @@ pub(crate) fn resolve(
     cfg: &Config,
     settings: &mut Settings,
 ) -> Result<Option<PathBuf>> {
+    let disk = choose(app, cfg, settings)?;
+    if let Some(disk) = &disk {
+        let _ = BOOTED.set(disk.clone());
+    }
+    Ok(disk)
+}
+
+/// The decision itself, split out so every path it can take ends up published
+/// through [`resolve`].
+fn choose(app: &tauri::App, cfg: &Config, settings: &mut Settings) -> Result<Option<PathBuf>> {
     if let Some(disk) = &cfg.disk {
         let disk = std::path::absolute(disk)
             .with_context(|| format!("could not resolve --disk {}", disk.display()))?;

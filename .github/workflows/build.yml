@@ -140,6 +140,7 @@ jobs:
         # rust-cache covers the target directory and the registry but not
         # ~/.cargo/bin, so tauri-cli would otherwise be built from source every
         # run. A restored cache pins whatever 2.x it was populated with.
+        id: cache-tauri-cli
         if: github.ref_type != 'tag'
         uses: actions/cache@v4
         with:
@@ -149,7 +150,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-tauri-cli-v2
 
       - name: Install tauri-cli
-        # A no-op when the cache hit, so this doubles as the cache-miss path.
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Install Linux build dependencies

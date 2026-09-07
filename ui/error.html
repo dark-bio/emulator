@@ -7,16 +7,15 @@
   <title>Ark Emulator</title>
   <script>
     // Size the enclosure to match the device face, whatever width the launcher
-    // gave this window. The face fits the 500-unit artwork into a 335.2px box
-    // (a 366px window, less twice its 4vmin padding, capped by the 220:286
-    // scene), so one artwork unit is 0.67px there.
+    // gave this window. The face fits the 500-unit artwork into the full width
+    // of its own 340px window, so one artwork unit is 0.68px there.
     //
     // Solved in vw rather than px on purpose: a vw is one hundredth of the
     // window's width however the webview scales its CSS pixels, so the result
     // holds under a desktop DPI scale that px would follow. Runs in <head> so
     // the first paint is already the right size.
     (() => {
-      const FACE_PX_PER_UNIT = 335.2 / 500;
+      const FACE_PX_PER_UNIT = 340 / 500;
       const width = window.__WIDTH__;
       if (typeof width === 'number' && width > 0) {
         document.documentElement.style.setProperty(
