@@ -444,7 +444,7 @@
                 id: env.id,
                 payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
               }));
-            } else if (env.d === 'identity') {
+            } else if (env.d === 'nameplate') {
               // A frame carries only the claims that changed, so merge it
               // in rather than replacing: a claim it leaves out keeps the
               // value it already has.
@@ -556,7 +556,7 @@
           '--rows', tray.querySelectorAll('.info-row:not([hidden])').length);
       }
 
-      // The device rows stay hidden until the firmware reports an identity, so
+      // The device rows stay hidden until the firmware sends a nameplate, so
       // a firmware that never sends one leaves an honest single row rather than
       // placeholders waiting forever. A device that was never onboarded carries
       // no trusted claims, hence no serial and no expiry to show, and one the
