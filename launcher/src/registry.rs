@@ -215,7 +215,7 @@ fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
             // serving.
             Err(e) => log!("[registry] could not accept a request: {e}"),
         }
-        with_registry(registry, |reg| reg.expire(Instant::now()));
+        registry.lock().unwrap().expire(Instant::now());
     }
 }
 
@@ -232,7 +232,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Options, _) => empty(StatusCode(204)),
 
         (Method::Get, "/v1/instances") => {
-            let listing = with_registry(registry, |reg| reg.listing());
+            let listing = registry.lock().unwrap().listing();
             match serde_json::to_vec(&listing) {
                 Ok(body) => json(body),
                 Err(e) => text(
@@ -245,7 +245,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Post, "/v1/instances") => match read_body(&mut request) {
             Ok(body) => match serde_json::from_slice::<Instance>(&body) {
                 Ok(instance) => {
-                    with_registry(registry, |reg| reg.upsert(instance));
+                    registry.lock().unwrap().upsert(instance);
                     empty(StatusCode(204))
                 }
                 Err(e) => text(StatusCode(400), &format!("malformed body: {e}")),
@@ -256,7 +256,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Delete, _) => match path.strip_prefix("/v1/instances/") {
             Some(port) => match port.parse::<u16>() {
                 Ok(port) => {
-                    with_registry(registry, |reg| reg.remove(port));
+                    registry.lock().unwrap().remove(port);
                     empty(StatusCode(204))
                 }
                 Err(_) => text(StatusCode(400), "not a port number"),
@@ -268,16 +268,6 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
     };
 
     respond(request, response);
-}
-
-/// Run `f` against the registry, recovering a lock poisoned by a panic in
-/// another request's handler. A poisoned registry is still a usable one.
-fn with_registry<T>(registry: &Arc<Mutex<Registry>>, f: impl FnOnce(&mut Registry) -> T) -> T {
-    let mut guard = match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    f(&mut guard)
 }
 
 /// Read a request's body, capped at [`MAX_BODY`]. Borrows rather than consumes

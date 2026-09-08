@@ -110,10 +110,7 @@ pub(crate) fn nameplate(
         return;
     };
     {
-        let mut entry = match entry.lock() {
-            Ok(entry) => entry,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entry = entry.lock().unwrap();
         entry.ready = true;
         // An empty name is a device whose name was cleared, which is a value
         // rather than an absence, so it is stored as one.
@@ -138,13 +135,7 @@ fn publish() {
     let Some(entry) = ENTRY.get() else {
         return;
     };
-    let body = {
-        let entry = match entry.lock() {
-            Ok(entry) => entry,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        serde_json::to_vec(&*entry)
-    };
+    let body = serde_json::to_vec(&*entry.lock().unwrap());
     let body = match body {
         Ok(body) => body,
         Err(e) => {
@@ -173,10 +164,7 @@ pub(crate) fn deregister() {
     let Some(entry) = ENTRY.get() else {
         return;
     };
-    let port = match entry.lock() {
-        Ok(entry) => entry.port,
-        Err(poisoned) => poisoned.into_inner().port,
-    };
+    let port = entry.lock().unwrap().port;
     if let Err(e) = request("DELETE", &format!("/v1/instances/{port}"), None) {
         log!("[discovery] could not deregister: {e}");
     }
