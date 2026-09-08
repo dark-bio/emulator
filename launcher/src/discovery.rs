@@ -11,6 +11,7 @@
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
 
+use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
@@ -19,6 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
+use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::log;
 use crate::registry::{self, Instance, Listing, REGISTRY_PORT};
@@ -184,18 +186,37 @@ pub(crate) fn deregister() {
 /// agree on whether they are looking at the same image without the registry
 /// publishing anybody's paths.
 ///
-/// FNV-1a, not a cryptographic hash: a collision costs a spurious "that image
-/// is already booted", which QEMU's own image lock would catch regardless.
+/// SHA-256 over the canonicalized path, truncated to 64 bits. The id travels
+/// between emulators, which can be different builds, so it has to stay stable
+/// across Rust versions. That rules out both [`std::hash::DefaultHasher`] and
+/// `OsStr::as_encoded_bytes`, whose encoding std documents as comparable only
+/// within one Rust version.
 pub(crate) fn disk_id(disk: &Path) -> String {
     // Canonicalize so two spellings of one file agree. It needs the file to
     // exist, which one being allocated for the first time does not.
     let path = std::fs::canonicalize(disk).unwrap_or_else(|_| disk.to_path_buf());
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in path.to_string_lossy().as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+
+    // Hashed as raw bytes: a Unix path is arbitrary bytes, and a lossy string
+    // would map every path differing only in ill-formed encoding onto one id.
+    let mut hasher = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        hasher.update(path.as_os_str().as_bytes());
     }
-    format!("{hash:016x}")
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        for unit in path.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+
+    digest[..8].iter().fold(String::new(), |mut id, byte| {
+        let _ = write!(id, "{byte:02x}");
+        id
+    })
 }
 
 /// One request to the registry, spoken directly over TCP. Four fixed routes
@@ -286,6 +307,16 @@ mod tests {
         let b = tmp.path().join("b.img");
         assert_eq!(disk_id(&a), disk_id(&a));
         assert_ne!(disk_id(&a), disk_id(&b));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_disk_id_distinguishes_paths_that_are_not_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.img"));
+        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.img"));
+        assert_ne!(disk_id(a), disk_id(b));
     }
 
     #[test]
