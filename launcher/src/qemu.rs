@@ -7,9 +7,15 @@
 //! runs under TCG emulation and always needs a QEMU on `PATH`.
 //!
 //! The guest is minimal on purpose: virtio net and block, a serial console on
-//! stdio, no monitor and no graphics. Host port 18181 forwarded through SLIRP
-//! is the entire interface the UI and the dashboard talk to.
+//! stdio, no monitor and no graphics. One host port forwarded through SLIRP is
+//! the entire interface the UI and any host-side client talk to.
+//!
+//! The guest side of that forward is fixed: the firmware listens on one port
+//! and has no way to be told otherwise. The host side is not, which is what
+//! lets several emulators run at once, each holding a port of its own out of
+//! the range starting at [`FIRST_HOST_PORT`].
 
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -78,8 +84,19 @@ impl GuestArch {
     }
 }
 
-/// The port the firmware uses to communicate with the host.
+/// The port the firmware uses to communicate with the host. Fixed inside the
+/// guest, so it is only ever the far end of the forward.
 const GUEST_PORT: u16 = 18181;
+
+/// First host port an emulator will take when it is left to pick one. Chosen to
+/// match the guest port, so the common case of a single emulator forwards
+/// 18181 to 18181 and reads the way it always did.
+const FIRST_HOST_PORT: u16 = 18181;
+
+/// How many ports past [`FIRST_HOST_PORT`] to try before giving up. Far more
+/// emulators than a machine could run at once, and small enough that exhausting
+/// it means something other than emulators is holding the range.
+const HOST_PORT_RANGE: u16 = 100;
 
 /// Virtual ceiling of the backing qcow2 disk. The host file starts tiny and
 /// grows on demand as the guest writes, never exceeding this size.
@@ -96,6 +113,69 @@ const QEMU_SIDECAR: &str = "qemu-system-guest";
 /// points at the same directory. Harmless on a build that has no modules, and
 /// on a source build there is nothing bundled to point at.
 const QEMU_MODULE_DIR: &str = "QEMU_MODULE_DIR";
+
+/// A host port reserved for an emulator, held until the moment QEMU takes it
+/// over. Keeping the listener bound is what stops two launchers starting at
+/// once from picking the same port: whichever one is second sees it taken.
+pub(crate) struct HostPort {
+    addr: SocketAddr,
+    listener: Option<TcpListener>,
+}
+
+impl HostPort {
+    /// Take `addr` exactly as asked for, without checking it is free. Used for
+    /// an explicitly given `--host-addr`, where second-guessing the user helps
+    /// nobody and QEMU reports the collision perfectly well by itself.
+    pub(crate) fn fixed(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            listener: None,
+        }
+    }
+
+    /// Reserve the first free loopback port at or above [`FIRST_HOST_PORT`].
+    pub(crate) fn reserve() -> Result<Self> {
+        for offset in 0..HOST_PORT_RANGE {
+            let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, FIRST_HOST_PORT + offset);
+            if let Ok(listener) = TcpListener::bind(addr) {
+                return Ok(Self {
+                    addr: addr.into(),
+                    listener: Some(listener),
+                });
+            }
+        }
+        bail!(
+            "no free port between {FIRST_HOST_PORT} and {}; pass --host-addr to choose one",
+            FIRST_HOST_PORT + HOST_PORT_RANGE - 1
+        )
+    }
+
+    /// The address SLIRP will forward from.
+    pub(crate) fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The port on its own, which is how an emulator is identified once it is
+    /// running.
+    pub(crate) fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// How far this port is into the range, which is a small integer that is
+    /// distinct between emulators running at once and is therefore what their
+    /// windows are staggered by. Zero for a port outside the range, including
+    /// any explicitly given one.
+    pub(crate) fn slot(&self) -> u32 {
+        u32::from(self.addr.port().saturating_sub(FIRST_HOST_PORT)).min(u32::from(HOST_PORT_RANGE))
+    }
+
+    /// Give the port up so QEMU can bind it. There is a moment between this and
+    /// QEMU's own bind where something else could take it, which QEMU then
+    /// reports as a startup failure the same as it always would have.
+    fn release(&mut self) {
+        self.listener = None;
+    }
+}
 
 /// Lazily creates the backing qcow2 disk image if missing. Idempotent; to
 /// reset device state, delete the file and re-launch.
@@ -153,6 +233,7 @@ pub(crate) fn spawn_qemu(
     initrd: &Path,
     disk: &Path,
     qemu_libs: Option<&Path>,
+    host_port: &mut HostPort,
 ) -> Result<Child> {
     let native = arch.host();
     // Only the host-native architecture is ever bundled, so a cross-arch
@@ -219,7 +300,7 @@ pub(crate) fn spawn_qemu(
         .args(["-netdev"])
         .arg(format!(
             "user,id=net0,hostfwd=tcp:{}-:{GUEST_PORT}",
-            cfg.host_addr
+            host_port.addr()
         ))
         .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
         .arg(format!(
@@ -241,7 +322,47 @@ pub(crate) fn spawn_qemu(
     // taken: `-serial stdio` above is the guest console and needs stdout.
     cmd.stderr(Stdio::piped());
 
+    // The reservation only has to outlast the command being built; from here it
+    // is QEMU that owns the port.
+    host_port.release();
     orphan::guard(cmd)
         .spawn()
         .with_context(|| format!("could not start {}", arch.qemu_binary()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a_reservation_skips_a_port_that_is_taken() {
+        let Ok(first) = HostPort::reserve() else {
+            // The whole range is busy, which says nothing about the code.
+            return;
+        };
+        let second = HostPort::reserve().unwrap();
+        assert_ne!(first.port(), second.port());
+        assert!(second.port() > first.port());
+    }
+
+    #[test]
+    fn test_a_released_port_can_be_bound() {
+        let Ok(mut reserved) = HostPort::reserve() else {
+            return;
+        };
+        let addr = reserved.addr();
+        assert!(TcpListener::bind(addr).is_err());
+        reserved.release();
+        assert!(TcpListener::bind(addr).is_ok());
+    }
+
+    #[test]
+    fn test_a_fixed_address_is_taken_as_given() {
+        // Not probed and not reserved: an explicit --host-addr is the user's
+        // call, including a port nothing could bind.
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let fixed = HostPort::fixed(addr);
+        assert_eq!(fixed.addr(), addr);
+        assert_eq!(fixed.port(), 1);
+    }
 }

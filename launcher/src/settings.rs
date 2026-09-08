@@ -110,13 +110,20 @@ impl Settings {
     /// Write the file out, through a temporary that is renamed over the
     /// target. A half-written file would be a parse error on the next launch,
     /// and parse errors here are fatal by design.
+    ///
+    /// The temporary is named after this process, because several emulators
+    /// share one data directory and two of them saving at once through a
+    /// commonly-named temporary would each be renaming the other's half-written
+    /// file into place.
     fn save(&self) -> Result<()> {
         // Serializing a PathBuf fails on a path that is not valid UTF-8, which
         // is reachable on Linux. Better to say so than to store a lossy string
         // that would then name a different file.
         let body = toml::to_string(&self.stored)
             .with_context(|| format!("could not serialize {}", self.path.display()))?;
-        let tmp = self.path.with_extension("toml.tmp");
+        let tmp = self
+            .path
+            .with_extension(format!("toml.{}.tmp", std::process::id()));
         fs::write(&tmp, body).with_context(|| format!("could not write {}", tmp.display()))?;
         fs::rename(&tmp, &self.path)
             .with_context(|| format!("could not replace {}", self.path.display()))

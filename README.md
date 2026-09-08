@@ -58,9 +58,12 @@ either guest architecture regardless of host.
 - **Windows**: the official Windows installer. WebView2 runtime is preinstalled on recent Windows 10/11; otherwise downloadable from Microsoft.
 
 **Firmware**: a kernel image (`<base>-kernel.<arch>`) and a gzipped initramfs
-(`<base>-initrd.<arch>.gz`), built for either `arm64` or `amd64` by the
-firmware repo's own build tooling. Pass their paths via `--kernel` and
-`--initrd` (see [Run](#run)).
+(`<base>-initrd.<arch>.gz`), for either `arm64` or `amd64`. There is nothing to
+build here: both are published as release assets at
+[dark-bio/emulator-images](https://github.com/dark-bio/emulator-images/releases),
+which is where a packaged build gets the firmware it bundles. Download a
+matching pair and pass their paths via `--kernel` and `--initrd` (see
+[Build and run](#build-and-run)).
 
 When the guest architecture matches the host's, the launcher enables hardware
 virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
@@ -68,13 +71,19 @@ virtualization (KVM on Linux, needing access to `/dev/kvm`, typically via the
 Cross-architecture guests always run under plain emulation and boot noticeably
 slower. `--arch` picks the guest architecture and defaults to the host's.
 
-### Run
+### Build and run
 
 ```sh
 cargo run --release -p launcher -- \
   --kernel /path/to/<base>-kernel.<arch> \
   --initrd /path/to/<base>-initrd.<arch>.gz
 ```
+
+## Using the emulator
+
+Everything below applies to a downloaded release and a source build alike. The
+only difference is that a release already knows where its firmware is, so it
+takes no flags to start.
 
 The window shows the device face. The reset pin is a real button; the four
 corner LEDs render whatever the firmware streams from its RGB-LED driver. The
@@ -98,6 +107,52 @@ emulated device's state.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 
+### Running several at once
+
+Start the emulator again and you get a second device, independent of the first.
+Each instance takes the next free port from 18181 up, and each needs a disk
+image of its own, so the second launch asks where to keep one rather than
+reusing the image the first is booted from. Two guests writing one qcow2 would
+corrupt it, so an explicit `--disk` naming an image that is already booted is
+refused outright.
+
+On macOS, Finder and `open` will not start a second copy of an app that is
+already running. Ask for one explicitly:
+
+```sh
+open -n "/Applications/Ark Emulator.app"
+```
+
+Finding those instances is what the registry is for. Whichever launcher holds
+`127.0.0.1:18180` serves it, and the rest publish themselves into it, so it
+lives for as long as any emulator does without a process of its own. Any tool
+can read it:
+
+```sh
+curl -s http://127.0.0.1:18180/v1/instances
+```
+
+```json
+{ "version": 1,
+  "instances": [
+    { "port": 18181, "disk": "ark-a.img", "disk_id": "00902e5bf20c3a9a",
+      "ready": true, "env": "develop", "name": "test ark" } ] }
+```
+
+`port` is the one that instance forwards into its guest, and `ready` says
+whether its firmware has booted far enough to accept a client. `disk` is the
+image's file name, deliberately not its path: any page in any browser can read
+a loopback port, so nothing here says where anybody's files live. Entries last
+only as long as they keep being refreshed, so an emulator that is killed
+outright drops out within about fifteen seconds.
+
+No launcher is special, and there is nothing to start or stop by hand. Closing
+the one that happened to be serving frees the port, and the next launcher whose
+heartbeat cannot be delivered takes over. The registry it starts with is empty
+and refills as the others heartbeat, so for up to five seconds after that a
+listing can come back short. An emulator that cannot reach or host a registry
+at all boots anyway, without discovery.
+
 ### Configuration
 
 | flag | default | meaning |
@@ -107,7 +162,7 @@ Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 | `--arch` | host arch | CPU architecture of the firmware artifacts (`arm64` or `amd64`) |
 | `--disk` | the remembered disk | path to the backing disk, for this run only; auto-allocated if it isn't there yet. Overrides the settings file without changing it |
 | `--env` | `release` | cloud environment the device is bound to when its disk is first created; ignored for existing disks (the binding is burnt in) |
-| `--host-addr` | `127.0.0.1:18181` | host address that SLIRP forwards into the guest's `:18181` |
+| `--host-addr` | first free port from 18181 | host address that SLIRP forwards into the guest's `:18181`. Given explicitly, it is used as-is, so a collision is QEMU's error to report |
 | `--memory` | `8192` | guest RAM in MiB; lower it on memory-constrained hosts |
 
 Run with `--help` for the full list.
