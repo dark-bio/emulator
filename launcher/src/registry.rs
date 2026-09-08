@@ -11,25 +11,19 @@
 //!                                                          │
 //!   consumers  ───────────────── GET  /v1/instances ──▶ ───┘
 //!
-//! That is enough to give the registry a lifetime independent of any *one*
-//! emulator, which is all it ever needed. A process of its own would also have
-//! needed spawning detached on three platforms, a reason to shut down, and a
-//! place in the packaging.
+//! That gives the registry a lifetime independent of any one emulator, which
+//! is all it needed. A process of its own would have needed spawning detached
+//! on three platforms, a reason to shut down, and a place in the packaging.
 //!
-//! Ownership is settled by whoever binds first, with no locking and nothing
-//! left behind by a launcher killed mid-startup. When the host exits, the port
-//! frees, the next heartbeat from a surviving launcher fails, and that one
-//! takes over (see [`crate::discovery`]). The registry it starts with is empty
-//! and refills itself, because every launcher publishes only its own entry and
-//! keeps republishing it.
+//! When the host exits, the port frees and the next launcher whose heartbeat
+//! fails takes over (see [`crate::discovery`]). Its registry starts empty and
+//! refills, since every launcher keeps republishing its own entry. Entries live
+//! only as long as they are refreshed, so an emulator killed outright drops out
+//! on its own, with no liveness probing, of which there is no portable kind.
 //!
-//! Entries live only as long as they are refreshed. Registration doubles as a
-//! heartbeat, so an emulator that is killed outright disappears on its own with
-//! no liveness probing, of which there is no portable kind.
-//!
-//! What an entry carries is deliberately narrow. Any page in any browser can
-//! read a loopback port, and the allowed origin here has to be `*`, so the
-//! registry publishes a disk image's file name but never its path.
+//! Any page in any browser can read a loopback port, and the allowed origin
+//! here has to be `*`, so the registry publishes a disk image's file name but
+//! never its path.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read as _};
@@ -47,14 +41,13 @@ use crate::diagnostics::log;
 /// so the whole emulator range reads as one contiguous block.
 pub(crate) const REGISTRY_PORT: u16 = 18180;
 
-/// Schema version of the registry's responses, so a consumer meeting an
-/// registry older than itself can tell rather than guess. Bumped only for a
-/// breaking change; new fields are additive and do not need one.
+/// Schema version of the registry's responses, so a consumer meeting an older
+/// registry can tell rather than guess. Bumped only for a breaking change.
 const SCHEMA_VERSION: u32 = 1;
 
 /// How long an entry survives without being refreshed. Three times the
-/// heartbeat interval in [`crate::discovery`], so a single missed beat, or a
-/// launcher briefly too busy to send one, does not evict a live emulator.
+/// heartbeat interval in [`crate::discovery`], so one missed beat does not
+/// evict a live emulator.
 const ENTRY_TTL: Duration = Duration::from_secs(15);
 
 /// How often the serve loop wakes up with no request to handle, which is what
@@ -70,21 +63,20 @@ const MAX_BODY: usize = 8 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Instance {
     /// Host port SLIRP forwards into this emulator's guest. Both the entry's
-    /// identity in the registry and what a consumer connects to.
+    /// identity here and what a consumer connects to.
     pub(crate) port: u16,
 
-    /// File name of the backing disk image, which is what tells two emulators
-    /// apart while neither has been named or onboarded. Never the full path:
-    /// see the module docs.
+    /// File name of the backing disk image, which tells two emulators apart
+    /// while neither is named or onboarded. Never the path: see the module
+    /// docs.
     pub(crate) disk: String,
 
-    /// Opaque digest of the disk image's full path, which is what lets a
-    /// launcher check whether an image is already booted without the registry
-    /// having to publish where anybody's images live.
+    /// Opaque digest of the disk image's full path, so a launcher can tell
+    /// whether an image is already booted without the registry publishing
+    /// where anybody's images live.
     pub(crate) disk_id: String,
 
-    /// Whether the firmware has booted far enough to accept a client. False
-    /// while the guest is still coming up.
+    /// Whether the firmware has booted far enough to accept a client.
     pub(crate) ready: bool,
 
     /// Cloud environment the device is bound to, once it has said.
@@ -135,9 +127,8 @@ impl Registry {
     }
 
     /// Add or refresh an entry. A re-registration replaces the whole record
-    /// rather than merging into it, so an emulator that clears a claim (a
-    /// device being renamed to nothing, say) is not stuck advertising the old
-    /// value.
+    /// rather than merging into it, so a cleared claim (a device renamed to
+    /// nothing, say) does not linger.
     fn upsert(&mut self, instance: Instance) {
         self.entries.insert(
             instance.port,
@@ -148,8 +139,8 @@ impl Registry {
         );
     }
 
-    /// Drop an entry, if it is there. Idempotent: a launcher that both
-    /// deregisters and then stops heartbeating is the common case.
+    /// Drop an entry, if it is there. Idempotent: a launcher that deregisters
+    /// and then stops heartbeating is the common case.
     fn remove(&mut self, port: u16) {
         self.entries.remove(&port);
     }
@@ -161,7 +152,7 @@ impl Registry {
     }
 
     /// Every live entry, in port order so a consumer's list does not reshuffle
-    /// itself between polls.
+    /// between polls.
     fn listing(&self) -> Listing {
         let mut instances: Vec<Instance> = self
             .entries
@@ -179,10 +170,9 @@ impl Registry {
 /// Serve the registry from this process, if nobody else already is. Returns
 /// whether this process is now the host.
 ///
-/// Losing the race for the port is the ordinary outcome and not a failure: it
-/// means another launcher is serving, which is what the caller wanted. Failing
-/// for any other reason is reported and treated the same way, since discovery
-/// is never worth refusing to boot over.
+/// Losing the race for the port is the ordinary outcome rather than a failure,
+/// and any other failure is treated the same way: discovery is never worth
+/// refusing to boot over.
 ///
 /// Loopback only. The registry describes what is running on this machine and
 /// has no business being reachable from off it.
@@ -197,8 +187,8 @@ pub(crate) fn host() -> bool {
         }
     };
 
-    // tiny_http takes an already-bound listener, so the bind above stays the
-    // thing that decides the race rather than anything inside the server.
+    // tiny_http takes an already-bound listener, so the bind above is what
+    // decides the race.
     let server = match Server::from_listener(listener, None::<tiny_http::SslConfig>) {
         Ok(server) => server,
         Err(e) => {
@@ -208,9 +198,8 @@ pub(crate) fn host() -> bool {
     };
     log!("[registry] hosting the registry on {addr}");
 
-    // Runs for the life of the process. There is no shutdown condition to
-    // reach: the registry exists for exactly as long as a launcher is holding
-    // the port, and this launcher exiting is what hands it to the next one.
+    // Runs for the life of the process. This launcher exiting is what hands
+    // the port to the next one.
     thread::spawn(move || serve(&server, &Arc::new(Mutex::new(Registry::new()))));
     true
 }
@@ -223,8 +212,7 @@ fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
             Ok(Some(request)) => handle(request, registry),
             Ok(None) => {}
             // A failed accept says nothing about the other clients, so keep
-            // serving rather than taking every emulator's discovery down with
-            // one bad connection.
+            // serving.
             Err(e) => log!("[registry] could not accept a request: {e}"),
         }
         with_registry(registry, |reg| reg.expire(Instant::now()));
@@ -239,9 +227,8 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
     let path = url.split('?').next().unwrap_or("").to_string();
 
     let response = match (&method, path.as_str()) {
-        // Preflight. Answered for any path so that a consumer probing a route
-        // this build does not have still gets a CORS answer to read the 404
-        // through.
+        // Preflight, answered for any path so a consumer probing a route this
+        // build does not have can still read the 404.
         (Method::Options, _) => empty(StatusCode(204)),
 
         (Method::Get, "/v1/instances") => {
@@ -284,8 +271,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
 }
 
 /// Run `f` against the registry, recovering a lock poisoned by a panic in
-/// another request's handler. A poisoned registry is still a usable one, and
-/// dropping every emulator's discovery over one bad request would be worse.
+/// another request's handler. A poisoned registry is still a usable one.
 fn with_registry<T>(registry: &Arc<Mutex<Registry>>, f: impl FnOnce(&mut Registry) -> T) -> T {
     let mut guard = match registry.lock() {
         Ok(guard) => guard,
@@ -316,16 +302,13 @@ fn read_body(request: &mut Request) -> Result<Vec<u8>, Response<Cursor<Vec<u8>>>
 
 /// Headers every response carries.
 ///
-/// The allowed origin is `*` because the consumers are pages served from
-/// wherever they happen to be served from, and an allowlist would mean baking
-/// somebody's hostnames in here. What keeps that acceptable is the shape of an
-/// [`Instance`]: ports and file names of things already running on this
-/// machine, and no paths.
+/// The allowed origin is `*` because an allowlist would mean baking somebody's
+/// hostnames in here. What keeps that acceptable is the shape of an
+/// [`Instance`]: ports and file names, never paths.
 ///
 /// `Access-Control-Allow-Private-Network` is for Chromium's private network
 /// access rules, under which a page on a public origin reaching a loopback
-/// address must preflight and be told, explicitly, that the loopback service
-/// meant to be reachable.
+/// address must preflight and be told the service meant to be reachable.
 fn cors() -> Vec<Header> {
     [
         ("Access-Control-Allow-Origin", "*"),
@@ -359,8 +342,7 @@ fn empty(status: StatusCode) -> Response<Cursor<Vec<u8>>> {
 }
 
 /// Answer `request`, attaching the CORS headers on the way out. A client that
-/// has already hung up is not worth reporting: the registry is polled, and the
-/// next poll is along shortly.
+/// has already hung up is not worth reporting.
 fn respond(request: Request, mut response: Response<Cursor<Vec<u8>>>) {
     for header in cors() {
         response.add_header(header);
@@ -403,8 +385,6 @@ mod tests {
         let mut registry = Registry::new();
         registry.upsert(instance(18181));
 
-        // A heartbeat lands, and the entry outlives what would have been its
-        // original deadline.
         registry.upsert(instance(18181));
         registry.expire(Instant::now());
         assert_eq!(registry.listing().instances.len(), 1);
@@ -475,8 +455,7 @@ mod tests {
     #[test]
     fn test_hosting_twice_from_one_process_is_refused() {
         // The second call is the one a heartbeat makes after a failed publish.
-        // A launcher already hosting must not start a second server over the
-        // top of its own, which its own bound port is what prevents.
+        // A launcher already hosting must not stack a second server on its own.
         if !host() {
             // The port is held by something else, which the test below covers.
             return;

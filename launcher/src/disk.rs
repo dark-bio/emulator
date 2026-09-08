@@ -10,13 +10,11 @@
 //!     which is also how a device that failed to allocate gets a second try.
 //!   - Whatever the user picks, which is then remembered.
 //!
-//! Crossing all three is the question of whether an image is already booted by
-//! another emulator, since two guests writing one qcow2 would corrupt it. The
-//! registry knows which images are in use, and an image that is answers
-//! differently depending on how it was arrived at: an explicit `--disk` is an
-//! error, because the user named a specific file and substituting another one
-//! silently is worse than saying no, while a remembered image simply falls
-//! through to the picker the way a deleted one does.
+//! Crossing all three is whether an image is already booted by another
+//! emulator, since two guests writing one qcow2 would corrupt it. An explicit
+//! `--disk` naming a booted image is an error, because substituting another
+//! file silently is worse than saying no, while a remembered one falls through
+//! to the picker the way a deleted one does.
 //!
 //! The picker is a save dialog rather than an open one because an open dialog
 //! cannot name a file that does not exist yet, and creating the first image is
@@ -121,9 +119,8 @@ fn choose(
     // The same switch the error window honours: no window anybody has to
     // dismiss. CI launches a packaged build with no flags at all and expects
     // it to boot unattended, so fall back to the image the launcher would have
-    // allocated for itself before there was anything to ask. A second unattended
-    // emulator cannot share that one, so it gets an image named after the port
-    // it holds, which is unique for as long as it is running.
+    // allocated for itself. A second unattended emulator cannot share that one,
+    // so it gets an image named after the port it holds.
     if std::env::var_os(NO_DIALOG).is_some() {
         let default = dir.join(DEFAULT_DISK);
         if !booted.contains_key(&disk_id(&default)) {

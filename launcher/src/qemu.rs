@@ -88,14 +88,13 @@ impl GuestArch {
 /// guest, so it is only ever the far end of the forward.
 const GUEST_PORT: u16 = 18181;
 
-/// First host port an emulator will take when it is left to pick one. Chosen to
-/// match the guest port, so the common case of a single emulator forwards
-/// 18181 to 18181 and reads the way it always did.
+/// First host port an emulator takes when left to pick one. Chosen to match
+/// the guest port, so a single emulator forwards 18181 to 18181.
 const FIRST_HOST_PORT: u16 = 18181;
 
 /// How many ports past [`FIRST_HOST_PORT`] to try before giving up. Far more
-/// emulators than a machine could run at once, and small enough that exhausting
-/// it means something other than emulators is holding the range.
+/// emulators than a machine could run at once, so exhausting it means something
+/// else is holding the range.
 const HOST_PORT_RANGE: u16 = 100;
 
 /// Virtual ceiling of the backing qcow2 disk. The host file starts tiny and
@@ -124,8 +123,8 @@ pub(crate) struct HostPort {
 
 impl HostPort {
     /// Take `addr` exactly as asked for, without checking it is free. Used for
-    /// an explicitly given `--host-addr`, where second-guessing the user helps
-    /// nobody and QEMU reports the collision perfectly well by itself.
+    /// an explicit `--host-addr`, where QEMU reports a collision perfectly well
+    /// by itself.
     pub(crate) fn fixed(addr: SocketAddr) -> Self {
         Self {
             addr,
@@ -155,23 +154,20 @@ impl HostPort {
         self.addr
     }
 
-    /// The port on its own, which is how an emulator is identified once it is
-    /// running.
+    /// The port on its own, which is how an emulator is identified.
     pub(crate) fn port(&self) -> u16 {
         self.addr.port()
     }
 
-    /// How far this port is into the range, which is a small integer that is
-    /// distinct between emulators running at once and is therefore what their
-    /// windows are staggered by. Zero for a port outside the range, including
-    /// any explicitly given one.
+    /// How far this port is into the range, which is distinct between
+    /// emulators running at once and is therefore what staggers their windows.
+    /// Zero for a port outside the range, including an explicit one.
     pub(crate) fn slot(&self) -> u32 {
         u32::from(self.addr.port().saturating_sub(FIRST_HOST_PORT)).min(u32::from(HOST_PORT_RANGE))
     }
 
-    /// Give the port up so QEMU can bind it. There is a moment between this and
-    /// QEMU's own bind where something else could take it, which QEMU then
-    /// reports as a startup failure the same as it always would have.
+    /// Give the port up so QEMU can bind it. Something else could take it in
+    /// the moment before QEMU does, which QEMU reports as a startup failure.
     fn release(&mut self) {
         self.listener = None;
     }
@@ -322,8 +318,7 @@ pub(crate) fn spawn_qemu(
     // taken: `-serial stdio` above is the guest console and needs stdout.
     cmd.stderr(Stdio::piped());
 
-    // The reservation only has to outlast the command being built; from here it
-    // is QEMU that owns the port.
+    // From here it is QEMU that owns the port.
     host_port.release();
     orphan::guard(cmd)
         .spawn()

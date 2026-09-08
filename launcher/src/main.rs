@@ -10,9 +10,7 @@
 //!
 //! Several emulators can run at once, each on a host port and a disk image of
 //! its own. Finding them is what the registry is for: whichever launcher holds
-//! its port serves it, and the rest publish themselves into it. There is no
-//! separate process, and no launcher is special: when the one hosting exits,
-//! the next heartbeat that cannot be delivered hands the port to another.
+//! its port serves it, and the rest publish themselves into it.
 //!
 //! The backing disk image is an unencrypted qcow2 file that starts small and
 //! grows on demand. There is no encryption at the qemu layer. The emulator is
@@ -118,10 +116,9 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     let cfg: Config = Config::parse();
 
-    // The UI dials the hardware bus before it can ask anything, so the port has
-    // to be settled before the builder runs. Reserving it can fail, and there
-    // is no window here to say so in, so the failure travels into `start` with
-    // every other one.
+    // The UI dials the hardware bus at startup, so the port has to be settled
+    // before the builder runs. Reserving it can fail, and that failure travels
+    // into `start` with every other one.
     let host_port = match cfg.host_addr {
         Some(addr) => Ok(HostPort::fixed(addr)),
         None => HostPort::reserve(),
@@ -129,8 +126,8 @@ fn main() {
 
     // The /v1/hw address is fixed at launch, so hand it to the UI as a
     // constant injected before page scripts run rather than over a command.
-    // The UI reads window.__HW_ADDR__ and dials it, following the port this
-    // emulator took instead of assuming a fixed one.
+    // The UI reads window.__HW_ADDR__ and dials it, so it follows this
+    // emulator's port.
     let hw_addr = host_port
         .as_ref()
         .map(|port| port.addr().to_string())
@@ -193,9 +190,8 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
     let mut settings = Settings::load(&data_dir)?;
     diagnostics::record_path("Settings", settings.path());
 
-    // Discovery is a convenience, never a precondition. Whatever it answers,
-    // including nothing at all, this emulator still boots: an empty registry is
-    // indistinguishable from a machine running only this one.
+    // Discovery is a convenience, never a precondition: whatever it answers,
+    // including nothing at all, this emulator still boots.
     discovery::ensure_registry();
     let booted: disk::Booted = discovery::list()
         .into_iter()
@@ -230,9 +226,8 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
         &mut host_port,
     )?;
 
-    // Published only now that the port and the image are both settled, so the
-    // registry never advertises an emulator that turned out not to start. The
-    // entry stays unready until the firmware says otherwise.
+    // Published only now that the port and image are settled, so the registry
+    // never advertises an emulator that turned out not to start.
     discovery::register(host_port.port(), &disk);
 
     // Piped in `spawn_qemu`, so it has to be drained here or QEMU stalls once
@@ -278,9 +273,8 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
     window.on_window_event(|event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
             SHUTTING_DOWN.store(true, Ordering::SeqCst);
-            // The entry would expire on its own shortly; withdrawing it here
-            // only keeps a closed emulator from lingering in somebody's list
-            // for those few seconds.
+            // The entry would expire on its own; this only saves it lingering
+            // in somebody's list for those few seconds.
             discovery::deregister();
         }
     });
@@ -289,13 +283,12 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
     Ok(())
 }
 
-/// Offset the window by its place in the port range, so that emulators started
-/// one after another cascade instead of landing exactly on top of each other.
-/// They are undecorated, fixed-size and always on top, so identical positions
-/// would leave only the last one visible.
+/// Offset the window by its place in the port range, so emulators started one
+/// after another cascade. They are undecorated, fixed-size and always on top,
+/// so identical positions would leave only the last one visible.
 ///
-/// Best effort: a window system that will not say where a window is, or will
-/// not put it somewhere, is not a reason to refuse to boot.
+/// Best effort: a window system that will not place a window is not a reason to
+/// refuse to boot.
 fn stagger(window: &tauri::WebviewWindow, slot: u32) {
     if slot == 0 {
         return;
