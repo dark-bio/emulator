@@ -153,14 +153,15 @@ fn main() {
             // error in and nothing but a panic message nobody can read.
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
             // The webview runtime itself did not come up, so no window of ours
             // can either. Stderr is all that is left.
             let err = anyhow!(err).context("the window system could not be started");
             eprintln!("{}", diagnostics::report("could not start", &err));
             std::process::exit(1);
-        });
+        })
+        .run(|_handle, event| platform::on_run_event(&event));
 }
 
 /// Bring up the emulated device: work out what to boot, prepare its disk,

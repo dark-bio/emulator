@@ -17,6 +17,8 @@
 //!     Windows, each behind a runtime probe, falling back to TCG emulation.
 //!   - **Opening a URL**: `xdg-open`, `open` and `cmd /c start`, none of which
 //!     share a name across platforms.
+//!   - **Run events**: only macOS has one that needs answering, a relaunch of
+//!     an app already running arriving as an event rather than a process.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -181,6 +183,51 @@ fn native_accel_flags() -> &'static [&'static str] {
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn native_accel_flags() -> &'static [&'static str] {
     &[]
+}
+
+/// React to a run event that needs an answer this platform alone has to give.
+///
+/// macOS activates the instance already running rather than starting a second
+/// one, and sends a reopen event instead. Turning that into another emulator
+/// is what makes a second launch behave the way it does on the other two. A
+/// click on the Dock icon arrives the same way and is treated the same.
+#[cfg(target_os = "macos")]
+pub(crate) fn on_run_event(event: &tauri::RunEvent) {
+    if matches!(event, tauri::RunEvent::Reopen { .. }) {
+        if let Err(err) = spawn_new_instance() {
+            log!("[launcher] could not start another emulator: {err:#}");
+        }
+    }
+}
+
+/// No other platform declines to start a second instance, so nothing here has
+/// anything to answer.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn on_run_event(_event: &tauri::RunEvent) {}
+
+/// Launch another copy of this app. `open -n` hands the new process to
+/// launchd, so it needs none of the detaching in [`crate::orphan`].
+#[cfg(target_os = "macos")]
+fn spawn_new_instance() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let exe = std::env::current_exe()?;
+    // <name>.app/Contents/MacOS/<exe>, so the bundle is three levels up.
+    let bundle = exe
+        .ancestors()
+        .nth(3)
+        .filter(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+        .context("not running from an app bundle")?;
+
+    let mut child = Command::new("open")
+        .args(["-n", "-a"])
+        .arg(bundle)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    // `open` exits as soon as launchd has taken the app on.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Whether Hypervisor.framework is usable, via `sysctl kern.hv_support`. QEMU
