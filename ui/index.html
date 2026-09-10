@@ -456,6 +456,12 @@
               }
               deviceInfo.known = true;
               onDeviceInfo();
+              // The launcher publishes this device to the registry that lets
+              // other tools find it, and this socket is the only place the
+              // claims arrive. Its first arrival is also what tells the
+              // launcher the firmware is up: the guest accepts no other client
+              // until this bus has a peer.
+              window.__TAURI__?.core.invoke('nameplate', claims).catch(() => { });
             }
             // Unrecognised driver tags no-op.
           } catch { }
