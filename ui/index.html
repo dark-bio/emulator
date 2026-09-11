@@ -8,7 +8,6 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0d1117;
       --led: #000000;
     }
 
@@ -23,7 +22,7 @@
       /* Windowless: the launcher's window itself is transparent, so the body
        must paint nothing. Only the device + LEDs + pin appear on the desktop. */
       background: transparent;
-      color: #c9d1d9;
+      color: #ededed;
       font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
       height: 100vh;
       width: 100vw;
@@ -41,8 +40,15 @@
      size is still solved against both axes so an off-ratio window shrinks the
      scene rather than overflowing it. */
     .scene {
+      /* No text on the device face is there to be copied, and the panel's own
+       background is a drag handle: without this, dragging the window from it
+       highlights the labels instead. */
+      user-select: none;
       --aspect-w: 220;
       --aspect-h: 297;
+      --gutter: 2.9vmin;
+      --row: 4.8vmin;
+      --gap: 0.8vmin;
       width: min(100vw,
           calc(100vh * var(--aspect-w) / var(--aspect-h)));
       aspect-ratio: var(--aspect-w) / var(--aspect-h);
@@ -164,9 +170,6 @@
     .info {
       --tuck: 2.9vmin;
       --band: 5.8vmin;
-      --gutter: 2.9vmin;
-      --row: 4.8vmin;
-      --gap: 0.8vmin;
       --chev: 4vmin;
       --radius: 3.2vmin;
       --rows: 1;
@@ -176,25 +179,43 @@
       width: 13.64%;
       height: calc(var(--tuck) + var(--band));
       z-index: 1;
-      display: flex;
-      flex-direction: column;
-      gap: var(--gap);
-      padding: var(--tuck) var(--gutter) 0;
-      border: 0;
       border-radius: 0 0 var(--radius) var(--radius);
       background: #0d0c0c;
-      color: inherit;
-      font: inherit;
-      text-align: left;
-      cursor: pointer;
       overflow: hidden;
       transition: top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         left 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         width 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         height 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
-        padding-top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         border-radius 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
+        opacity 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         transform 0.16s cubic-bezier(0.2, 0.6, 0.2, 1);
+    }
+
+    /* The tray's own click target, and the column its rows stack in. A button
+     rather than a handler on the tray itself, so the gear beside the chevron
+     can be a button too; the rows stay inside it so their hover tooltips are
+     not swallowed by an overlay. */
+    .info-toggle {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+      padding: var(--tuck) var(--gutter) 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: padding-top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1);
+    }
+
+    .info.open .info-toggle {
+      padding-top: var(--gutter);
     }
 
     /* The same nudge the reset pin answers a hover with. Translating rather
@@ -211,7 +232,6 @@
       height: calc(2 * var(--gutter) + var(--rows) * var(--row) +
           (var(--rows) - 1) * var(--gap));
       max-height: 24.58%;
-      padding-top: var(--gutter);
     }
 
     /* The tray is drawn over the pin, but only covers all of it at full
@@ -221,7 +241,11 @@
       pointer-events: none;
     }
 
-    .info:focus-visible {
+    /* The tray's own chrome takes no focus ring, matching the reset pin. The
+     panel's controls keep theirs: it is a form, and tabbing through one with
+     nothing to show for it is worse than an outline that does not match. */
+    .info-toggle:focus-visible,
+    .info-gear:focus-visible {
       outline: 0;
     }
 
@@ -234,7 +258,7 @@
       right: 50%;
       width: var(--chev);
       height: auto;
-      color: #6e7681;
+      color: #9d9d9d;
       transform: translate(50%, -50%);
       transition: top 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
         right 0.22s cubic-bezier(0.2, 0.6, 0.2, 1),
@@ -242,8 +266,8 @@
         color 0.12s ease;
     }
 
-    .info:hover .info-chevron {
-      color: #c9d1d9;
+    .info-toggle:hover .info-chevron {
+      color: #ededed;
     }
 
     .info.open .info-chevron {
@@ -274,7 +298,7 @@
 
     /* Only the top row shares its line with the chevron. */
     .info-row:first-child {
-      padding-right: calc(var(--gutter) + var(--chev));
+      padding-right: calc(var(--gutter) + 2 * var(--chev) + 1.6vmin);
     }
 
     .info.open .info-row {
@@ -284,9 +308,9 @@
 
     .info-label {
       flex: none;
-      min-width: 7ch;
+      min-width: 11ch;
       font-size: 3.1vmin;
-      color: #6e7681;
+      color: #9d9d9d;
     }
 
     .info-value {
@@ -295,6 +319,296 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    /* Settings panel. Everything below shares the rows' grammar above: a muted
+     label in a 7ch column, its control on the same line, and the same flat
+     ground the tray is drawn on. */
+    .info-gear {
+      position: absolute;
+      top: calc(var(--gutter) + var(--row) / 2);
+      right: calc(var(--gutter) + var(--chev) + 1.6vmin);
+      width: var(--chev);
+      height: var(--chev);
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #9d9d9d;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-50%);
+      transition: opacity 0.1s ease, visibility 0.1s, color 0.12s ease;
+    }
+
+    .info.open .info-gear {
+      opacity: 1;
+      visibility: visible;
+      transition-delay: 0.12s;
+    }
+
+    .info-gear:hover {
+      color: #ededed;
+    }
+
+    .info-gear svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Settings panel. Its own thing, with none of the tray's geometry: it sits
+     exactly over the device and fades in front of it. The 12.6% radius is the
+     rx="63" of the 500-unit rounded square the device art is drawn on, and the
+     box is square, so one percentage rounds both axes the same way.
+
+     Translucent, so what it is covering stays legible behind it.
+
+     --pad is not the tray's gutter: a corner that round eats into the box, and
+     the largest rectangle inscribed in it starts 29.3% of the radius in, which
+     works out at 3.7vmin here. That is where content would touch the curve, so
+     the padding has to clear it rather than meet it. */
+    .panel {
+      --pad: 6vmin;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 74.07%;
+      z-index: 3;
+      display: flex;
+      flex-direction: column;
+      /* Its own rhythm rather than the tray's --gap, which is tuned for rows
+       that are read at a glance rather than filled in. */
+      gap: 2.4vmin;
+      padding: var(--pad);
+      border-radius: 12.6%;
+      background: rgba(13, 12, 12, 0.86);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.18s ease, visibility 0.18s;
+    }
+
+    .panel.open {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Both name a device, and before the startup form is answered there is not
+     one: the tray has nothing to report and the pin has nothing to reset. They
+     arrive with the guest. */
+    .panel.startup ~ .info,
+    .panel.startup ~ .reset-pin {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .opt {
+      flex: none;
+      min-width: 0;
+      height: var(--row);
+      display: flex;
+      align-items: center;
+      gap: 1.6vmin;
+    }
+
+    .opt-label {
+      flex: none;
+      min-width: 11ch;
+      font-size: 3.1vmin;
+      color: #9d9d9d;
+    }
+
+    /* The paragraph the panel opens with, and anything the launcher refused.
+     Both wrap, so neither gets the rows' fixed height. */
+    .panel-note,
+    .panel-error {
+      flex: none;
+      font-size: 3.1vmin;
+      line-height: 1.4;
+      padding: 0.8vmin 0;
+    }
+
+    .panel-note {
+      padding-bottom: 1.6vmin;
+      color: #9d9d9d;
+    }
+
+    .panel-error {
+      color: #f85149;
+    }
+
+    .opt-disk,
+    .opt-memory {
+      min-width: 0;
+      padding: 0.5vmin 1.2vmin;
+      border: 0.25vmin solid #282828;
+      border-radius: 1vmin;
+      background: #050505;
+      color: #ededed;
+      font: inherit;
+      font-size: 3.6vmin;
+    }
+
+    .opt-disk {
+      flex: 1;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+
+    .opt-disk:hover {
+      border-color: #9d9d9d;
+    }
+
+    .opt-memory {
+      width: 10ch;
+      text-align: right;
+      user-select: text;
+    }
+
+    /* The spinner arrows are unreadable at this size and cannot be styled to
+     match, so the field is typed into rather than nudged. */
+    .opt-memory::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      appearance: none;
+      margin: 0;
+    }
+
+    .opt-unit {
+      font-size: 3.1vmin;
+      color: #9d9d9d;
+    }
+
+    /* A square well the size of the text fields beside it, so the control
+     column lines up, with the tick drawn inside rather than spelled out. */
+    .opt-remember {
+      flex: none;
+      width: 5.8vmin;
+      height: 5.8vmin;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 0.25vmin solid #282828;
+      border-radius: 1vmin;
+      background: #050505;
+      color: #ededed;
+      cursor: pointer;
+      transition: border-color 0.12s ease;
+    }
+
+    .opt-remember:hover {
+      border-color: #9d9d9d;
+    }
+
+    .opt-remember svg {
+      display: block;
+      width: 72%;
+      height: 72%;
+      opacity: 0;
+      transition: opacity 0.12s ease;
+    }
+
+    .opt-remember[aria-pressed='true'] svg {
+      opacity: 1;
+    }
+
+    .opt-envs {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      gap: 0.6vmin;
+    }
+
+    .opt-env {
+      flex: 1;
+      min-width: 0;
+      padding: 0.7vmin 0;
+      border: 0;
+      border-radius: 1vmin;
+      background: #1c1c1c;
+      color: #9d9d9d;
+      font: inherit;
+      font-size: 3.1vmin;
+      cursor: pointer;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+
+    .opt-env[aria-pressed='true'] {
+      background: #282828;
+      color: #ededed;
+    }
+
+    /* Nothing the panel is showing is written until one of these is pressed,
+     and which one decides whether it is written at all. The way out sits on
+     the left and the way on at the right, with the middle reserved for the
+     startup form's third answer.
+
+     Sized from their own text rather than in equal shares: `save and start` is
+     three times the width of `exit`, and thirds would clip it. */
+    .opt-actions {
+      flex: none;
+      margin-top: auto;
+      display: flex;
+      gap: var(--gap);
+    }
+
+    .opt-cancel,
+    .opt-start,
+    .opt-confirm {
+      flex: 1 1 auto;
+      min-width: 0;
+      white-space: nowrap;
+      padding: 1.4vmin 0;
+      border: 0;
+      border-radius: 1.6vmin;
+      font: inherit;
+      font-size: 3.6vmin;
+      cursor: pointer;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+
+    .opt-confirm {
+      background: #282828;
+      color: #ededed;
+    }
+
+    .opt-confirm:hover:not(:disabled) {
+      background: #3a3a3a;
+    }
+
+    /* Outlined with an inset shadow rather than a border, so they keep the
+     filled button's height instead of standing 0.5vmin taller. */
+    .opt-cancel,
+    .opt-start {
+      background: transparent;
+      box-shadow: inset 0 0 0 0.25vmin #282828;
+    }
+
+    /* Starting without saving is a real answer, not an escape, so it reads
+     brighter than the way out beside it. */
+    .opt-start {
+      color: #ededed;
+    }
+
+    .opt-cancel {
+      color: #9d9d9d;
+    }
+
+    .opt-cancel:hover:not(:disabled),
+    .opt-start:hover:not(:disabled) {
+      background: #1c1c1c;
+      color: #ededed;
+    }
+
+    .opt-cancel:disabled,
+    .opt-start:disabled,
+    .opt-confirm:disabled {
+      color: #9d9d9d;
+      cursor: default;
     }
   </style>
 </head>
@@ -308,37 +622,81 @@
       <span class="led bl" data-tauri-drag-region></span>
       <span class="led br" data-tauri-drag-region></span>
     </div>
-    <button class="info" type="button" aria-label="device info" aria-expanded="false">
-      <span class="info-row" data-row="disk">
-        <span class="info-label">disk</span>
-        <span class="info-value"></span>
+    <div class="panel" data-tauri-drag-region>
+      <span class="panel-note"></span>
+      <span class="opt">
+        <span class="opt-label"
+          title="The file this emulator keeps everything in. Delete it to start over with a blank device.">storage</span>
+        <button class="opt-disk" type="button"></button>
       </span>
-      <span class="info-row" data-row="name" hidden>
-        <span class="info-label">name</span>
-        <span class="info-value"></span>
+      <span class="opt">
+        <span class="opt-label"
+          title="Next time, start this emulator straight away instead of asking again.">autostart</span>
+        <button class="opt-remember" type="button" aria-pressed="true" aria-label="autostart">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3.2 8.4L6.4 11.6L12.8 4.6" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
       </span>
-      <span class="info-row" data-row="serial" hidden>
-        <span class="info-label">serial</span>
-        <span class="info-value"></span>
+      <span class="opt">
+        <span class="opt-label" title="How much memory to give this emulator.">memory</span>
+        <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="memory" />
+        <span class="opt-unit">MiB</span>
       </span>
-      <span class="info-row" data-row="expires" hidden>
-        <span class="info-label">expires</span>
-        <span class="info-value"></span>
+      <span class="opt">
+        <span class="opt-label"
+          title="Which Dark Bio service this device talks to. It is fixed when a device is created, so a change here applies to the next new one.">environment</span>
+        <span class="opt-envs"></span>
       </span>
-      <span class="info-row" data-row="env" hidden>
-        <span class="info-label">env</span>
-        <span class="info-value"></span>
+      <span class="panel-error" role="alert"></span>
+      <span class="opt-actions">
+        <button class="opt-cancel" type="button"></button>
+        <button class="opt-start" type="button" hidden>start</button>
+        <button class="opt-confirm" type="button"></button>
       </span>
-      <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
-        <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-      </svg>
-    </button>
+    </div>
+    <div class="info">
+      <button class="info-toggle" type="button" aria-label="device info" aria-expanded="false">
+        <span class="info-row" data-row="disk">
+          <span class="info-label">storage</span>
+          <span class="info-value"></span>
+        </span>
+        <span class="info-row" data-row="name" hidden>
+          <span class="info-label">name</span>
+          <span class="info-value"></span>
+        </span>
+        <span class="info-row" data-row="serial" hidden>
+          <span class="info-label">serial</span>
+          <span class="info-value"></span>
+        </span>
+        <span class="info-row" data-row="expires" hidden>
+          <span class="info-label">expires</span>
+          <span class="info-value"></span>
+        </span>
+        <span class="info-row" data-row="env" hidden>
+          <span class="info-label">environment</span>
+          <span class="info-value"></span>
+        </span>
+        <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
+          <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button class="info-gear" type="button" aria-label="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor"
+            d="M19.14 12.94a7.6 7.6 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.3 7.3 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.65 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.6 7.6 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.49 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6a3.6 3.6 0 1 1 0-7.2a3.6 3.6 0 0 1 0 7.2Z" />
+        </svg>
+      </button>
+    </div>
     <button class="reset-pin" type="button" aria-label="reset button">
       <img src="assets/sim_removal_tool.svg" alt="" />
     </button>
   </div>
   <script type="module">
     import { startBootAnimation } from './boot_anim.js';
+    import { mountSettings } from './settings.js';
 
     // Identity of the emulated device, pushed by the firmware once it has
     // booted and again whenever a claim changes, such as a rename or an
@@ -349,6 +707,12 @@
     // firmware is far enough along to answer.
     const deviceInfo = { known: false, env: null, name: null, serial: null, expiry: null };
     let onDeviceInfo = () => { };
+
+    // Starts the local boot animation. Assigned by the hardware channel below,
+    // and called once there is a guest behind the device face, which is not
+    // necessarily when the page loads: the settings panel can still be gating
+    // the start.
+    let startBootLeds = () => { };
 
     // Hardware channel: driver frames stream in from the firmware, reset-pin
     // edges go out. Every /v1/hw message is wrapped in the bus envelope
@@ -416,8 +780,15 @@
       // rebooted". Covers clean reboots, crashes, and firmware process
       // respawns equally, since none of them get to send a graceful signal
       // first.
+      //
+      // It does not start on its own. The window can be on screen with the
+      // settings panel up and nothing booted behind it, and LEDs running a boot
+      // sequence for a device nobody has started yet would be a lie.
       let bootMode = true;
-      let bootCtrl = startBootAnimation(applyLeds);
+      let bootCtrl = null;
+      startBootLeds = () => {
+        if (!bootCtrl) bootCtrl = startBootAnimation(applyLeds);
+      };
 
       let ws = null;
       function connect() {
@@ -435,7 +806,7 @@
               env.payload?.level === 'high'
             ) {
               bootMode = false;
-              bootCtrl.stop();
+              bootCtrl?.stop();
             } else if (env.d === 'revbits' && env.payload?.op === 'read') {
               // Firmware is asking what carrier it's running on; reply on
               // the same (driver, instance) key with our configured identity.
@@ -516,8 +887,9 @@
 
     // Info tray: a notch on the device's bottom edge that opens into a strip
     // naming what the emulated device is running on. The disk path is fetched
-    // on first open rather than at load, so the answer is never asked for
-    // while the launcher is still deciding (the first run puts a picker up).
+    // on first open rather than at load, since there is none to name until the
+    // guest has been started, which the settings panel may still be asking
+    // about, and again on a start for the same reason.
     (() => {
       const tray = document.querySelector('.info');
       const rows = {};
@@ -590,9 +962,10 @@
       }
       onDeviceInfo = renderDevice;
 
-      tray.addEventListener('click', () => {
+      const toggle = tray.querySelector('.info-toggle');
+      toggle.addEventListener('click', () => {
         const open = tray.classList.toggle('open');
-        tray.setAttribute('aria-expanded', String(open));
+        toggle.setAttribute('aria-expanded', String(open));
         // Redrawn on every open so the countdown is current. A timer would keep
         // it current while the tray is shut, which nobody can see.
         if (open) {
@@ -600,10 +973,21 @@
           renderDevice();
         }
       });
+
+      mountSettings({
+        panel: document.querySelector('.panel'),
+        gear: tray.querySelector('.info-gear'),
+        onGuest: () => {
+          loadDisk();
+          startBootLeds();
+        },
+      });
     })();
 
     // Window drag is handled natively by Tauri via the `data-tauri-drag-region`
-    // attribute on .device (and its children). No JS plumbing needed.
+    // attribute on .device (and its children) and on .panel, which only carries
+    // it on its own background, so its controls stay clickable. No JS plumbing
+    // needed.
 
     // Escape closes the window. No window chrome means no X button; this is
     // the in-app way out. Alt+F4 / WM shortcuts still work.
