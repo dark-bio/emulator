@@ -70,30 +70,31 @@ pub(crate) enum Reason {
     FirstRun,
     /// The remembered image is no longer on disk.
     Missing(PathBuf),
-    /// The remembered image is booted by the emulator on this port.
-    InUse(PathBuf, u16),
+    /// The remembered image is booted by another emulator.
+    InUse(PathBuf),
 }
 
 impl Reason {
-    /// The paragraph the settings panel opens with, saying why it is standing
-    /// between the user and a device. Names the file rather than its full path,
-    /// matching how the info tray words the same image, and because the panel
-    /// is one window wide.
+    /// What the user is told, in the settings the window opens with. Names the
+    /// file rather than its full path, matching how the info tray words the
+    /// same one, and because there is only a window's width to say it in.
+    ///
+    /// Written for somebody who wants an emulated device, not for somebody who
+    /// wants to know how one is stored: no file formats, no ports, and nothing
+    /// about where any of this lives in the app.
     pub(crate) fn message(&self) -> String {
         match self {
-            Self::FirstRun => "There is no default emulator configured. Choose where to \
-                 keep its disk image, and the device is created there the first time it \
-                 boots."
+            Self::FirstRun => "You do not have an emulator yet. Choose where to keep it, \
+                 and it will be made there the first time it starts."
                 .to_owned(),
             Self::Missing(disk) => format!(
-                "The configured emulator's disk image is gone. {} is no longer where it \
-                 was, so choose another image, or somewhere to create a new one.",
+                "Your emulator has gone missing. {} is not where it was. Pick another, \
+                 or choose where to keep a new one.",
                 name_of(disk)
             ),
-            Self::InUse(disk, port) => format!(
-                "The default configured emulator is already running. Its image {} is \
-                 booted on port {port}, and two devices writing one image would corrupt \
-                 it, so this one needs an image of its own.",
+            Self::InUse(disk) => format!(
+                "Your emulator is already running in another window. Two cannot share \
+                 {}, so this one needs its own. Choose where to keep it.",
                 name_of(disk)
             ),
         }
@@ -142,7 +143,7 @@ pub(crate) fn decide(
 
     if let Some(disk) = remembered {
         if let Some(port) = booted.get(&disk_id(disk)) {
-            let reason = Reason::InUse(disk.to_path_buf(), *port);
+            let reason = Reason::InUse(disk.to_path_buf());
             log!(
                 "[launcher] the remembered disk image {} is already booted on port {port}",
                 disk.display()
@@ -229,7 +230,7 @@ pub(crate) async fn pick_disk(app: tauri::AppHandle, current: String) -> Option<
 /// Raise the save dialog itself.
 fn pick(dir: &Path, name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("Choose a disk image location for the emulated Ark")
+        .set_title("Where should this emulator be kept?")
         .set_directory(dir)
         .set_file_name(name)
         .save_file()
@@ -345,10 +346,7 @@ mod tests {
         let Resolved::Ask { reason, .. } = resolved else {
             panic!("an image booted elsewhere was booted again");
         };
-        let Reason::InUse(_, port) = reason else {
-            panic!("the reason did not name the emulator in the way");
-        };
-        assert_eq!(port, 18181);
+        assert!(matches!(reason, Reason::InUse(_)));
     }
 
     #[test]

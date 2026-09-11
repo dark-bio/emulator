@@ -21,6 +21,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+use crate::diagnostics::log;
 use crate::disk::{self, Booted, Reason, DEFAULT_DISK};
 use crate::qemu::{ensure_disk, GuestArch, HostPort};
 use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
@@ -100,12 +101,11 @@ impl Launcher {
     }
 }
 
-/// The paragraph the panel opens with once the guest is running. Nothing the
-/// panel writes touches the device behind it: every one of these values is read
-/// at a start, and this one has already happened.
-const NEXT_BOOT: &str = "These settings come into effect the next time this emulator \
-     starts. The device behind this panel keeps the disk image, memory and environment \
-     it was booted with.";
+/// What the user is told once the guest is running. Nothing written here
+/// touches the device already up: every one of these values is read at a start,
+/// and this one has already happened.
+const NEXT_BOOT: &str = "These settings take effect the next time this emulator starts. \
+     The one running now keeps what it started with.";
 
 /// The panel's whole view of the world, answered in one call.
 #[derive(Serialize)]
@@ -206,12 +206,12 @@ pub(crate) fn start_emulator(
 ) -> Result<(), String> {
     let mut launcher = launcher.lock().unwrap();
     if launcher.pending.is_none() {
-        return Err("the emulated device has already been started".to_owned());
+        return Err("This emulator has already started.".to_owned());
     }
     check(memory, &env)?;
 
     let disk = std::path::absolute(PathBuf::from(disk))
-        .map_err(|e| format!("could not resolve that path: {e}"))?;
+        .map_err(|e| format!("That location cannot be used: {e}"))?;
 
     // Asked again rather than reusing what startup saw. The panel can sit open
     // for as long as the user likes, and another emulator may have taken the
@@ -221,8 +221,11 @@ pub(crate) fn start_emulator(
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
     if let Some(port) = booted.get(&crate::discovery::disk_id(&disk)) {
+        // The port is what tells the two apart for anyone reading a log; it is
+        // not something to put in front of somebody choosing a disk image.
+        log!("[launcher] {} is booted on port {port}", disk.display());
         return Err(format!(
-            "{} is booted by the emulator on port {port}; pick one that is not in use",
+            "{} is already running in another window. Pick a different one.",
             disk::name_of(&disk)
         ));
     }
@@ -236,7 +239,7 @@ pub(crate) fn start_emulator(
 
     let pending = launcher.take().expect("checked just above");
     ensure_disk(&disk, pending.qemu_libs.as_deref())
-        .map_err(|e| format!("could not prepare the disk image: {e:#}"))?;
+        .map_err(|e| format!("Could not make an emulator there: {e:#}"))?;
 
     // Past this point the ingredients are spent: a failure is QEMU's, and the
     // error window replaces the device face rather than the panel offering a
@@ -247,15 +250,17 @@ pub(crate) fn start_emulator(
     Ok(())
 }
 
-/// Reject what the panel should not have been able to send. The webview is the
-/// launcher's own page, but it is still the one place a value arrives from
+/// Reject what the settings should not have been able to send. The webview is
+/// the launcher's own page, but it is still the one place a value arrives from
 /// outside Rust, and the guest is spawned from these.
 fn check(memory: u32, env: &str) -> Result<(), String> {
     if memory < MIN_MEMORY {
-        return Err(format!("the guest needs at least {MIN_MEMORY} MiB"));
+        return Err(format!(
+            "That is too little memory. The least is {MIN_MEMORY} MiB."
+        ));
     }
     if !ENVS.contains(&env) {
-        return Err(format!("{env} is not one of {}", ENVS.join(", ")));
+        return Err(format!("{env} is not one of {}.", ENVS.join(", ")));
     }
     Ok(())
 }
