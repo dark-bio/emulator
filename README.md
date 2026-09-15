@@ -23,6 +23,12 @@ only. There's nothing else to install and no flags to pass, but also no
 support for emulating a guest architecture other than the host's (that's a
 source-build, developer-only need; see [Prerequisites](#prerequisites)).
 
+On macOS, Homebrew installs the app and an `ark-emulator` command:
+
+```sh
+brew install --cask dark-bio/tap/ark-emulator
+```
+
 Each platform has both an installed and a no-install option:
 
 | Platform | Installed | No-install |
@@ -197,4 +203,4 @@ an image that no longer exists.
 | `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window, and carries the packaging config and macOS entitlements. |
 | `ui/` | Static HTML/CSS/JS. Renders the device + pin, drives the firmware's `/v1/hw` driver bus. |
 | `docs/` | Maintainer documentation. Currently the one-time Apple Developer setup the macOS signing in CI depends on. |
-| `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. |
+| `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. `packaging/` holds the Homebrew cask template a release publishes to the tap. |
