@@ -45,3 +45,70 @@ jobs:
           gh release create "${{ github.ref_name }}" dist/* \
             --repo "${{ github.repository }}" \
             --generate-notes
+
+  homebrew:
+    needs: release
+    # A prerelease tag still gets its GitHub Release, but only a stable version
+    # replaces the cask in the public tap.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    environment: github-action-releaser
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the published macOS installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*-macos-*.dmg' --dir dist
+
+      - name: Generate the Homebrew cask
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          arm64=$(sha256sum "dist/ark-emulator-$version-macos-arm64.dmg" | cut -d ' ' -f 1)
+          amd64=$(sha256sum "dist/ark-emulator-$version-macos-amd64.dmg" | cut -d ' ' -f 1)
+          sed -e "s/@VERSION@/$version/g" \
+            -e "s/@ARM64_SHA256@/$arm64/g" \
+            -e "s/@AMD64_SHA256@/$amd64/g" \
+            .github/packaging/homebrew/ark-emulator.rb > ark-emulator.rb
+          ruby -c ark-emulator.rb
+
+      - uses: actions/checkout@v7
+        with:
+          repository: dark-bio/homebrew-tap
+          path: tap
+          # Write-enabled deploy key on the tap, stored in the release environment.
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
+      - name: Publish the Homebrew cask
+        shell: bash
+        working-directory: tap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # A delayed run must not replace a newer cask.
+          if [ -f Casks/ark-emulator.rb ]; then
+            current=$(sed -n 's/^  version "\([^"]*\)"$/\1/p' Casks/ark-emulator.rb)
+            if [ -z "$current" ]; then
+              echo "error: cannot read the current cask version" >&2
+              exit 1
+            fi
+            newest=$(printf '%s\n' "$current" "$version" | sort -V | tail -n 1)
+            if [ "$current" = "$version" ] || [ "$newest" != "$version" ]; then
+              echo "ark-emulator is already at $current"
+              exit 0
+            fi
+          fi
+          mkdir -p Casks
+          cp ../ark-emulator.rb Casks/ark-emulator.rb
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Casks/ark-emulator.rb
+          git commit -m "ark-emulator $version"
+          git push
