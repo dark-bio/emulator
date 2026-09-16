@@ -27,7 +27,6 @@ use crate::orphan;
 use crate::platform::{
     accel_flags, library_path_var, prepend_library_path, suppress_child_console,
 };
-use crate::Config;
 
 /// CPU architecture of the firmware being booted, in the same docker-style
 /// vocabulary the firmware build names its artifacts with.
@@ -174,15 +173,22 @@ impl HostPort {
 }
 
 /// Lazily creates the backing qcow2 disk image if missing. Idempotent; to
-/// reset device state, delete the file and re-launch.
+/// reset device state with `--disk`, delete the file and re-launch.
 pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    log!("[launcher] disk image missing, creating qcow2 (grows on demand)");
+    create_disk(path, qemu_libs)
+}
+
+/// Create a blank qcow2 image, replacing any existing contents at `path`.
+/// The caller must first reject images used by a running emulator.
+pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
+    log!("[launcher] creating qcow2 image at {}", path.display());
     // qcow2 is sparse on every host, including Windows NTFS where a raw
     // set_len would zero-fill the whole file. Delegated to qemu-img rather
     // than hand-writing the format. The bare byte count is read as bytes.
+    // Keep an existing file in place so QEMU can check its image locks.
     let mut cmd = match resolve_sidecar("qemu-img") {
         Some(bundled) => Command::new(bundled),
         None => Command::new("qemu-img"),
@@ -222,12 +228,14 @@ pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// Resolves the binary itself rather than using `tauri-plugin-shell`'s
 /// sidecar API, which exposes no pre-exec hook, and the Linux orphan
 /// protection needs one to arm `PR_SET_PDEATHSIG`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_qemu(
-    cfg: &Config,
     arch: GuestArch,
     kernel: &Path,
     initrd: &Path,
     disk: &Path,
+    memory: u32,
+    env: &str,
     qemu_libs: Option<&Path>,
     host_port: &mut HostPort,
 ) -> Result<Child> {
@@ -278,7 +286,7 @@ pub(crate) fn spawn_qemu(
     };
     cmd.args(accel_flags(native));
     cmd.arg("-m")
-        .arg(cfg.memory.to_string())
+        .arg(memory.to_string())
         .args(["-nographic", "-kernel"])
         .arg(kernel)
         .args(["-initrd"])
@@ -291,7 +299,7 @@ pub(crate) fn spawn_qemu(
         .arg(format!(
             "console={} rdinit=/sbin/init arkos_env={}",
             arch.console(),
-            cfg.env
+            env
         ))
         .args(["-netdev"])
         .arg(format!(
@@ -328,6 +336,39 @@ pub(crate) fn spawn_qemu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires qemu-img"]
+    fn test_create_disk_replaces_an_existing_image() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let disk = tmp.path().join("disk.img");
+        std::fs::write(&disk, b"old contents").unwrap();
+        create_disk(&disk, None).unwrap();
+        let first = std::fs::read(&disk).unwrap();
+        assert_eq!(&first[..4], b"QFI\xfb");
+        assert_eq!(
+            u64::from_be_bytes(first[24..32].try_into().unwrap()),
+            DISK_BYTES
+        );
+        ensure_disk(&disk, None).unwrap();
+        assert_eq!(std::fs::read(&disk).unwrap(), first);
+
+        std::fs::remove_file(&disk).unwrap();
+        create_disk(&disk, None).unwrap();
+        assert_eq!(&std::fs::read(&disk).unwrap()[..4], b"QFI\xfb");
+    }
+
+    #[test]
+    #[ignore = "requires qemu-img"]
+    fn test_create_disk_reports_an_invalid_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let disk = tmp.path().join("missing-parent/disk.img");
+        let err = create_disk(&disk, None).unwrap_err().to_string();
+        assert!(err.contains("qemu-img create failed"), "{err}");
+        assert!(!disk.exists());
+        assert!(create_disk(tmp.path(), None).is_err());
+        assert!(tmp.path().is_dir());
+    }
 
     #[test]
     fn test_a_reservation_skips_a_port_that_is_taken() {
