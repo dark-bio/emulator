@@ -547,13 +547,20 @@
      the left and the way on at the right, with the middle reserved for the
      startup form's third answer.
 
+     The same treatment as the error window's footer: a light primary with dark
+     text, mid-grey secondaries, one hover. Scaled down from that window's 36px,
+     since three of these have to fit across a face 340px wide, so it is the
+     proportions between height, padding and text that carry the resemblance
+     rather than the measurements. The corners are rounder than that window's,
+     to sit better under a panel that takes its own radius from the enclosure.
+
      Sized from their own text rather than in equal shares: `save and start` is
      three times the width of `exit`, and thirds would clip it. */
     .opt-actions {
       flex: none;
       margin-top: auto;
       display: flex;
-      gap: var(--gap);
+      gap: 1.8vmin;
     }
 
     .opt-cancel,
@@ -561,53 +568,51 @@
     .opt-confirm {
       flex: 1 1 auto;
       min-width: 0;
-      white-space: nowrap;
-      padding: 1.4vmin 0;
+      height: 9vmin;
+      padding: 0 4vmin;
       border: 0;
-      border-radius: 1.6vmin;
+      border-radius: 3.2vmin;
       font: inherit;
-      font-size: 3.6vmin;
+      font-size: 3.4vmin;
+      font-weight: 500;
+      white-space: nowrap;
       cursor: pointer;
-      transition: background 0.12s ease, color 0.12s ease;
+      transition: all 0.25s ease;
     }
 
     .opt-confirm {
-      background: #282828;
-      color: #ededed;
+      background: #f5f5f5;
+      color: #1a1a1a;
     }
 
     .opt-confirm:hover:not(:disabled) {
-      background: #3a3a3a;
+      opacity: 0.9;
     }
 
-    /* Outlined with an inset shadow rather than a border, so they keep the
-     filled button's height instead of standing 0.5vmin taller. */
     .opt-cancel,
     .opt-start {
-      background: transparent;
-      box-shadow: inset 0 0 0 0.25vmin #282828;
-    }
-
-    /* Starting without saving is a real answer, not an escape, so it reads
-     brighter than the way out beside it. */
-    .opt-start {
-      color: #ededed;
-    }
-
-    .opt-cancel {
-      color: #9d9d9d;
+      background: #333333;
+      color: #f5f5f5;
     }
 
     .opt-cancel:hover:not(:disabled),
     .opt-start:hover:not(:disabled) {
-      background: #1c1c1c;
-      color: #ededed;
+      background: #454545;
+    }
+
+    /* :focus-visible where the error window uses :focus, which it needs because
+     it moves focus to Close from script. Nothing here is focused that way. */
+    .opt-cancel:focus-visible,
+    .opt-start:focus-visible,
+    .opt-confirm:focus-visible {
+      outline: 0.6vmin solid #f5f5f5;
+      outline-offset: 0.6vmin;
     }
 
     .opt-cancel:disabled,
     .opt-start:disabled,
     .opt-confirm:disabled {
-      color: #9d9d9d;
+      opacity: 0.5;
       cursor: default;
     }
   </style>
