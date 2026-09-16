@@ -249,7 +249,7 @@ async fn choose_disk(
     let name = name_of(current);
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
-        let mut dialog = rfd::FileDialog::new();
+        let mut dialog = rfd::FileDialog::new().add_filter("Ark emulator", &["ark"]);
         if !dir.as_os_str().is_empty() {
             dialog = dialog.set_directory(dir);
         }
@@ -257,9 +257,15 @@ async fn choose_disk(
             dialog = dialog.set_file_name(name);
         }
         let picked = if create {
-            dialog.set_title("Create a new emulator").save_file()
+            dialog
+                .set_file_name("emulator.ark")
+                .set_title("Create a new emulator")
+                .save_file()
         } else {
-            dialog.set_title("Open an existing emulator").pick_file()
+            dialog
+                .add_filter("All files", &["*"])
+                .set_title("Open an existing emulator")
+                .pick_file()
         };
         let _ = tx.send(picked);
     })

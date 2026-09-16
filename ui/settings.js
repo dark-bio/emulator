@@ -59,29 +59,17 @@ export function mountSettings({ panel, gear, onGuest }) {
     autostart.setAttribute('aria-pressed', String(state.autostart));
     memory.min = String(state.minMemory);
     memory.value = String(state.memory);
-    renderEnvs();
+    envs.value = state.env;
     start.disabled = working || !state.path;
     confirm.disabled = working || !state.path;
   }
 
-  function renderEnvs() {
-    for (const button of envs.children) {
-      button.setAttribute('aria-pressed', String(button.dataset.env === state.env));
-    }
-  }
-
   function buildEnvs() {
-    envs.replaceChildren(...state.envs.map(env => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'opt-env';
-      button.dataset.env = env;
-      button.textContent = env;
-      button.addEventListener('click', () => {
-        state.env = env;
-        renderEnvs();
-      });
-      return button;
+    envs.replaceChildren(...[...state.envs].reverse().map(env => {
+      const option = document.createElement('option');
+      option.value = env;
+      option.textContent = env;
+      return option;
     }));
   }
 
@@ -111,7 +99,7 @@ export function mountSettings({ panel, gear, onGuest }) {
 
   function busy(value) {
     working = value;
-    for (const control of panel.querySelectorAll('button, input')) {
+    for (const control of panel.querySelectorAll('button, input, select')) {
       control.disabled = value || loadFailed;
     }
     cancel.disabled = value;
@@ -208,6 +196,10 @@ export function mountSettings({ panel, gear, onGuest }) {
     }
     problem.textContent = '';
     state.memory = value;
+  });
+
+  envs.addEventListener('change', () => {
+    state.env = envs.value;
   });
 
   cancel.addEventListener('click', () => {

@@ -116,8 +116,9 @@ made outside this window. It shows saved preferences, with an empty storage
 field if no disk is saved. Command-line overrides apply to the startup form.
 
 The icons after the filename have separate jobs. **Open** selects an existing
-image through an open dialog. **New** uses a save dialog and creates a blank
-image immediately, replacing an existing file if you confirm the replacement.
+image through an open dialog. **New** defaults to `emulator.ark` in the save
+dialog and creates a blank image immediately, replacing an existing file if
+you confirm the replacement.
 Images in use cannot be replaced. Errors appear in the settings panel.
 Cancelling the panel does not undo image creation or replacement.
 

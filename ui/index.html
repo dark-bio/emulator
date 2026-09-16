@@ -417,6 +417,32 @@
       color: #c8c8c8;
     }
 
+    .opt-advanced {
+      flex: none;
+      min-width: 0;
+      margin-top: 2.4vmin;
+    }
+
+    .opt-advanced summary {
+      font-size: 3.1vmin;
+      line-height: var(--row);
+      color: #c8c8c8;
+      cursor: pointer;
+    }
+
+    .opt-advanced summary:hover {
+      color: #ededed;
+    }
+
+    .opt-advanced summary:focus-visible {
+      outline: 0.4vmin solid #f5f5f5;
+      outline-offset: 0.4vmin;
+    }
+
+    .opt-advanced > .opt {
+      margin-top: 2.4vmin;
+    }
+
     /* The paragraph the panel opens with, and anything the launcher refused.
      Both wrap, so neither gets the rows' fixed height. */
     .panel-note,
@@ -441,8 +467,10 @@
     }
 
     .opt-disk,
-    .opt-memory {
+    .opt-memory,
+    .opt-envs {
       min-width: 0;
+      height: 5.8vmin;
       padding: 0.5vmin 1.2vmin;
       border: 0.25vmin solid #282828;
       border-radius: 1vmin;
@@ -454,7 +482,6 @@
 
     .opt-disk {
       flex: 1;
-      height: 5.8vmin;
       line-height: 4.3vmin;
       text-align: left;
       white-space: nowrap;
@@ -545,29 +572,14 @@
     }
 
     .opt-envs {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      gap: 0.6vmin;
-    }
-
-    .opt-env {
-      flex: 1;
-      min-width: 0;
-      padding: 0.7vmin 0;
-      border: 0;
-      border-radius: 1vmin;
-      background: #333333;
-      color: #c8c8c8;
-      font: inherit;
-      font-size: 3.1vmin;
+      flex: none;
+      appearance: none;
+      padding-right: 4.2vmin;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23c8c8c8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 1.2vmin center;
+      background-size: 2vmin;
       cursor: pointer;
-      transition: background 0.12s ease, color 0.12s ease;
-    }
-
-    .opt-env[aria-pressed='true'] {
-      background: #505050;
-      color: #f5f5f5;
     }
 
     /* Nothing the panel is showing is written until one of these is pressed,
@@ -659,7 +671,7 @@
       <span class="panel-note"></span>
       <span class="opt">
         <span class="opt-label"
-          title="The file this emulator keeps everything in. Delete it to start over with a blank device.">storage</span>
+          title="The file this emulator keeps everything in. Delete it to start over with a blank device.">emulator</span>
         <span class="opt-disk"></span>
         <button class="opt-disk-action opt-open" type="button" aria-label="Open existing image"
           title="Open an existing disk image">
@@ -686,16 +698,19 @@
           </svg>
         </button>
       </span>
-      <span class="opt">
-        <span class="opt-label" title="How much memory to give this emulator.">memory</span>
-        <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="memory" />
-        <span class="opt-unit">MiB</span>
-      </span>
-      <span class="opt">
-        <span class="opt-label"
-          title="Which Dark Bio service this device talks to. It is fixed when a device is created, so a change here applies to the next new one.">environment</span>
-        <span class="opt-envs"></span>
-      </span>
+      <details class="opt-advanced">
+        <summary>developers</summary>
+        <span class="opt">
+          <span class="opt-label" title="How much memory to give this emulator.">memory</span>
+          <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="memory" />
+          <span class="opt-unit">MiB</span>
+        </span>
+        <span class="opt">
+          <span class="opt-label"
+            title="Which Dark Bio service this device talks to. It is fixed when a device is created, so a change here applies to the next new one.">environment</span>
+          <select class="opt-envs" aria-label="environment"></select>
+        </span>
+      </details>
       <span class="panel-error" role="alert"></span>
       <span class="opt-actions">
         <button class="opt-cancel" type="button"></button>
