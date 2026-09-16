@@ -133,6 +133,12 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Reload saved preferences without replacing the current values on failure.
+    pub(crate) fn reload(&mut self) -> Result<()> {
+        *self = Self::load(self.path.parent().context("settings path has no parent")?)?;
+        Ok(())
+    }
+
     /// Where these settings are stored, for diagnostics and error messages.
     pub(crate) fn path(&self) -> &Path {
         &self.path

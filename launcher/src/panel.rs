@@ -21,9 +21,8 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::diagnostics::log;
-use crate::disk::{self, Booted, Reason, DEFAULT_DISK};
-use crate::qemu::{ensure_disk, GuestArch, HostPort};
+use crate::disk::{self, Reason};
+use crate::qemu::{GuestArch, HostPort};
 use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
 use crate::Config;
 
@@ -43,24 +42,63 @@ pub(crate) struct Pending {
 pub(crate) struct Launcher {
     pending: Option<Pending>,
     settings: Settings,
+    qemu_libs: Option<PathBuf>,
     /// The image the startup form offers and the reason it is being asked for.
     /// `None` once the guest has been started, which is what puts the panel in
     /// its other mode.
-    ask: Option<(PathBuf, Reason)>,
+    ask: Option<(Option<PathBuf>, Reason)>,
 }
 
 impl Launcher {
     /// Hold `pending` and `settings` for the panel, with no question to ask.
     pub(crate) fn booting(pending: Pending, settings: Settings) -> Self {
         Self {
+            qemu_libs: pending.qemu_libs.clone(),
             pending: Some(pending),
             settings,
             ask: None,
         }
     }
 
+    /// Read the panel's values, refreshing saved preferences after startup.
+    fn state(&mut self) -> Result<State, String> {
+        if self.pending.is_none() {
+            self.settings.reload().map_err(|e| format!("{e:#}"))?;
+        }
+        let (memory, env) = self.effective();
+
+        // In the startup form the disk is the one being offered. Afterwards the
+        // panel edits what the next launch will use, which is the remembered image
+        // rather than whatever this run happens to be booted from.
+        let (mode, note, path) = match &self.ask {
+            Some((suggestion, reason)) => ("startup", reason.message(), suggestion.clone()),
+            None => (
+                "running",
+                NEXT_BOOT.to_owned(),
+                self.settings.disk().map(std::path::Path::to_path_buf),
+            ),
+        };
+
+        Ok(State {
+            mode,
+            note,
+            name: path.as_deref().map(disk::name_of).unwrap_or_default(),
+            path: path.map(|path| path.display().to_string()).unwrap_or_default(),
+            autostart: self.settings.autostart(),
+            memory,
+            env,
+            envs: ENVS,
+            min_memory: MIN_MEMORY,
+        })
+    }
+
+    /// Libraries needed to create images, including after the guest starts.
+    pub(crate) fn qemu_libs(&self) -> Option<&std::path::Path> {
+        self.qemu_libs.as_deref()
+    }
+
     /// Put the startup form up, offering `suggestion` and saying why.
-    pub(crate) fn ask(&mut self, suggestion: PathBuf, reason: Reason) {
+    pub(crate) fn ask(&mut self, suggestion: Option<PathBuf>, reason: Reason) {
         self.ask = Some((suggestion, reason));
     }
 
@@ -130,39 +168,17 @@ pub(crate) struct State {
     min_memory: u32,
 }
 
-/// What the panel needs to draw itself, asked for once as the page loads.
+/// What the panel needs at page load and whenever the settings are opened.
 ///
 /// Cannot race the decision it reports. Commands are dispatched from the event
 /// loop, which only starts once `setup` has returned, and `setup` is where the
 /// decision is made. The one thing that used to pump events from inside it was
 /// the disk picker's own modal, and the picker no longer runs there.
 #[tauri::command]
-pub(crate) fn settings_state(launcher: tauri::State<'_, Mutex<Launcher>>) -> State {
-    let launcher = launcher.lock().unwrap();
-    let (memory, env) = launcher.effective();
-
-    // In the startup form the disk is the one being offered. Afterwards the
-    // panel edits what the next launch will use, which is the remembered image
-    // rather than whatever this run happens to be booted from.
-    let (mode, note, path) = match &launcher.ask {
-        Some((suggestion, reason)) => ("startup", reason.message(), suggestion.clone()),
-        None => match launcher.settings.disk() {
-            Some(disk) => ("running", NEXT_BOOT.to_owned(), disk.to_path_buf()),
-            None => ("running", NEXT_BOOT.to_owned(), running_disk()),
-        },
-    };
-
-    State {
-        mode,
-        note,
-        name: disk::name_of(&path),
-        path: path.display().to_string(),
-        autostart: launcher.settings.autostart(),
-        memory,
-        env,
-        envs: ENVS,
-        min_memory: MIN_MEMORY,
-    }
+pub(crate) fn settings_state(
+    launcher: tauri::State<'_, Mutex<Launcher>>,
+) -> Result<State, String> {
+    launcher.lock().unwrap().state()
 }
 
 /// Write the panel's values into the settings file, for the next launch.
@@ -176,6 +192,9 @@ pub(crate) fn save_settings(
 ) -> Result<(), String> {
     let mut launcher = launcher.lock().unwrap();
     check(memory, &env)?;
+    if disk.is_empty() {
+        return Err("Use Open to select an image or New to create one first.".to_owned());
+    }
     let disk = PathBuf::from(disk);
 
     launcher
@@ -210,26 +229,15 @@ pub(crate) fn start_emulator(
         return Err("This emulator has already started.".to_owned());
     }
     check(memory, &env)?;
+    if disk.is_empty() {
+        return Err("Use Open to select an image or New to create one first.".to_owned());
+    }
 
     let disk = std::path::absolute(PathBuf::from(disk))
         .map_err(|e| format!("That location cannot be used: {e}"))?;
 
-    // Asked again rather than reusing what startup saw. The panel can sit open
-    // for as long as the user likes, and another emulator may have taken the
-    // image in the meantime.
-    let booted: Booted = crate::discovery::list()
-        .into_iter()
-        .map(|instance| (instance.disk_id, instance.port))
-        .collect();
-    if let Some(port) = booted.get(&crate::discovery::disk_id(&disk)) {
-        // The port is what tells the two apart for anyone reading a log; it is
-        // not something to put in front of somebody choosing a disk image.
-        log!("[launcher] {} is booted on port {port}", disk.display());
-        return Err(format!(
-            "{} is already running in another window. Pick a different one.",
-            disk::name_of(&disk)
-        ));
-    }
+    disk::require_existing(&disk).map_err(|e| format!("{e:#}"))?;
+    disk::require_available(&disk).map_err(|e| format!("{e:#}"))?;
 
     if save {
         launcher
@@ -239,8 +247,6 @@ pub(crate) fn start_emulator(
     }
 
     let pending = launcher.take().expect("checked just above");
-    ensure_disk(&disk, pending.qemu_libs.as_deref())
-        .map_err(|e| format!("Could not make an emulator there: {e:#}"))?;
 
     // Past this point the ingredients are spent: a failure is QEMU's, and the
     // error window replaces the device face rather than the panel offering a
@@ -264,16 +270,6 @@ fn check(memory: u32, env: &str) -> Result<(), String> {
         return Err(format!("{env} is not one of {}.", ENVS.join(", ")));
     }
     Ok(())
-}
-
-/// The image to offer once the guest is running and nothing is remembered: the
-/// one it is running on, which is the answer the user most likely wants to make
-/// permanent. The fallback is unreachable, since the panel is only in this mode
-/// because the guest was started on something.
-fn running_disk() -> PathBuf {
-    disk::disk_path()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DISK))
 }
 
 #[cfg(test)]
@@ -336,6 +332,63 @@ mod tests {
             launcher.effective(),
             (DEFAULT_MEMORY, DEFAULT_ENV.to_owned())
         );
+    }
+
+    #[test]
+    fn test_running_panel_reloads_the_saved_preferences() {
+        let tmp = TempDir::new().unwrap();
+        let mut launcher = waiting(tmp.path(), Some(4096), Some("develop"));
+        launcher.take();
+
+        let mut external = Settings::load(tmp.path()).unwrap();
+        external
+            .apply(Some(Path::new("saved.img")), false, 2048, "staging")
+            .unwrap();
+        let state = launcher.state().unwrap();
+        assert_eq!(state.mode, "running");
+        assert_eq!(state.path, "saved.img");
+        assert!(!state.autostart);
+        assert_eq!(state.memory, 2048);
+        assert_eq!(state.env, "staging");
+
+        external.apply(None, true, 8192, "release").unwrap();
+        let state = launcher.state().unwrap();
+        assert!(state.path.is_empty());
+        assert!(state.name.is_empty());
+        assert!(state.autostart);
+        assert_eq!(state.memory, 8192);
+        assert_eq!(state.env, "release");
+    }
+
+    #[test]
+    fn test_running_panel_reports_a_broken_file_and_can_retry() {
+        let tmp = TempDir::new().unwrap();
+        let mut launcher = waiting(tmp.path(), None, None);
+        launcher.take();
+        let file = launcher.settings.path().to_path_buf();
+        std::fs::write(&file, "invalid toml").unwrap();
+        let err = launcher.state().err().expect("a broken file was accepted");
+        assert!(err.contains("could not parse"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "invalid toml");
+
+        std::fs::write(&file, "version = 1\nmemory = 3072\n").unwrap();
+        assert_eq!(launcher.state().unwrap().memory, 3072);
+    }
+
+    #[test]
+    fn test_startup_panel_keeps_the_launch_overrides() {
+        let tmp = TempDir::new().unwrap();
+        let mut launcher = waiting(tmp.path(), Some(4096), Some("develop"));
+        launcher.ask(None, Reason::FirstRun);
+        Settings::load(tmp.path())
+            .unwrap()
+            .apply(Some(Path::new("other.img")), false, 2048, "staging")
+            .unwrap();
+        let state = launcher.state().unwrap();
+        assert_eq!(state.mode, "startup");
+        assert!(state.path.is_empty());
+        assert_eq!(state.memory, 4096);
+        assert_eq!(state.env, "develop");
     }
 
     /// The panel reads these by name, so a rename here is a silently blank

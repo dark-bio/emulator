@@ -24,16 +24,13 @@
 //! then raised by that panel, from a button the user pressed, rather than as a
 //! modal appearing out of nowhere before the app has drawn anything.
 //!
-//! The picker is a save dialog rather than an open one because an open dialog
-//! cannot name a file that does not exist yet, and creating the first image is
-//! the whole of the first-run story. Picking an existing image works too, and
-//! [`crate::qemu::ensure_disk`] tells the two apart afterwards by whether the
-//! file is there. The cost is that macOS and Windows ask about replacing a
-//! file that gets loaded rather than replaced.
+//! Open selects an existing image. New uses a save dialog and creates the
+//! image immediately, replacing existing contents only after the native
+//! dialog confirms that choice. Starting from the panel never creates an image.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context as _, Result};
 use serde::Serialize;
@@ -41,8 +38,7 @@ use serde::Serialize;
 use crate::diagnostics::log;
 use crate::discovery::disk_id;
 
-/// Name given to the disk image the launcher allocates for itself, both as the
-/// picker's suggestion and as the answer when there is nobody to ask.
+/// Name used when an unattended launch needs to allocate an image.
 pub(crate) const DEFAULT_DISK: &str = "ark-disk.img";
 
 /// The image this run settled on, so that the device face can name it.
@@ -90,17 +86,17 @@ impl Reason {
             Self::AutostartDisabled => {
                 "Choose an emulator and press start when you are ready.".to_owned()
             }
-            Self::FirstRun => "You do not have an emulator yet. Choose where to keep it, \
-                 and it will be made there the first time it starts."
+            Self::FirstRun => "Open an existing emulator or use New to create one, \
+                 then press start."
                 .to_owned(),
             Self::Missing(disk) => format!(
                 "Your emulator has gone missing. {} is not where it was. Pick another, \
-                 or choose where to keep a new one.",
+                 or use New to create one.",
                 name_of(disk)
             ),
             Self::InUse(disk) => format!(
                 "Your emulator is already running in another window. Two cannot share \
-                 {}, so this one needs its own. Choose where to keep it.",
+                 {}, so open another or use New to create one.",
                 name_of(disk)
             ),
         }
@@ -112,7 +108,7 @@ pub(crate) enum Resolved {
     /// Boot this image, without asking.
     Boot(PathBuf),
     /// Ask, offering `suggestion` and saying why.
-    Ask { suggestion: PathBuf, reason: Reason },
+    Ask { suggestion: Option<PathBuf>, reason: Reason },
 }
 
 /// Work out which image to boot. `dir` is the app's data directory, where an
@@ -157,14 +153,14 @@ pub(crate) fn decide(
             );
             if !no_dialog {
                 return Ok(Resolved::Ask {
-                    suggestion: default,
+                    suggestion: None,
                     reason,
                 });
             }
-        } else if disk.exists() {
+        } else if disk.is_file() {
             if !autostart && !no_dialog {
                 return Ok(Resolved::Ask {
-                    suggestion: disk.to_path_buf(),
+                    suggestion: Some(disk.to_path_buf()),
                     reason: Reason::AutostartDisabled,
                 });
             }
@@ -177,7 +173,7 @@ pub(crate) fn decide(
             );
             if !no_dialog {
                 return Ok(Resolved::Ask {
-                    suggestion: default,
+                    suggestion: None,
                     reason,
                 });
             }
@@ -192,7 +188,7 @@ pub(crate) fn decide(
     }
 
     Ok(Resolved::Ask {
-        suggestion: default,
+        suggestion: None,
         reason: Reason::FirstRun,
     })
 }
@@ -206,47 +202,115 @@ pub(crate) struct Picked {
     name: String,
 }
 
-/// Ask for a disk image, starting where `current` sits and with its name
-/// filled in. `None` if the dialog was dismissed.
-///
-/// Async on purpose. A sync command runs on the main thread, and the save panel
-/// has to run there too on macOS, so the dialog is handed to the event loop and
-/// the answer waited for off it. Blocking on that answer is the point: a modal
-/// is a modal, and the panel behind it is disabled until it closes.
+/// Select an existing image, or create one immediately through a save dialog.
+/// `None` means the user dismissed the dialog.
 #[tauri::command]
-pub(crate) async fn pick_disk(app: tauri::AppHandle, current: String) -> Option<Picked> {
-    let current = PathBuf::from(current);
-    let dir = current.parent().unwrap_or(Path::new("")).to_path_buf();
-    let name = current
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| DEFAULT_DISK.to_owned());
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    if let Err(e) = app.run_on_main_thread(move || {
-        let _ = tx.send(pick(&dir, &name));
-    }) {
-        log!("[launcher] could not raise the disk picker: {e}");
-        return None;
-    }
-    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .ok()
-        .flatten()?;
-
-    Some(Picked {
-        name: name_of(&picked),
-        path: picked.display().to_string(),
+pub(crate) async fn pick_disk(
+    app: tauri::AppHandle,
+    launcher: tauri::State<'_, Mutex<crate::panel::Launcher>>,
+    current: String,
+    create: bool,
+) -> Result<Option<Picked>, String> {
+    let qemu_libs = launcher.lock().unwrap().qemu_libs().map(Path::to_path_buf);
+    let picked = choose_disk(&app, Path::new(&current), create).await?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::absolute(path)
+            .map_err(|e| format!("That location cannot be used: {e}"))?;
+        if create {
+            require_available(&path).map_err(|e| format!("{e:#}"))?;
+            crate::qemu::create_disk(&path, qemu_libs.as_deref())
+                .map_err(|e| format!("Could not create {}: {e:#}", name_of(&path)))?;
+        } else {
+            require_existing(&path).map_err(|e| format!("{e:#}"))?;
+        }
+        Ok(Some(Picked {
+            name: name_of(&path),
+            path: path.display().to_string(),
+        }))
     })
+    .await
+    .map_err(|e| format!("Could not prepare the image: {e}"))?
 }
 
-/// Raise the save dialog itself.
-fn pick(dir: &Path, name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Where should this emulator be kept?")
-        .set_directory(dir)
-        .set_file_name(name)
-        .save_file()
+/// Run native dialogs on the main thread, as required by macOS, while the
+/// command awaits their result without blocking the event loop.
+async fn choose_disk(
+    app: &tauri::AppHandle,
+    current: &Path,
+    create: bool,
+) -> Result<Option<PathBuf>, String> {
+    let dir = current.parent().unwrap_or(Path::new("")).to_path_buf();
+    let name = name_of(current);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let mut dialog = rfd::FileDialog::new();
+        if !dir.as_os_str().is_empty() {
+            dialog = dialog.set_directory(dir);
+        }
+        if !name.is_empty() {
+            dialog = dialog.set_file_name(name);
+        }
+        let picked = if create {
+            dialog.set_title("Create a new emulator").save_file()
+        } else {
+            dialog.set_title("Open an existing emulator").pick_file()
+        };
+        let _ = tx.send(picked);
+    })
+    .map_err(|e| format!("Could not open the file picker: {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| format!("Could not read the file picker result: {e}"))?
+        .map_err(|e| format!("The file picker closed unexpectedly: {e}"))
+}
+
+/// Require an existing image so a panel start cannot silently recreate one.
+pub(crate) fn require_existing(path: &Path) -> Result<()> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "Could not open {}. Use Open to select an existing image or New to create one",
+            name_of(path)
+        )
+    })?;
+    if !metadata.is_file() {
+        bail!(
+            "{} is not a disk image file. Use Open to select an image.",
+            name_of(path)
+        );
+    }
+    Ok(())
+}
+
+/// Check current usage again after the dialog, since it may have stayed open
+/// while another emulator started. The local image is checked even if the
+/// registry is unavailable.
+pub(crate) fn require_available(path: &Path) -> Result<()> {
+    let booted: Booted = crate::discovery::list()
+        .into_iter()
+        .map(|instance| (instance.disk_id, instance.port))
+        .collect();
+    check_available(path, BOOTED.get().map(PathBuf::as_path), &booted)
+}
+
+/// Reject both this window's image and images reported by other launchers.
+fn check_available(path: &Path, running: Option<&Path>, booted: &Booted) -> Result<()> {
+    let id = disk_id(path);
+    if running.is_some_and(|running| disk_id(running) == id) {
+        bail!(
+            "{} is running in this window. Stop this emulator before replacing its image.",
+            name_of(path)
+        );
+    }
+    if booted.contains_key(&id) {
+        bail!(
+            "{} is already running in another window. Close that emulator or choose a different image.",
+            name_of(path)
+        );
+    }
+    Ok(())
 }
 
 /// The file name of `disk`, for anything shown to the user. A path with no
@@ -269,6 +333,48 @@ mod tests {
 
     fn touch(path: &Path) {
         std::fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn test_opening_a_missing_image_does_not_create_it() {
+        let tmp = TempDir::new().unwrap();
+        let disk = tmp.path().join("missing.img");
+        let err = require_existing(&disk).unwrap_err().to_string();
+        assert!(err.contains("Open"), "{err}");
+        assert!(err.contains("New"), "{err}");
+        assert!(!disk.exists());
+        assert!(require_existing(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_replacing_an_image_in_use_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let disk = tmp.path().join("running.img");
+        touch(&disk);
+        let booted = Booted::from([(disk_id(&disk), PORT)]);
+        let err = check_available(&disk, None, &booted)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("another window"), "{err}");
+
+        let err = check_available(&disk, Some(&disk), &Booted::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("this window"), "{err}");
+        assert!(check_available(&tmp.path().join("new.img"), Some(&disk), &booted).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_an_alias_of_a_running_image_is_also_refused() {
+        let tmp = TempDir::new().unwrap();
+        let disk = tmp.path().join("running.img");
+        let alias = tmp.path().join("alias.img");
+        touch(&disk);
+        std::os::unix::fs::symlink(&disk, &alias).unwrap();
+        assert!(check_available(&alias, Some(&disk), &Booted::new()).is_err());
+        let booted = Booted::from([(disk_id(&disk), PORT)]);
+        assert!(check_available(&alias, None, &booted).is_err());
     }
 
     #[test]
@@ -348,7 +454,7 @@ mod tests {
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("autostart was disabled but the image booted");
         };
-        assert_eq!(suggestion, remembered);
+        assert_eq!(suggestion, Some(remembered));
         assert!(matches!(reason, Reason::AutostartDisabled));
     }
 
@@ -392,7 +498,7 @@ mod tests {
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("a deleted remembered image was booted");
         };
-        assert_eq!(suggestion, tmp.path().join(DEFAULT_DISK));
+        assert!(suggestion.is_none());
         assert!(matches!(reason, Reason::Missing(_)));
     }
 
@@ -427,7 +533,7 @@ mod tests {
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("a first run booted something");
         };
-        assert_eq!(suggestion, tmp.path().join(DEFAULT_DISK));
+        assert!(suggestion.is_none());
         assert!(matches!(reason, Reason::FirstRun));
     }
 

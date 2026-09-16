@@ -110,18 +110,29 @@ remembers between runs: which disk image to boot, whether to boot it without
 asking, how much RAM to give the guest, and which environment a newly created
 disk gets bound to. None of it touches the device behind it, which keeps what it
 was booted with, so the panel opens by saying so. **Save** writes [the settings
-file](#settings) and closes the panel; **cancel** closes it keeping nothing.
+file](#settings) and closes the panel; **cancel** discards preference edits.
+Opening the panel from the info tray reloads `settings.toml`, including edits
+made outside this window. It shows saved preferences, with an empty storage
+field if no disk is saved. Command-line overrides apply to the startup form.
+
+The icons after the filename have separate jobs. **Open** selects an existing
+image through an open dialog. **New** uses a save dialog and creates a blank
+image immediately, replacing an existing file if you confirm the replacement.
+Images in use cannot be replaced. Errors appear in the settings panel.
+Cancelling the panel does not undo image creation or replacement.
 
 The same panel is up from the moment the window appears, before anything has
 booted, when autostart is disabled or the launcher cannot work out which image
 to start on: nothing has ever been chosen, the remembered image is gone, or
-another emulator is already booted from it. It opens by saying which of those it is, offers an image, and
-boots on either of its two ways of starting, fading out as the device comes up.
+another emulator is already booted from it. It explains why it needs input.
+After opening or creating an image, either start button boots it and fades
+out the panel as the device comes up.
 **Start** boots what the form is showing and leaves the settings file exactly as
 it was, so a flag typed for one run stays a one-off. **Save and start** boots it
 and writes it down. **Exit** closes a window that was opened by mistake.
-`--disk` skips all of this, as does a usable remembered image with autostart
-enabled.
+`--disk` skips the panel and opens or creates the named image. Autostart opens
+a usable remembered image; a missing image returns to the panel. Starting
+from the panel requires an existing image and never creates one implicitly.
 
 `autostart` is stored as its own boolean setting. Every save keeps the selected
 image. Ticked, the next launch boots it straight through; unticked, the startup
@@ -135,10 +146,10 @@ take effect immediately, since it is burnt into a disk image when the image is
 created: setting it against an image that already exists stores it for the next
 new one.
 
-The disk is a dynamically growing qcow2 image, created if it is not already
-there: it starts a few hundred KB in size and grows on demand as the guest
-writes, up to a fixed virtual ceiling. Delete it to reset the emulated device's
-state.
+The disk is a dynamically growing qcow2 image. It starts a few hundred KB in
+size and grows on demand as the guest writes, up to a fixed virtual ceiling.
+To reset an emulator, close its running window, then use **New** to replace
+its image with a blank one.
 
 Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
 

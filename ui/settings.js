@@ -14,9 +14,9 @@
 //     written to the settings file for the *next* launch. The guest is never
 //     disturbed.
 //
-// Nothing is written unless the button pressed says so, and then everything the
-// form is showing is written. That is what puts the panel above the command
-// line in the order of precedence: a flag seeds the form, and a form somebody
+// New creates an image immediately. Preferences are written only on save,
+// and then everything the form is showing is written. That puts the panel
+// above the command line: a flag seeds the form, and a form somebody
 // looked at and saved settles it. Plain `start` is the way to take a flag for
 // one run without it sticking. The launcher owns the truth in between, and
 // `settings_state` is asked for it every time the panel opens, so an abandoned
@@ -30,7 +30,9 @@
 export function mountSettings({ panel, gear, onGuest }) {
   const note = panel.querySelector('.panel-note');
   const problem = panel.querySelector('.panel-error');
-  const diskButton = panel.querySelector('.opt-disk');
+  const diskName = panel.querySelector('.opt-disk');
+  const openDisk = panel.querySelector('.opt-open');
+  const newDisk = panel.querySelector('.opt-new');
   const autostart = panel.querySelector('.opt-autostart');
   const memory = panel.querySelector('.opt-memory');
   const envs = panel.querySelector('.opt-envs');
@@ -44,18 +46,22 @@ export function mountSettings({ panel, gear, onGuest }) {
   // it, which is also exactly the shape start and save take back.
   let state = null;
   let startup = false;
+  let working = false;
+  let loadFailed = false;
 
   function render() {
     note.textContent = state.note;
     cancel.textContent = startup ? 'exit' : 'cancel';
     start.hidden = !startup;
     confirm.textContent = startup ? 'save and start' : 'save';
-    diskButton.textContent = state.name;
-    diskButton.title = state.path;
+    diskName.textContent = state.name;
+    diskName.title = state.path;
     autostart.setAttribute('aria-pressed', String(state.autostart));
     memory.min = String(state.minMemory);
     memory.value = String(state.memory);
     renderEnvs();
+    start.disabled = working || !state.path;
+    confirm.disabled = working || !state.path;
   }
 
   function renderEnvs() {
@@ -103,16 +109,39 @@ export function mountSettings({ panel, gear, onGuest }) {
     panel.classList.remove('open');
   }
 
-  function busy(working) {
-    cancel.disabled = working;
-    start.disabled = working;
-    confirm.disabled = working;
-    if (working) problem.textContent = '';
+  function busy(value) {
+    working = value;
+    for (const control of panel.querySelectorAll('button, input')) {
+      control.disabled = value || loadFailed;
+    }
+    cancel.disabled = value;
+    start.disabled = value || loadFailed || !state?.path;
+    confirm.disabled = value || loadFailed || !state?.path;
+    if (value) problem.textContent = '';
   }
 
   async function refresh() {
-    const next = await invoke('settings_state');
+    let next;
+    try {
+      next = await invoke('settings_state');
+    } catch (e) {
+      loadFailed = true;
+      state = null;
+      note.textContent = 'Could not load the saved settings.';
+      problem.textContent = String(e);
+      diskName.textContent = '';
+      diskName.title = '';
+      memory.value = '';
+      autostart.setAttribute('aria-pressed', 'false');
+      envs.replaceChildren();
+      start.hidden = true;
+      cancel.textContent = 'cancel';
+      confirm.textContent = 'save';
+      busy(false);
+      return false;
+    }
     if (!next) return false;
+    loadFailed = false;
     state = next;
     startup = state.mode === 'startup';
     // The tray and the pin hang off this: neither has anything to say until a
@@ -121,6 +150,7 @@ export function mountSettings({ panel, gear, onGuest }) {
     problem.textContent = '';
     buildEnvs();
     render();
+    busy(false);
     return true;
   }
 
@@ -141,17 +171,26 @@ export function mountSettings({ panel, gear, onGuest }) {
     if (panel.contains(event.target)) return;
     event.stopPropagation();
     event.preventDefault();
-    leave();
+    if (!working) leave();
   }, true);
 
-  diskButton.addEventListener('click', async () => {
-    const picked = await invoke('pick_disk', { current: state.path });
-    if (!picked) return;
-    state.path = picked.path;
-    state.name = picked.name;
-    problem.textContent = '';
-    render();
-  });
+  async function chooseDisk(create) {
+    busy(true);
+    try {
+      const picked = await invoke('pick_disk', { current: state.path, create });
+      if (!picked) return;
+      state.path = picked.path;
+      state.name = picked.name;
+      render();
+    } catch (e) {
+      problem.textContent = String(e);
+    } finally {
+      busy(false);
+    }
+  }
+
+  openDisk.addEventListener('click', () => chooseDisk(false));
+  newDisk.addEventListener('click', () => chooseDisk(true));
 
   autostart.addEventListener('click', () => {
     state.autostart = !state.autostart;

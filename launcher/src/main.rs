@@ -198,9 +198,13 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
-                format!("failed to prepare the disk image at {}", disk.display())
-            })?;
+            if pending.cfg.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
+                ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
+                    format!("failed to prepare the disk image at {}", disk.display())
+                })?;
+            } else {
+                disk::require_existing(&disk)?;
+            }
             launch(app.handle(), pending, &disk, memory, &env)?;
         }
         Resolved::Ask { suggestion, reason } => {
