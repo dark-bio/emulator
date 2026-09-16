@@ -164,10 +164,8 @@ one rather than reusing the image the first is booted from. Two guests writing o
 corrupt it, so an explicit `--disk` naming an image that is already booted is
 refused outright.
 
-On macOS, launching an app that is already running normally brings it forward
-instead of starting a second copy. The emulator answers that by starting one
-itself, so launching it again gives you another device the way it does
-elsewhere. Clicking its Dock icon counts as a launch and starts one too.
+On macOS, launching the app again or clicking its Dock icon brings the running
+instance forward. To start another instance, run `open -n -a "Ark Emulator"`.
 
 Finding those instances is what the registry is for. Whichever launcher holds
 `127.0.0.1:18180` serves it, and the rest publish themselves into it, so it
