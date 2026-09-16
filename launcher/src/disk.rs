@@ -90,12 +90,12 @@ impl Reason {
                  then press start."
                 .to_owned(),
             Self::Missing(disk) => format!(
-                "Your emulator has gone missing. {} is not where it was. Pick another, \
+                "The default emulator has gone missing. {} is not where it was. Pick another, \
                  or use New to create one.",
                 name_of(disk)
             ),
             Self::InUse(disk) => format!(
-                "Your emulator is already running in another window. Two cannot share \
+                "The default emulator is already running in another window. Two cannot share \
                  {}, so open another or use New to create one.",
                 name_of(disk)
             ),
@@ -108,7 +108,10 @@ pub(crate) enum Resolved {
     /// Boot this image, without asking.
     Boot(PathBuf),
     /// Ask, offering `suggestion` and saying why.
-    Ask { suggestion: Option<PathBuf>, reason: Reason },
+    Ask {
+        suggestion: Option<PathBuf>,
+        reason: Reason,
+    },
 }
 
 /// Work out which image to boot. `dir` is the app's data directory, where an
@@ -217,8 +220,8 @@ pub(crate) async fn pick_disk(
         return Ok(None);
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let path = std::path::absolute(path)
-            .map_err(|e| format!("That location cannot be used: {e}"))?;
+        let path =
+            std::path::absolute(path).map_err(|e| format!("That location cannot be used: {e}"))?;
         if create {
             require_available(&path).map_err(|e| format!("{e:#}"))?;
             crate::qemu::create_disk(&path, qemu_libs.as_deref())
