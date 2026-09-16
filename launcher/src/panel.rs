@@ -83,7 +83,9 @@ impl Launcher {
             mode,
             note,
             name: path.as_deref().map(disk::name_of).unwrap_or_default(),
-            path: path.map(|path| path.display().to_string()).unwrap_or_default(),
+            path: path
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
             autostart: self.settings.autostart(),
             memory,
             env,
@@ -142,8 +144,7 @@ impl Launcher {
 /// What the user is told once the guest is running. Nothing written here
 /// touches the device already up: every one of these values is read at a start,
 /// and this one has already happened.
-const NEXT_BOOT: &str = "These settings take effect the next time this emulator starts. \
-     The one running now keeps what it started with.";
+const NEXT_BOOT: &str = "These settings take effect the next time an emulator is started.";
 
 /// The panel's whole view of the world, answered in one call.
 #[derive(Serialize)]
@@ -175,9 +176,7 @@ pub(crate) struct State {
 /// decision is made. The one thing that used to pump events from inside it was
 /// the disk picker's own modal, and the picker no longer runs there.
 #[tauri::command]
-pub(crate) fn settings_state(
-    launcher: tauri::State<'_, Mutex<Launcher>>,
-) -> Result<State, String> {
+pub(crate) fn settings_state(launcher: tauri::State<'_, Mutex<Launcher>>) -> Result<State, String> {
     launcher.lock().unwrap().state()
 }
 

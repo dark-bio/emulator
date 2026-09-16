@@ -287,6 +287,7 @@
       align-items: center;
       gap: 1.6vmin;
       opacity: 0;
+      pointer-events: none;
       transition: opacity 0.1s ease;
     }
 
@@ -303,6 +304,7 @@
 
     .info.open .info-row {
       opacity: 1;
+      pointer-events: auto;
       transition-delay: 0.12s;
     }
 
@@ -390,6 +392,19 @@
     .panel.open {
       opacity: 1;
       visibility: visible;
+    }
+
+    .panel,
+    .panel * {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .panel input,
+    .panel textarea,
+    .panel .opt-disk {
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     /* Both name a device, and before the startup form is answered there is not
@@ -521,7 +536,6 @@
     .opt-memory {
       width: 10ch;
       text-align: right;
-      user-select: text;
     }
 
     /* The spinner arrows are unreadable at this size and cannot be styled to
@@ -671,17 +685,17 @@
       <span class="panel-note"></span>
       <span class="opt">
         <span class="opt-label"
-          title="The file this emulator keeps everything in. Delete it to start over with a blank device.">emulator</span>
+          title="The file storing this emulator's data.">emulator</span>
         <span class="opt-disk"></span>
-        <button class="opt-disk-action opt-open" type="button" aria-label="Open existing image"
-          title="Open an existing disk image">
+        <button class="opt-disk-action opt-open" type="button" aria-label="Open an existing emulator"
+          title="Open an existing emulator">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 19V5a1 1 0 0 1 1-1h5l3 3h7a1 1 0 0 1 1 1v3M3 19l3-8h16l-3 8H3Z" />
           </svg>
         </button>
-        <button class="opt-disk-action opt-new" type="button" aria-label="Create new image"
-          title="Create a blank disk image now, replacing the selected file if confirmed">
+        <button class="opt-disk-action opt-new" type="button" aria-label="Create a new emulator"
+          title="Create a new emulator">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M14 2H5v20h14V7l-5-5Zm0 0v5h5M8 14h8m-4-4v8" />
@@ -690,8 +704,9 @@
       </span>
       <span class="opt">
         <span class="opt-label"
-          title="Next time, start this emulator straight away instead of asking again.">autostart</span>
-        <button class="opt-autostart" type="button" aria-pressed="true" aria-label="autostart">
+          title="Whether this emulator starts automatically on launch.">autostart</span>
+        <button class="opt-autostart" type="button" aria-pressed="true" aria-label="autostart"
+          title="Toggle automatic startup">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3.2 8.4L6.4 11.6L12.8 4.6" stroke="currentColor" stroke-width="2.2"
               stroke-linecap="round" stroke-linejoin="round" />
@@ -701,58 +716,59 @@
       <details class="opt-advanced">
         <summary>developers</summary>
         <span class="opt">
-          <span class="opt-label" title="How much memory to give this emulator.">memory</span>
+          <span class="opt-label" title="The memory allocated to this emulator.">memory</span>
           <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="memory" />
           <span class="opt-unit">MiB</span>
         </span>
         <span class="opt">
           <span class="opt-label"
-            title="Which Dark Bio service this device talks to. It is fixed when a device is created, so a change here applies to the next new one.">environment</span>
+            title="The Dark Bio service environment this device connects to. Changes apply to the next new device.">environment</span>
           <select class="opt-envs" aria-label="environment"></select>
         </span>
       </details>
       <span class="panel-error" role="alert"></span>
       <span class="opt-actions">
-        <button class="opt-cancel" type="button"></button>
-        <button class="opt-start" type="button" hidden>start</button>
-        <button class="opt-confirm" type="button"></button>
+        <button class="opt-cancel" type="button" title="Discard settings changes"></button>
+        <button class="opt-start" type="button" title="Start the emulator without saving settings" hidden>start</button>
+        <button class="opt-confirm" type="button" title="Save settings"></button>
       </span>
     </div>
     <div class="info">
       <button class="info-toggle" type="button" aria-label="device info" aria-expanded="false">
         <span class="info-row" data-row="disk">
-          <span class="info-label">storage</span>
+          <span class="info-label" title="The file storing this emulator's data.">emulator</span>
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="name" hidden>
-          <span class="info-label">name</span>
+          <span class="info-label" title="The name assigned to this device.">name</span>
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="serial" hidden>
-          <span class="info-label">serial</span>
+          <span class="info-label" title="The serial number assigned when this device was onboarded.">serial</span>
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="expires" hidden>
-          <span class="info-label">expires</span>
+          <span class="info-label" title="How long this device's identity remains valid.">expires</span>
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="env" hidden>
-          <span class="info-label">environment</span>
+          <span class="info-label" title="The Dark Bio service environment this device connects to.">environment</span>
           <span class="info-value"></span>
         </span>
         <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
+          <title>Show device info</title>
           <path d="M1 1L6 6L11 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"
             stroke-linejoin="round" />
         </svg>
       </button>
-      <button class="info-gear" type="button" aria-label="settings">
+      <button class="info-gear" type="button" aria-label="settings" title="Open emulator settings">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path fill="currentColor"
             d="M19.14 12.94a7.6 7.6 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.3 7.3 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.65 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.6 7.6 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.49 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6a3.6 3.6 0 1 1 0-7.2a3.6 3.6 0 0 1 0 7.2Z" />
         </svg>
       </button>
     </div>
-    <button class="reset-pin" type="button" aria-label="reset button">
+    <button class="reset-pin" type="button" aria-label="reset button" title="Device reset button">
       <img src="assets/sim_removal_tool.svg" alt="" />
     </button>
   </div>
@@ -1025,9 +1041,11 @@
       onDeviceInfo = renderDevice;
 
       const toggle = tray.querySelector('.info-toggle');
+      const toggleTitle = toggle.querySelector('.info-chevron title');
       toggle.addEventListener('click', () => {
         const open = tray.classList.toggle('open');
         toggle.setAttribute('aria-expanded', String(open));
+        toggleTitle.textContent = open ? 'Hide device info' : 'Show device info';
         // Redrawn on every open so the countdown is current. A timer would keep
         // it current while the tray is shut, which nobody can see.
         if (open) {

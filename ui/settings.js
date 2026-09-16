@@ -52,8 +52,10 @@ export function mountSettings({ panel, gear, onGuest }) {
   function render() {
     note.textContent = state.note;
     cancel.textContent = startup ? 'exit' : 'cancel';
+    cancel.title = startup ? 'Exit the emulator' : 'Discard settings changes';
     start.hidden = !startup;
     confirm.textContent = startup ? 'save and start' : 'save';
+    confirm.title = startup ? 'Save settings and start the emulator' : 'Save settings';
     diskName.textContent = state.name;
     diskName.title = state.path;
     autostart.setAttribute('aria-pressed', String(state.autostart));
@@ -124,7 +126,9 @@ export function mountSettings({ panel, gear, onGuest }) {
       envs.replaceChildren();
       start.hidden = true;
       cancel.textContent = 'cancel';
+      cancel.title = 'Discard settings changes';
       confirm.textContent = 'save';
+      confirm.title = 'Save settings';
       busy(false);
       return false;
     }

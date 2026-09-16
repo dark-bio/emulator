@@ -90,13 +90,13 @@ impl Reason {
                  then press start."
                 .to_owned(),
             Self::Missing(disk) => format!(
-                "The default emulator has gone missing. {} is not where it was. Pick another, \
-                 or use New to create one.",
+                "The default emulator ({}) is missing. \
+                 Open another or use New to create one.",
                 name_of(disk)
             ),
             Self::InUse(disk) => format!(
-                "The default emulator is already running in another window. Two cannot share \
-                 {}, so open another or use New to create one.",
+                "The default emulator ({}) is already running. \
+                 Open another or use New to create one.",
                 name_of(disk)
             ),
         }
