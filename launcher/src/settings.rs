@@ -3,9 +3,16 @@
 //! A single TOML file in the app's data directory, written on first run and
 //! rewritten whenever a value changes. Nothing ships with the app, so a
 //! portable copy carried to a new machine starts from the same blank slate an
-//! installer would. Its one job today is remembering which disk image to boot,
-//! so that a device kept outside the data directory does not need `--disk` on
-//! every launch.
+//! installer would. It holds the handful of choices that would otherwise have
+//! to be retyped as flags on every launch: which disk image to boot, how much
+//! RAM to give the guest, and which cloud environment a newly created disk
+//! gets bound to.
+//!
+//! Every value is optional, and absent means "no preference" rather than a
+//! default written out eagerly. A flag still wins over the file for one run
+//! without rewriting it, so the two are readable independently: the file says
+//! what was chosen, the command line says what this one launch is doing
+//! differently.
 //!
 //! TOML rather than JSON because this is a file a developer is expected to
 //! open and edit by hand, and it can carry comments.
@@ -28,6 +35,21 @@ const VERSION: u32 = 1;
 /// Name of the settings file within the data directory.
 const FILE: &str = "settings.toml";
 
+/// Guest RAM in MiB when neither a flag nor the settings file names one.
+pub(crate) const DEFAULT_MEMORY: u32 = 8192;
+
+/// Floor on guest RAM. Below this the guest cannot get far enough to say what
+/// went wrong, so a typo in the settings panel would look like a hang.
+pub(crate) const MIN_MEMORY: u32 = 512;
+
+/// Cloud environment a newly created disk is bound to when neither a flag nor
+/// the settings file names one.
+pub(crate) const DEFAULT_ENV: &str = "release";
+
+/// The environments a disk can be bound to. Shared with the `--env` parser and
+/// with the settings panel, so all three agree on the list.
+pub(crate) const ENVS: [&str; 3] = ["develop", "staging", "release"];
+
 /// The file's on-disk shape. Separate from [`Settings`] so that the path a
 /// value came from never becomes a value itself.
 #[derive(Deserialize, Serialize)]
@@ -39,6 +61,14 @@ struct Stored {
     /// has been chosen, which is how a first run knows to ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disk: Option<PathBuf>,
+
+    /// Guest RAM in MiB to use when no `--memory` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<u32>,
+
+    /// Environment to bind a newly created disk to when no `--env` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<String>,
 }
 
 /// The launcher's persisted preferences, together with where they live.
@@ -60,6 +90,8 @@ impl Settings {
                     stored: Stored {
                         version: VERSION,
                         disk: None,
+                        memory: None,
+                        env: None,
                     },
                 };
                 settings.save()?;
@@ -101,9 +133,26 @@ impl Settings {
         self.stored.disk.as_deref()
     }
 
-    /// Remember `disk` as the image to boot from now on, saving immediately.
-    pub(crate) fn set_disk(&mut self, disk: &Path) -> Result<()> {
-        self.stored.disk = Some(disk.to_path_buf());
+    /// The remembered guest RAM in MiB, if one has ever been chosen.
+    pub(crate) fn memory(&self) -> Option<u32> {
+        self.stored.memory
+    }
+
+    /// The remembered environment for newly created disks, if one has ever
+    /// been chosen.
+    pub(crate) fn env(&self) -> Option<&str> {
+        self.stored.env.as_deref()
+    }
+
+    /// Write all three values out at once, so the panel's save is one file
+    /// write rather than three.
+    ///
+    /// `None` for `disk` forgets the remembered image, so that the next launch
+    /// asks again rather than booting straight through.
+    pub(crate) fn apply(&mut self, disk: Option<&Path>, memory: u32, env: &str) -> Result<()> {
+        self.stored.disk = disk.map(Path::to_path_buf);
+        self.stored.memory = Some(memory);
+        self.stored.env = Some(env.to_owned());
         self.save()
     }
 
@@ -140,23 +189,57 @@ mod tests {
         let dir = tmp.path();
         let settings = Settings::load(dir).unwrap();
         assert!(settings.disk().is_none());
+        assert!(settings.memory().is_none());
+        assert!(settings.env().is_none());
 
         let body = fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(body.contains("version = 1"));
         assert!(!body.contains("disk"));
+        assert!(!body.contains("memory"));
+        assert!(!body.contains("env"));
     }
 
     #[test]
-    fn test_disk_survives_a_reload() {
+    fn test_values_survive_a_reload() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         Settings::load(dir)
             .unwrap()
-            .set_disk(Path::new("/tmp/ark.img"))
+            .apply(Some(Path::new("/tmp/ark.img")), 2048, "develop")
             .unwrap();
 
         let settings = Settings::load(dir).unwrap();
         assert_eq!(settings.disk(), Some(Path::new("/tmp/ark.img")));
+        assert_eq!(settings.memory(), Some(2048));
+        assert_eq!(settings.env(), Some("develop"));
+    }
+
+    #[test]
+    fn test_a_forgotten_disk_leaves_the_rest() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut settings = Settings::load(dir).unwrap();
+        settings
+            .apply(Some(Path::new("/tmp/ark.img")), 2048, "develop")
+            .unwrap();
+        settings.apply(None, 2048, "develop").unwrap();
+
+        let settings = Settings::load(dir).unwrap();
+        assert!(settings.disk().is_none());
+        assert_eq!(settings.memory(), Some(2048));
+        assert_eq!(settings.env(), Some("develop"));
+    }
+
+    #[test]
+    fn test_reads_a_file_that_only_names_a_disk() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        fs::write(dir.join(FILE), "version = 1\ndisk = \"/tmp/ark.img\"\n").unwrap();
+
+        let settings = Settings::load(dir).unwrap();
+        assert_eq!(settings.disk(), Some(Path::new("/tmp/ark.img")));
+        assert!(settings.memory().is_none());
+        assert!(settings.env().is_none());
     }
 
     #[test]

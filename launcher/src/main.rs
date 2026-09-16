@@ -20,6 +20,7 @@
 //!   - `bundle`:       where a packaged build's firmware, sidecars and libs live.
 //!   - `settings`:     what the launcher remembers between runs.
 //!   - `disk`:         which disk image the guest boots from, asking if need be.
+//!   - `panel`:        the settings panel's state and the commands behind it.
 //!   - `platform`:     OS-specific quirks, so the other three stay cfg-free.
 //!   - `orphan`:       ties QEMU's lifetime to this process.
 //!   - `registry`:     the registry of running emulators, and who serves it.
@@ -27,8 +28,12 @@
 //!   - `diagnostics`:  the log ring and facts a crash report is built from.
 //!   - `error_dialog`: turns an error into a window the user can copy out of.
 //!
-//! Everything that can fail lives in `start`, which runs inside Tauri's setup
-//! hook so that a failure has a window to be shown in.
+//! Everything that can fail lives under `start`, which runs inside Tauri's
+//! setup hook so that a failure has a window to be shown in. It splits in two:
+//! `prepare` settles everything that needs nobody's input, and `launch` starts
+//! the guest. When `prepare` cannot work out which image to boot, `launch` is
+//! deferred to the settings panel's Start button instead of running here, and
+//! the window comes up with that panel covering the device face.
 
 // Release builds link as a GUI app on Windows so launching the app doesn't pop
 // up a console alongside the UI. Debug builds keep the console subsystem so
@@ -42,6 +47,7 @@ mod discovery;
 mod disk;
 mod error_dialog;
 mod orphan;
+mod panel;
 mod platform;
 mod qemu;
 mod registry;
@@ -49,8 +55,9 @@ mod settings;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::thread;
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -59,6 +66,8 @@ use tauri::{Manager, WindowEvent};
 
 use bundle::{app_data_dir, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
+use disk::Resolved;
+use panel::{Launcher, Pending};
 use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
 use settings::Settings;
 
@@ -87,9 +96,11 @@ struct Config {
     disk: Option<PathBuf>,
 
     /// Cloud environment the device gets bound to when its disk is first
-    /// created; ignored for existing disks (the binding is burnt in).
-    #[arg(long, default_value = "release", value_parser = ["develop", "staging", "release"])]
-    env: String,
+    /// created; ignored for existing disks (the binding is burnt in). Defaults
+    /// to the environment remembered in the settings file, then to release.
+    /// Overrides the settings file without changing it.
+    #[arg(long, value_parser = settings::ENVS)]
+    env: Option<String>,
 
     /// Host address that SLIRP forwards into the guest's port. Defaults to the
     /// first free loopback port from 18181 up, so that several emulators can
@@ -97,9 +108,11 @@ struct Config {
     #[arg(long)]
     host_addr: Option<SocketAddr>,
 
-    /// Guest RAM in MiB. Lower it on memory-constrained hosts.
-    #[arg(long, default_value_t = 8192)]
-    memory: u32,
+    /// Guest RAM in MiB. Lower it on memory-constrained hosts. Defaults to the
+    /// amount remembered in the settings file, then to 8192. Overrides the
+    /// settings file without changing it.
+    #[arg(long)]
+    memory: Option<u32>,
 }
 
 /// Label of the device face window, hidden until startup succeeds.
@@ -142,10 +155,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             error_dialog::report_issue,
             disk::disk_path,
-            discovery::nameplate
+            disk::pick_disk,
+            discovery::nameplate,
+            panel::settings_state,
+            panel::save_settings,
+            panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) = start(app, &cfg, host_port) {
+            if let Err(err) = start(app, cfg, host_port) {
                 error_dialog::show(app.handle(), "could not start", err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
@@ -164,14 +181,48 @@ fn main() {
         .run(|_handle, event| platform::on_run_event(&event));
 }
 
-/// Bring up the emulated device: work out what to boot, prepare its disk,
-/// start QEMU, bind the two lifetimes together, and only then show the window.
+/// Bring up the emulated device: work out what to boot, then either boot it or
+/// put the settings panel up asking for what is missing.
 ///
-/// Every fallible step is here rather than in `main` so that all of them reach
-/// the same reporting path. That includes resolving the guest architecture and
-/// reserving a host port, neither of which needs a Tauri app but both of which
-/// would otherwise be failures with nowhere to be displayed.
-fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<()> {
+/// Every fallible step is under here rather than in `main` so that all of them
+/// end up on the same reporting path. That includes resolving the guest
+/// architecture and reserving a host port, neither of which needs a Tauri app
+/// but both of which would otherwise be failures with nowhere to be displayed.
+fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<()> {
+    let (pending, settings, resolved) = prepare(app, cfg, host_port)?;
+    let mut launcher = Launcher::booting(pending, settings);
+    let slot = launcher.slot();
+
+    match resolved {
+        Resolved::Boot(disk) => {
+            let (memory, env) = launcher.effective();
+            let pending = launcher.take().expect("nothing has taken it yet");
+            app.manage(Mutex::new(launcher));
+            ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
+                format!("failed to prepare the disk image at {}", disk.display())
+            })?;
+            launch(app.handle(), pending, &disk, memory, &env)?;
+        }
+        Resolved::Ask { suggestion, reason } => {
+            launcher.ask(suggestion, reason);
+            app.manage(Mutex::new(launcher));
+            // The panel covers the whole device face, so this still does not
+            // put an enclosure on screen that has nothing behind it. QEMU is
+            // spawned from `panel::start_emulator` once the user says so.
+            reveal(app.handle(), slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Settle everything that needs nobody's input, and work out which image to
+/// boot. Answers with the ingredients a start needs, the settings they were
+/// read out of, and that decision.
+fn prepare(
+    app: &tauri::App,
+    cfg: Config,
+    host_port: Result<HostPort>,
+) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
     // acceleration, so it is the default.
     let arch = match cfg.arch {
@@ -184,11 +235,11 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
     };
     diagnostics::record("Guest", arch.name());
 
-    let mut host_port = host_port?;
+    let host_port = host_port?;
     diagnostics::record("Host address", host_port.addr().to_string());
 
     let data_dir = app_data_dir(app)?;
-    let mut settings = Settings::load(&data_dir)?;
+    let settings = Settings::load(&data_dir)?;
     diagnostics::record_path("Settings", settings.path());
 
     // Discovery is a convenience, never a precondition: whatever it answers,
@@ -199,37 +250,57 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
 
-    let (kernel, initrd) = resolve_firmware(app, cfg, arch)?;
+    let (kernel, initrd) = resolve_firmware(app, &cfg, arch)?;
     diagnostics::record_path("Kernel", &kernel);
     diagnostics::record_path("Initrd", &initrd);
 
     let qemu_libs = resolve_qemu_libs(app);
 
-    let Some(disk) = disk::resolve(app, cfg, &mut settings, &booted, host_port.port())? else {
-        // The picker was dismissed, which is an answer rather than a failure:
-        // nothing to report and nothing to boot. Exiting the process directly
-        // for the reason `error_dialog` gives, that setup may still be running
-        // with no event loop to carry an app.exit. QEMU is spawned below this
-        // point, so there is nothing running to tear down.
-        std::process::exit(0);
-    };
-    diagnostics::record_path("Disk", &disk);
-    ensure_disk(&disk, qemu_libs.as_deref())
-        .with_context(|| format!("failed to prepare the disk image at {}", disk.display()))?;
+    let resolved = disk::decide(
+        cfg.disk.as_deref(),
+        settings.disk(),
+        &booted,
+        &data_dir,
+        host_port.port(),
+        std::env::var_os(error_dialog::NO_DIALOG).is_some(),
+    )?;
 
-    let mut child = spawn_qemu(
+    let pending = Pending {
         cfg,
         arch,
-        &kernel,
-        &initrd,
-        &disk,
-        qemu_libs.as_deref(),
-        &mut host_port,
+        host_port,
+        kernel,
+        initrd,
+        qemu_libs,
+    };
+    Ok((pending, settings, resolved))
+}
+
+/// Start the guest on `disk`, tie QEMU's lifetime to the window's, and put the
+/// device face on screen.
+fn launch(
+    app: &tauri::AppHandle,
+    mut pending: Pending,
+    disk: &Path,
+    memory: u32,
+    env: &str,
+) -> Result<()> {
+    diagnostics::record_path("Disk", disk);
+    let mut child = spawn_qemu(
+        pending.arch,
+        &pending.kernel,
+        &pending.initrd,
+        disk,
+        memory,
+        env,
+        pending.qemu_libs.as_deref(),
+        &mut pending.host_port,
     )?;
+    disk::mark_booted(disk);
 
     // Published only now that the port and image are settled, so the registry
     // never advertises an emulator that turned out not to start.
-    discovery::register(host_port.port(), &disk);
+    discovery::register(pending.host_port.port(), disk);
 
     // Piped in `spawn_qemu`, so it has to be drained here or QEMU stalls once
     // the pipe fills. Teeing it into the log ring is what makes "QEMU refused
@@ -247,7 +318,7 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
 
     // A background thread watches QEMU and exits the process if it dies on its
     // own, which closes Tauri's window with us.
-    let handle = app.handle().clone();
+    let handle = app.clone();
     thread::spawn(move || match child.wait() {
         Ok(status) => {
             log!("[launcher] QEMU exited with {status}");
@@ -268,6 +339,13 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
     // The device face is hidden until there is a device behind it, so a launch
     // that fails shows the error window rather than an enclosure that never
     // lights up.
+    reveal(app, pending.host_port.slot())
+}
+
+/// Put the window on screen, with the close handler that takes QEMU down with
+/// it. Shared by a straight-through boot and by the settings panel's startup
+/// form, which is on screen before there is any QEMU to take down.
+fn reveal(app: &tauri::AppHandle, slot: u32) -> Result<()> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .context("the main window is missing from the Tauri configuration")?;
@@ -279,9 +357,8 @@ fn start(app: &tauri::App, cfg: &Config, host_port: Result<HostPort>) -> Result<
             discovery::deregister();
         }
     });
-    stagger(&window, host_port.slot());
-    window.show().context("could not show the main window")?;
-    Ok(())
+    stagger(&window, slot);
+    window.show().context("could not show the main window")
 }
 
 /// Offset the window by its place in the port range, so emulators started one

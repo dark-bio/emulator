@@ -27,7 +27,6 @@ use crate::orphan;
 use crate::platform::{
     accel_flags, library_path_var, prepend_library_path, suppress_child_console,
 };
-use crate::Config;
 
 /// CPU architecture of the firmware being booted, in the same docker-style
 /// vocabulary the firmware build names its artifacts with.
@@ -222,12 +221,14 @@ pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// Resolves the binary itself rather than using `tauri-plugin-shell`'s
 /// sidecar API, which exposes no pre-exec hook, and the Linux orphan
 /// protection needs one to arm `PR_SET_PDEATHSIG`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_qemu(
-    cfg: &Config,
     arch: GuestArch,
     kernel: &Path,
     initrd: &Path,
     disk: &Path,
+    memory: u32,
+    env: &str,
     qemu_libs: Option<&Path>,
     host_port: &mut HostPort,
 ) -> Result<Child> {
@@ -278,7 +279,7 @@ pub(crate) fn spawn_qemu(
     };
     cmd.args(accel_flags(native));
     cmd.arg("-m")
-        .arg(cfg.memory.to_string())
+        .arg(memory.to_string())
         .args(["-nographic", "-kernel"])
         .arg(kernel)
         .args(["-initrd"])
@@ -291,7 +292,7 @@ pub(crate) fn spawn_qemu(
         .arg(format!(
             "console={} rdinit=/sbin/init arkos_env={}",
             arch.console(),
-            cfg.env
+            env
         ))
         .args(["-netdev"])
         .arg(format!(
