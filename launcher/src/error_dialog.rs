@@ -132,8 +132,8 @@ fn open(app: &AppHandle, report: &str) -> tauri::Result<()> {
     // goes, so closing that one first would take the error window with it.
     // Transparent and undecorated, like the device face, so the page can paint
     // the enclosure itself with nothing square behind its rounded corners.
-    // That leaves no OS close button, so the page carries its own Close, its
-    // own Escape handler, and a drag region to move the window by.
+    // That leaves no OS close button, so the page carries its own Close button
+    // and a drag region to move the window by.
     //
     // Fixed size, so the page lays itself out once and only the report scrolls.
     let window = WebviewWindowBuilder::new(app, ERROR_WINDOW, WebviewUrl::App("error.html".into()))

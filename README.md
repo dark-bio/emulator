@@ -152,7 +152,8 @@ size and grows on demand as the guest writes, up to a fixed virtual ceiling.
 To reset an emulator, close its running window, then use **New** to replace
 its image with a blank one.
 
-Press **Escape** to close the window (Alt+F4 / WM shortcuts also work).
+Use the operating system or window manager's close shortcut, such as Alt+F4,
+to close the window.
 
 ### Running several at once
 

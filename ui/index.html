@@ -1051,13 +1051,6 @@
     // it on its own background, so its controls stay clickable. No JS plumbing
     // needed.
 
-    // Escape closes the window. No window chrome means no X button; this is
-    // the in-app way out. Alt+F4 / WM shortcuts still work.
-    window.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && window.__TAURI__) {
-        window.__TAURI__.window.getCurrentWindow().close();
-      }
-    });
   </script>
 </body>
 

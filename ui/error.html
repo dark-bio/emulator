@@ -229,7 +229,7 @@
 
 <body>
   <!-- No window chrome, so the enclosure and its header are the drag handle
-       and the Close button is the way out, alongside Escape. -->
+       and the Close button is the way out. -->
   <div class="ark" data-tauri-drag-region>
 
     <span class="led tl"></span>
@@ -281,9 +281,6 @@
     // Focused explicitly rather than with the autofocus attribute, which a
     // webview does not reliably honour on load.
     closeButton.focus();
-    window.addEventListener('keydown', e => {
-      if (e.key === 'Escape') close();
-    });
   </script>
 </body>
 

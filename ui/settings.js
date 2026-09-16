@@ -204,8 +204,7 @@ export function mountSettings({ panel, gear, onGuest }) {
 
   cancel.addEventListener('click', () => {
     // Nothing has been started, so there is nothing to leave to. Closing the
-    // window is the way out of a launch that was a mistake, and is what Escape
-    // does too.
+    // window is the way out of a launch that was a mistake.
     if (startup) {
       window.__TAURI__?.window.getCurrentWindow().close();
       return;
