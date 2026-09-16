@@ -362,8 +362,6 @@
      rx="63" of the 500-unit rounded square the device art is drawn on, and the
      box is square, so one percentage rounds both axes the same way.
 
-     Translucent, so what it is covering stays legible behind it.
-
      --pad is not the tray's gutter: a corner that round eats into the box, and
      the largest rectangle inscribed in it starts 29.3% of the radius in, which
      works out at 3.7vmin here. That is where content would touch the curve, so
@@ -383,7 +381,7 @@
       gap: 2.4vmin;
       padding: var(--pad);
       border-radius: 12.6%;
-      background: rgba(13, 12, 12, 0.86);
+      background: rgba(13, 12, 12, 0.95);
       opacity: 0;
       visibility: hidden;
       transition: opacity 0.18s ease, visibility 0.18s;
@@ -416,7 +414,7 @@
       flex: none;
       min-width: 11ch;
       font-size: 3.1vmin;
-      color: #9d9d9d;
+      color: #c8c8c8;
     }
 
     /* The paragraph the panel opens with, and anything the launcher refused.
@@ -431,7 +429,7 @@
 
     .panel-note {
       padding-bottom: 1.6vmin;
-      color: #9d9d9d;
+      color: #c8c8c8;
     }
 
     .panel-error {
@@ -445,7 +443,7 @@
       border: 0.25vmin solid #282828;
       border-radius: 1vmin;
       background: #050505;
-      color: #ededed;
+      color: #f5f5f5;
       font: inherit;
       font-size: 3.6vmin;
     }
@@ -479,12 +477,12 @@
 
     .opt-unit {
       font-size: 3.1vmin;
-      color: #9d9d9d;
+      color: #c8c8c8;
     }
 
     /* A square well the size of the text fields beside it, so the control
      column lines up, with the tick drawn inside rather than spelled out. */
-    .opt-remember {
+    .opt-autostart {
       flex: none;
       width: 5.8vmin;
       height: 5.8vmin;
@@ -495,16 +493,16 @@
       border: 0.25vmin solid #282828;
       border-radius: 1vmin;
       background: #050505;
-      color: #ededed;
+      color: #f5f5f5;
       cursor: pointer;
       transition: border-color 0.12s ease;
     }
 
-    .opt-remember:hover {
+    .opt-autostart:hover {
       border-color: #9d9d9d;
     }
 
-    .opt-remember svg {
+    .opt-autostart svg {
       display: block;
       width: 72%;
       height: 72%;
@@ -512,7 +510,7 @@
       transition: opacity 0.12s ease;
     }
 
-    .opt-remember[aria-pressed='true'] svg {
+    .opt-autostart[aria-pressed='true'] svg {
       opacity: 1;
     }
 
@@ -529,8 +527,8 @@
       padding: 0.7vmin 0;
       border: 0;
       border-radius: 1vmin;
-      background: #1c1c1c;
-      color: #9d9d9d;
+      background: #333333;
+      color: #c8c8c8;
       font: inherit;
       font-size: 3.1vmin;
       cursor: pointer;
@@ -538,8 +536,8 @@
     }
 
     .opt-env[aria-pressed='true'] {
-      background: #282828;
-      color: #ededed;
+      background: #505050;
+      color: #f5f5f5;
     }
 
     /* Nothing the panel is showing is written until one of these is pressed,
@@ -591,13 +589,13 @@
 
     .opt-cancel,
     .opt-start {
-      background: #333333;
+      background: #505050;
       color: #f5f5f5;
     }
 
     .opt-cancel:hover:not(:disabled),
     .opt-start:hover:not(:disabled) {
-      background: #454545;
+      background: #626262;
     }
 
     /* :focus-visible where the error window uses :focus, which it needs because
@@ -637,7 +635,7 @@
       <span class="opt">
         <span class="opt-label"
           title="Next time, start this emulator straight away instead of asking again.">autostart</span>
-        <button class="opt-remember" type="button" aria-pressed="true" aria-label="autostart">
+        <button class="opt-autostart" type="button" aria-pressed="true" aria-label="autostart">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3.2 8.4L6.4 11.6L12.8 4.6" stroke="currentColor" stroke-width="2.2"
               stroke-linecap="round" stroke-linejoin="round" />

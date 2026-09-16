@@ -6,8 +6,8 @@
 //
 // Two modes, decided by whether the guest has been started:
 //
-//   - startup: the launcher could not work out which image to boot. The panel
-//     is up from the moment the window appears, says why, and answers three
+//   - startup: autostart is disabled or the launcher needs an image to boot.
+//     The panel is up from the moment the window appears and answers three
 //     ways: exit, start, or save and start. There is no device behind it yet,
 //     so exit is the only other way out.
 //   - running: opened from the gear in the info tray. The same controls,
@@ -31,7 +31,7 @@ export function mountSettings({ panel, gear, onGuest }) {
   const note = panel.querySelector('.panel-note');
   const problem = panel.querySelector('.panel-error');
   const diskButton = panel.querySelector('.opt-disk');
-  const remember = panel.querySelector('.opt-remember');
+  const autostart = panel.querySelector('.opt-autostart');
   const memory = panel.querySelector('.opt-memory');
   const envs = panel.querySelector('.opt-envs');
   const cancel = panel.querySelector('.opt-cancel');
@@ -52,7 +52,7 @@ export function mountSettings({ panel, gear, onGuest }) {
     confirm.textContent = startup ? 'save and start' : 'save';
     diskButton.textContent = state.name;
     diskButton.title = state.path;
-    remember.setAttribute('aria-pressed', String(state.remember));
+    autostart.setAttribute('aria-pressed', String(state.autostart));
     memory.min = String(state.minMemory);
     memory.value = String(state.memory);
     renderEnvs();
@@ -83,7 +83,8 @@ export function mountSettings({ panel, gear, onGuest }) {
     busy(true);
     try {
       await invoke('save_settings', {
-        disk: state.remember ? state.path : null,
+        disk: state.path,
+        autostart: state.autostart,
         memory: state.memory,
         env: state.env,
       });
@@ -152,8 +153,8 @@ export function mountSettings({ panel, gear, onGuest }) {
     render();
   });
 
-  remember.addEventListener('click', () => {
-    state.remember = !state.remember;
+  autostart.addEventListener('click', () => {
+    state.autostart = !state.autostart;
     render();
   });
 
@@ -193,7 +194,7 @@ export function mountSettings({ panel, gear, onGuest }) {
     try {
       await invoke('start_emulator', {
         disk: state.path,
-        remember: state.remember,
+        autostart: state.autostart,
         save: persist,
         memory: state.memory,
         env: state.env,

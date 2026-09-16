@@ -259,6 +259,7 @@ fn prepare(
     let resolved = disk::decide(
         cfg.disk.as_deref(),
         settings.disk(),
+        settings.autostart(),
         &booted,
         &data_dir,
         host_port.port(),

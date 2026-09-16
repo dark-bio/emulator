@@ -5,11 +5,12 @@
 //!   - `--disk`, typed at a shell for this one run. Never consults or updates
 //!     the settings, so a one-off boot from some other image leaves the
 //!     remembered choice alone.
-//!   - The image remembered in `settings`, as long as it is still there. A
+//!   - The image remembered in `settings`, when autostart is enabled and it
+//!     is still there. With autostart disabled, the panel offers that image. A
 //!     path whose file has since been deleted falls through to asking, which
 //!     is also how a device that failed to allocate gets a second try.
 //!   - Whatever the user picks in the settings panel, which is then remembered
-//!     unless they say otherwise.
+//!     when they save the form.
 //!
 //! Crossing all three is whether an image is already booted by another
 //! emulator, since two guests writing one qcow2 would corrupt it. An explicit
@@ -66,6 +67,8 @@ pub(crate) type Booted = HashMap<String, u16>;
 
 /// Why the launcher cannot pick an image on its own and has to ask.
 pub(crate) enum Reason {
+    /// Automatic startup is disabled.
+    AutostartDisabled,
     /// Nothing has ever been chosen.
     FirstRun,
     /// The remembered image is no longer on disk.
@@ -84,6 +87,9 @@ impl Reason {
     /// about where any of this lives in the app.
     pub(crate) fn message(&self) -> String {
         match self {
+            Self::AutostartDisabled => {
+                "Choose an emulator and press start when you are ready.".to_owned()
+            }
             Self::FirstRun => "You do not have an emulator yet. Choose where to keep it, \
                  and it will be made there the first time it starts."
                 .to_owned(),
@@ -121,6 +127,7 @@ pub(crate) enum Resolved {
 pub(crate) fn decide(
     explicit: Option<&Path>,
     remembered: Option<&Path>,
+    autostart: bool,
     booted: &Booted,
     dir: &Path,
     port: u16,
@@ -155,6 +162,12 @@ pub(crate) fn decide(
                 });
             }
         } else if disk.exists() {
+            if !autostart && !no_dialog {
+                return Ok(Resolved::Ask {
+                    suggestion: disk.to_path_buf(),
+                    reason: Reason::AutostartDisabled,
+                });
+            }
             return Ok(Resolved::Boot(disk.to_path_buf()));
         } else {
             let reason = Reason::Missing(disk.to_path_buf());
@@ -268,6 +281,7 @@ mod tests {
         let resolved = decide(
             Some(&disk),
             Some(&remembered),
+            false,
             &Booted::new(),
             tmp.path(),
             PORT,
@@ -287,7 +301,7 @@ mod tests {
         touch(&disk);
         let booted = Booted::from([(disk_id(&disk), 18181)]);
 
-        let Err(err) = decide(Some(&disk), None, &booted, tmp.path(), PORT, false) else {
+        let Err(err) = decide(Some(&disk), None, false, &booted, tmp.path(), PORT, false) else {
             panic!("a booted image was accepted");
         };
         assert!(err.to_string().contains("already booted"), "{err}");
@@ -302,6 +316,7 @@ mod tests {
         let resolved = decide(
             None,
             Some(&remembered),
+            true,
             &Booted::new(),
             tmp.path(),
             PORT,
@@ -315,6 +330,51 @@ mod tests {
     }
 
     #[test]
+    fn test_autostart_disabled_offers_the_remembered_disk() {
+        let tmp = TempDir::new().unwrap();
+        let remembered = tmp.path().join("remembered.img");
+        touch(&remembered);
+
+        let resolved = decide(
+            None,
+            Some(&remembered),
+            false,
+            &Booted::new(),
+            tmp.path(),
+            PORT,
+            false,
+        )
+        .unwrap();
+        let Resolved::Ask { suggestion, reason } = resolved else {
+            panic!("autostart was disabled but the image booted");
+        };
+        assert_eq!(suggestion, remembered);
+        assert!(matches!(reason, Reason::AutostartDisabled));
+    }
+
+    #[test]
+    fn test_unattended_launch_boots_with_autostart_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let remembered = tmp.path().join("remembered.img");
+        touch(&remembered);
+
+        let resolved = decide(
+            None,
+            Some(&remembered),
+            false,
+            &Booted::new(),
+            tmp.path(),
+            PORT,
+            true,
+        )
+        .unwrap();
+        let Resolved::Boot(booted) = resolved else {
+            panic!("an unattended launch asked anyway");
+        };
+        assert_eq!(booted, remembered);
+    }
+
+    #[test]
     fn test_a_remembered_disk_that_is_gone_asks() {
         let tmp = TempDir::new().unwrap();
         let remembered = tmp.path().join("remembered.img");
@@ -322,6 +382,7 @@ mod tests {
         let resolved = decide(
             None,
             Some(&remembered),
+            true,
             &Booted::new(),
             tmp.path(),
             PORT,
@@ -342,7 +403,16 @@ mod tests {
         touch(&remembered);
         let booted = Booted::from([(disk_id(&remembered), 18181)]);
 
-        let resolved = decide(None, Some(&remembered), &booted, tmp.path(), PORT, false).unwrap();
+        let resolved = decide(
+            None,
+            Some(&remembered),
+            true,
+            &booted,
+            tmp.path(),
+            PORT,
+            false,
+        )
+        .unwrap();
         let Resolved::Ask { reason, .. } = resolved else {
             panic!("an image booted elsewhere was booted again");
         };
@@ -353,7 +423,7 @@ mod tests {
     fn test_a_first_run_asks() {
         let tmp = TempDir::new().unwrap();
 
-        let resolved = decide(None, None, &Booted::new(), tmp.path(), PORT, false).unwrap();
+        let resolved = decide(None, None, true, &Booted::new(), tmp.path(), PORT, false).unwrap();
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("a first run booted something");
         };
@@ -365,7 +435,7 @@ mod tests {
     fn test_nobody_to_ask_allocates_an_image() {
         let tmp = TempDir::new().unwrap();
 
-        let resolved = decide(None, None, &Booted::new(), tmp.path(), PORT, true).unwrap();
+        let resolved = decide(None, None, true, &Booted::new(), tmp.path(), PORT, true).unwrap();
         let Resolved::Boot(booted) = resolved else {
             panic!("an unattended launch asked anyway");
         };
@@ -378,7 +448,7 @@ mod tests {
         let default = tmp.path().join(DEFAULT_DISK);
         let booted = Booted::from([(disk_id(&default), 18181)]);
 
-        let resolved = decide(None, None, &booted, tmp.path(), PORT, true).unwrap();
+        let resolved = decide(None, None, true, &booted, tmp.path(), PORT, true).unwrap();
         let Resolved::Boot(disk) = resolved else {
             panic!("an unattended launch asked anyway");
         };

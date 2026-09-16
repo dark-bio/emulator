@@ -105,7 +105,7 @@ the one read back off the running device, so it is what `--env` settled on when
 the disk was created rather than whatever this run happened to pass.
 
 The gear in the open tray fades a settings panel in over the device face, and
-the tray and the pin step aside for it. It carries the three things the emulator
+the tray and the pin step aside for it. It carries the choices the emulator
 remembers between runs: which disk image to boot, whether to boot it without
 asking, how much RAM to give the guest, and which environment a newly created
 disk gets bound to. None of it touches the device behind it, which keeps what it
@@ -113,18 +113,19 @@ was booted with, so the panel opens by saying so. **Save** writes [the settings
 file](#settings) and closes the panel; **cancel** closes it keeping nothing.
 
 The same panel is up from the moment the window appears, before anything has
-booted, when the launcher cannot work out which image to start on: nothing has
-ever been chosen, the remembered image is gone, or another emulator is already
-booted from it. It opens by saying which of those it is, offers an image, and
+booted, when autostart is disabled or the launcher cannot work out which image
+to start on: nothing has ever been chosen, the remembered image is gone, or
+another emulator is already booted from it. It opens by saying which of those it is, offers an image, and
 boots on either of its two ways of starting, fading out as the device comes up.
 **Start** boots what the form is showing and leaves the settings file exactly as
 it was, so a flag typed for one run stays a one-off. **Save and start** boots it
 and writes it down. **Exit** closes a window that was opened by mistake.
-`--disk` skips all of this, as does an already usable remembered image.
+`--disk` skips all of this, as does a usable remembered image with autostart
+enabled.
 
-`autostart` decides what a save does with the image itself. Ticked, the image is
-written down along with the rest, and the launch after this one boots it
-straight through; unticked, only the rest is kept and the panel comes back.
+`autostart` is stored as its own boolean setting. Every save keeps the selected
+image. Ticked, the next launch boots it straight through; unticked, the startup
+panel comes back with that image selected.
 
 Everything in the panel is editable, and what it is showing when you save is
 what gets written. That puts it above the command line: a flag seeds the form
@@ -217,21 +218,23 @@ the same keys.
 
 ```toml
 version = 1
+autostart = true
 disk = "/home/you/arks/demo.img"
 memory = 8192
 env = "develop"
 ```
 
 `version` is the schema version, and a file from a newer emulator than the one
-reading it is an error rather than something to overwrite. Every other key is
-optional, and absent means no preference: `memory` and `env` fall back to the
-defaults in [Configuration](#configuration) above, and a missing `disk` is what
-makes the emulator ask.
+reading it is an error rather than something to overwrite. `autostart` defaults
+to `true` when omitted. The other keys are optional, and absent means no
+preference: `memory` and `env` fall back to the defaults in
+[Configuration](#configuration) above, and a missing `disk` is what makes the
+emulator ask.
 
 `disk` is the image to boot when `--disk` is not given; it appears once
-something has been chosen. Delete the file, or just that line, to be asked
-again, which is also what unticking `autostart` in the settings panel does. So
-does pointing it at an image that no longer exists.
+an image has been saved. Set `autostart = false` to show the startup panel
+without forgetting the image. Deleting the file or the `disk` line, or pointing
+it at an image that no longer exists, also makes the emulator ask.
 
 ## Layout
 

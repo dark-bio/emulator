@@ -4,8 +4,8 @@
 //! cover the whole face. It has two jobs, and which one it is doing comes down
 //! to whether the guest has been started yet:
 //!
-//!   - Before the start, it is the startup form. The launcher could not work
-//!     out which image to boot, so the panel says why, offers one, and waits
+//!   - Before the start, it is the startup form. Autostart is disabled or the
+//!     launcher needs an image, so the panel says why, offers one, and waits
 //!     for [`start_emulator`]. Nothing else in the app is reachable until then.
 //!   - After the start, it is reached from the gear in the info tray and edits
 //!     what the *next* launch will use. A running guest is never disturbed:
@@ -121,7 +121,7 @@ pub(crate) struct State {
     /// Its file name, which is what the disk row shows.
     name: String,
     /// Whether the next launch is to boot this image without asking.
-    remember: bool,
+    autostart: bool,
     memory: u32,
     env: String,
     /// The environments to offer, so the panel does not carry its own copy of
@@ -144,11 +144,11 @@ pub(crate) fn settings_state(launcher: tauri::State<'_, Mutex<Launcher>>) -> Sta
     // In the startup form the disk is the one being offered. Afterwards the
     // panel edits what the next launch will use, which is the remembered image
     // rather than whatever this run happens to be booted from.
-    let (mode, note, path, remember) = match &launcher.ask {
-        Some((suggestion, reason)) => ("startup", reason.message(), suggestion.clone(), true),
+    let (mode, note, path) = match &launcher.ask {
+        Some((suggestion, reason)) => ("startup", reason.message(), suggestion.clone()),
         None => match launcher.settings.disk() {
-            Some(disk) => ("running", NEXT_BOOT.to_owned(), disk.to_path_buf(), true),
-            None => ("running", NEXT_BOOT.to_owned(), running_disk(), false),
+            Some(disk) => ("running", NEXT_BOOT.to_owned(), disk.to_path_buf()),
+            None => ("running", NEXT_BOOT.to_owned(), running_disk()),
         },
     };
 
@@ -157,7 +157,7 @@ pub(crate) fn settings_state(launcher: tauri::State<'_, Mutex<Launcher>>) -> Sta
         note,
         name: disk::name_of(&path),
         path: path.display().to_string(),
-        remember,
+        autostart: launcher.settings.autostart(),
         memory,
         env,
         envs: ENVS,
@@ -169,17 +169,18 @@ pub(crate) fn settings_state(launcher: tauri::State<'_, Mutex<Launcher>>) -> Sta
 #[tauri::command]
 pub(crate) fn save_settings(
     launcher: tauri::State<'_, Mutex<Launcher>>,
-    disk: Option<String>,
+    disk: String,
+    autostart: bool,
     memory: u32,
     env: String,
 ) -> Result<(), String> {
     let mut launcher = launcher.lock().unwrap();
     check(memory, &env)?;
-    let disk = disk.map(PathBuf::from);
+    let disk = PathBuf::from(disk);
 
     launcher
         .settings
-        .apply(disk.as_deref(), memory, &env)
+        .apply(Some(&disk), autostart, memory, &env)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -199,7 +200,7 @@ pub(crate) fn start_emulator(
     app: tauri::AppHandle,
     launcher: tauri::State<'_, Mutex<Launcher>>,
     disk: String,
-    remember: bool,
+    autostart: bool,
     save: bool,
     memory: u32,
     env: String,
@@ -233,7 +234,7 @@ pub(crate) fn start_emulator(
     if save {
         launcher
             .settings
-            .apply(remember.then_some(disk.as_path()), memory, &env)
+            .apply(Some(&disk), autostart, memory, &env)
             .map_err(|e| format!("{e:#}"))?;
     }
 
@@ -308,7 +309,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         Settings::load(tmp.path())
             .unwrap()
-            .apply(None, 2048, "staging")
+            .apply(None, true, 2048, "staging")
             .unwrap();
 
         let launcher = waiting(tmp.path(), Some(4096), Some("develop"));
@@ -320,7 +321,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         Settings::load(tmp.path())
             .unwrap()
-            .apply(None, 2048, "staging")
+            .apply(None, true, 2048, "staging")
             .unwrap();
 
         let launcher = waiting(tmp.path(), None, None);
@@ -346,7 +347,7 @@ mod tests {
             note: "why".to_owned(),
             path: "/tmp/a.img".to_owned(),
             name: "a.img".to_owned(),
-            remember: true,
+            autostart: true,
             memory: 4096,
             env: "develop".to_owned(),
             envs: ENVS,
@@ -358,7 +359,7 @@ mod tests {
             "note",
             "path",
             "name",
-            "remember",
+            "autostart",
             "memory",
             "env",
             "envs",

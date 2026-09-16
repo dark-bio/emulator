@@ -5,12 +5,13 @@
 //! portable copy carried to a new machine starts from the same blank slate an
 //! installer would. It holds the handful of choices that would otherwise have
 //! to be retyped as flags on every launch: which disk image to boot, how much
-//! RAM to give the guest, and which cloud environment a newly created disk
-//! gets bound to.
+//! RAM to give the guest, whether to start automatically, and which cloud
+//! environment a newly created disk gets bound to.
 //!
-//! Every value is optional, and absent means "no preference" rather than a
-//! default written out eagerly. A flag still wins over the file for one run
-//! without rewriting it, so the two are readable independently: the file says
+//! Disk, memory, and environment are optional; absent means "no preference"
+//! rather than a default written out eagerly. Autostart defaults to true.
+//! A flag still wins over the file for one run without rewriting it, so the
+//! two are readable independently: the file says
 //! what was chosen, the command line says what this one launch is doing
 //! differently.
 //!
@@ -62,6 +63,10 @@ struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disk: Option<PathBuf>,
 
+    /// Whether to boot the remembered image without opening the startup panel.
+    #[serde(default = "default_autostart")]
+    autostart: bool,
+
     /// Guest RAM in MiB to use when no `--memory` is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory: Option<u32>,
@@ -69,6 +74,11 @@ struct Stored {
     /// Environment to bind a newly created disk to when no `--env` is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<String>,
+}
+
+/// Preserve automatic startup for settings files that omit the preference.
+fn default_autostart() -> bool {
+    true
 }
 
 /// The launcher's persisted preferences, together with where they live.
@@ -90,6 +100,7 @@ impl Settings {
                     stored: Stored {
                         version: VERSION,
                         disk: None,
+                        autostart: default_autostart(),
                         memory: None,
                         env: None,
                     },
@@ -133,6 +144,11 @@ impl Settings {
         self.stored.disk.as_deref()
     }
 
+    /// Whether to boot the remembered image without asking.
+    pub(crate) fn autostart(&self) -> bool {
+        self.stored.autostart
+    }
+
     /// The remembered guest RAM in MiB, if one has ever been chosen.
     pub(crate) fn memory(&self) -> Option<u32> {
         self.stored.memory
@@ -144,13 +160,16 @@ impl Settings {
         self.stored.env.as_deref()
     }
 
-    /// Write all three values out at once, so the panel's save is one file
-    /// write rather than three.
-    ///
-    /// `None` for `disk` forgets the remembered image, so that the next launch
-    /// asks again rather than booting straight through.
-    pub(crate) fn apply(&mut self, disk: Option<&Path>, memory: u32, env: &str) -> Result<()> {
+    /// Write the panel's preferences in one file update.
+    pub(crate) fn apply(
+        &mut self,
+        disk: Option<&Path>,
+        autostart: bool,
+        memory: u32,
+        env: &str,
+    ) -> Result<()> {
         self.stored.disk = disk.map(Path::to_path_buf);
+        self.stored.autostart = autostart;
         self.stored.memory = Some(memory);
         self.stored.env = Some(env.to_owned());
         self.save()
@@ -194,6 +213,7 @@ mod tests {
 
         let body = fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(body.contains("version = 1"));
+        assert!(body.contains("autostart = true"));
         assert!(!body.contains("disk"));
         assert!(!body.contains("memory"));
         assert!(!body.contains("env"));
@@ -205,7 +225,7 @@ mod tests {
         let dir = tmp.path();
         Settings::load(dir)
             .unwrap()
-            .apply(Some(Path::new("/tmp/ark.img")), 2048, "develop")
+            .apply(Some(Path::new("/tmp/ark.img")), true, 2048, "develop")
             .unwrap();
 
         let settings = Settings::load(dir).unwrap();
@@ -215,17 +235,20 @@ mod tests {
     }
 
     #[test]
-    fn test_a_forgotten_disk_leaves_the_rest() {
+    fn test_disabling_autostart_keeps_the_disk() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         let mut settings = Settings::load(dir).unwrap();
         settings
-            .apply(Some(Path::new("/tmp/ark.img")), 2048, "develop")
+            .apply(Some(Path::new("/tmp/ark.img")), true, 2048, "develop")
             .unwrap();
-        settings.apply(None, 2048, "develop").unwrap();
+        settings
+            .apply(Some(Path::new("/tmp/ark.img")), false, 2048, "develop")
+            .unwrap();
 
         let settings = Settings::load(dir).unwrap();
-        assert!(settings.disk().is_none());
+        assert_eq!(settings.disk(), Some(Path::new("/tmp/ark.img")));
+        assert!(!settings.autostart());
         assert_eq!(settings.memory(), Some(2048));
         assert_eq!(settings.env(), Some("develop"));
     }
@@ -238,6 +261,7 @@ mod tests {
 
         let settings = Settings::load(dir).unwrap();
         assert_eq!(settings.disk(), Some(Path::new("/tmp/ark.img")));
+        assert!(settings.autostart());
         assert!(settings.memory().is_none());
         assert!(settings.env().is_none());
     }
