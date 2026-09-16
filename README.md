@@ -165,7 +165,8 @@ corrupt it, so an explicit `--disk` naming an image that is already booted is
 refused outright.
 
 On macOS, launching the app again or clicking its Dock icon brings the running
-instance forward. To start another instance, run `open -n -a "Ark Emulator"`.
+instance forward. In a packaged app, choose **New Window** from the app menu
+(Cmd+N) to start another instance. You can also run `open -n -a "Ark Emulator"`.
 
 Finding those instances is what the registry is for. Whichever launcher holds
 `127.0.0.1:18180` serves it, and the rest publish themselves into it, so it

@@ -162,7 +162,7 @@ fn main() {
             panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) = start(app, cfg, host_port) {
+            if let Err(err) = platform::install_menus(app).and_then(|()| start(app, cfg, host_port)) {
                 error_dialog::show(app.handle(), "could not start", err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
