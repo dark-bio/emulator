@@ -17,12 +17,29 @@
 //!     Windows, each behind a runtime probe, falling back to TCG emulation.
 //!   - **Opening a URL**: `xdg-open`, `open` and `cmd /c start`, none of which
 //!     share a name across platforms.
+//!   - **Application menu**: macOS has an app-menu action for starting another
+//!     emulator explicitly.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::diagnostics::{self, log};
+
+#[cfg(target_os = "macos")]
+#[path = "macos_menu.rs"]
+mod macos_menu;
+
+/// Install the platform's native actions for starting another emulator.
+#[cfg(target_os = "macos")]
+pub(crate) fn install_menus(app: &tauri::App) -> anyhow::Result<()> {
+    macos_menu::install(app)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn install_menus(_app: &tauri::App) -> anyhow::Result<()> {
+    Ok(())
+}
 
 /// Strips Windows' `\\?\` extended-length-path ("verbatim") prefix. Tauri's
 /// resource resolver canonicalizes paths on Windows, which adds it, and
