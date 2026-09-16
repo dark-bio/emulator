@@ -53,7 +53,6 @@ export function mountSettings({ panel, gear, onGuest }) {
     diskButton.textContent = state.name;
     diskButton.title = state.path;
     remember.setAttribute('aria-pressed', String(state.remember));
-    remember.textContent = state.remember ? '[x]' : '[ ]';
     memory.min = String(state.minMemory);
     memory.value = String(state.memory);
     renderEnvs();
@@ -115,6 +114,9 @@ export function mountSettings({ panel, gear, onGuest }) {
     if (!next) return false;
     state = next;
     startup = state.mode === 'startup';
+    // The tray and the pin hang off this: neither has anything to say until a
+    // guest is behind the face.
+    panel.classList.toggle('startup', startup);
     problem.textContent = '';
     buildEnvs();
     render();
@@ -125,6 +127,21 @@ export function mountSettings({ panel, gear, onGuest }) {
     await refresh();
     panel.classList.add('open');
   });
+
+  // Clicking away from the panel is a cancel, the way it is for any other thing
+  // that opens in front of something else. The capture phase is what makes it
+  // only that: the tray is still sitting behind the panel, and without this the
+  // same click would toggle it on the way past.
+  //
+  // The startup form is exempt. There is no device behind it to click back to,
+  // and dropping it would leave a window with nothing in it.
+  document.addEventListener('click', event => {
+    if (startup || !panel.classList.contains('open')) return;
+    if (panel.contains(event.target)) return;
+    event.stopPropagation();
+    event.preventDefault();
+    leave();
+  }, true);
 
   diskButton.addEventListener('click', async () => {
     const picked = await invoke('pick_disk', { current: state.path });
@@ -145,7 +162,7 @@ export function mountSettings({ panel, gear, onGuest }) {
   memory.addEventListener('change', () => {
     const value = Number.parseInt(memory.value, 10);
     if (!Number.isFinite(value) || value < state.minMemory) {
-      problem.textContent = `the guest needs at least ${state.minMemory} MiB`;
+      problem.textContent = `That is too little memory. The least is ${state.minMemory} MiB.`;
       memory.value = String(state.memory);
       return;
     }
@@ -189,7 +206,7 @@ export function mountSettings({ panel, gear, onGuest }) {
     // The guest is up, so the panel fades out onto a device face that finally
     // has something behind it, and comes back as the next launch's settings.
     startup = false;
-    panel.classList.remove('open');
+    panel.classList.remove('open', 'startup');
     busy(false);
     await refresh();
     onGuest();

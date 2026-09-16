@@ -308,7 +308,7 @@
 
     .info-label {
       flex: none;
-      min-width: 7ch;
+      min-width: 11ch;
       font-size: 3.1vmin;
       color: #9d9d9d;
     }
@@ -378,7 +378,9 @@
       z-index: 3;
       display: flex;
       flex-direction: column;
-      gap: var(--gap);
+      /* Its own rhythm rather than the tray's --gap, which is tuned for rows
+       that are read at a glance rather than filled in. */
+      gap: 2.4vmin;
       padding: var(--pad);
       border-radius: 12.6%;
       background: rgba(13, 12, 12, 0.86);
@@ -392,10 +394,11 @@
       visibility: visible;
     }
 
-    /* Both are device controls, and the panel is in front of the device. They
-     step aside for it the way the pin already steps aside for the open tray. */
-    .panel.open ~ .info,
-    .panel.open ~ .reset-pin {
+    /* Both name a device, and before the startup form is answered there is not
+     one: the tray has nothing to report and the pin has nothing to reset. They
+     arrive with the guest. */
+    .panel.startup ~ .info,
+    .panel.startup ~ .reset-pin {
       opacity: 0;
       pointer-events: none;
     }
@@ -409,10 +412,9 @@
       gap: 1.6vmin;
     }
 
-    /* Wider than the tray's label column, which only has to hold `expires`. */
     .opt-label {
       flex: none;
-      min-width: 9ch;
+      min-width: 11ch;
       font-size: 3.1vmin;
       color: #9d9d9d;
     }
@@ -480,22 +482,38 @@
       color: #9d9d9d;
     }
 
+    /* A square well the size of the text fields beside it, so the control
+     column lines up, with the tick drawn inside rather than spelled out. */
     .opt-remember {
       flex: none;
-      padding: 0.7vmin 1.6vmin;
-      border: 0;
+      width: 5.8vmin;
+      height: 5.8vmin;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 0.25vmin solid #282828;
       border-radius: 1vmin;
-      background: #1c1c1c;
-      color: #9d9d9d;
-      font: inherit;
-      font-size: 3.1vmin;
+      background: #050505;
+      color: #ededed;
       cursor: pointer;
-      transition: background 0.12s ease, color 0.12s ease;
+      transition: border-color 0.12s ease;
     }
 
-    .opt-remember[aria-pressed='true'] {
-      background: #282828;
-      color: #ededed;
+    .opt-remember:hover {
+      border-color: #9d9d9d;
+    }
+
+    .opt-remember svg {
+      display: block;
+      width: 72%;
+      height: 72%;
+      opacity: 0;
+      transition: opacity 0.12s ease;
+    }
+
+    .opt-remember[aria-pressed='true'] svg {
+      opacity: 1;
     }
 
     .opt-envs {
@@ -608,22 +626,27 @@
       <span class="panel-note"></span>
       <span class="opt">
         <span class="opt-label"
-          title="The qcow2 image backing the device. Everything it stores lives there, and deleting the file resets it.">disk</span>
+          title="The file this emulator keeps everything in. Delete it to start over with a blank device.">storage</span>
         <button class="opt-disk" type="button"></button>
       </span>
       <span class="opt">
         <span class="opt-label"
-          title="Whether a save writes this image down, so that the next launch boots it straight away instead of putting this panel up again.">autostart</span>
-        <button class="opt-remember" type="button" aria-pressed="true">[x]</button>
+          title="Next time, start this emulator straight away instead of asking again.">autostart</span>
+        <button class="opt-remember" type="button" aria-pressed="true" aria-label="autostart">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3.2 8.4L6.4 11.6L12.8 4.6" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
       </span>
       <span class="opt">
-        <span class="opt-label" title="How much RAM the guest is given, in MiB.">memory</span>
-        <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="guest memory in MiB" />
+        <span class="opt-label" title="How much memory to give this emulator.">memory</span>
+        <input class="opt-memory" type="number" inputmode="numeric" step="256" aria-label="memory" />
         <span class="opt-unit">MiB</span>
       </span>
       <span class="opt">
         <span class="opt-label"
-          title="The cloud environment a disk image is bound to. It is burnt in when an image is created, so this applies to the next new one rather than to an image that already exists.">env</span>
+          title="Which Dark Bio service this device talks to. It is fixed when a device is created, so a change here applies to the next new one.">environment</span>
         <span class="opt-envs"></span>
       </span>
       <span class="panel-error" role="alert"></span>
@@ -636,7 +659,7 @@
     <div class="info">
       <button class="info-toggle" type="button" aria-label="device info" aria-expanded="false">
         <span class="info-row" data-row="disk">
-          <span class="info-label">disk</span>
+          <span class="info-label">storage</span>
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="name" hidden>
@@ -652,7 +675,7 @@
           <span class="info-value"></span>
         </span>
         <span class="info-row" data-row="env" hidden>
-          <span class="info-label">env</span>
+          <span class="info-label">environment</span>
           <span class="info-value"></span>
         </span>
         <svg class="info-chevron" viewBox="0 0 12 7" fill="none" aria-hidden="true">
