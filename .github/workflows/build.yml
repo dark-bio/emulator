@@ -263,6 +263,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/fetch-firmware.sh
 
+      - name: Trace disk-image creation (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/dmg-diagnostics"
+          cp .github/scripts/hdiutil-debug.sh "$RUNNER_TEMP/dmg-diagnostics/hdiutil"
+          chmod +x "$RUNNER_TEMP/dmg-diagnostics/hdiutil"
+          echo "$RUNNER_TEMP/dmg-diagnostics" >> "$GITHUB_PATH"
+
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
         # clone works: tauri-build validates externalBin paths and resource globs
