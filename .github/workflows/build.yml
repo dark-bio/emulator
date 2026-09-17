@@ -273,7 +273,9 @@ jobs:
         # it into the .dmg, which is the only moment the copy inside the image
         # can be given a ticket. It stops there and never notarizes the .dmg,
         # which is the next step's job.
-        run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
+        # Verbose mode exposes the disk-image tool's error, which Tauri
+        # otherwise hides behind "error running bundle_dmg.sh".
+        run: cargo tauri build --verbose --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
 
       - name: Notarize and staple the disk image
         # The .app is already done, by the build. A .dmg is assessed on its own
