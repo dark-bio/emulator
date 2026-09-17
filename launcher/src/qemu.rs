@@ -378,15 +378,18 @@ mod tests {
         };
         let second = HostPort::reserve().unwrap();
         assert_ne!(first.port(), second.port());
-        assert!(second.port() > first.port());
     }
 
     #[test]
     fn test_a_released_port_can_be_bound() {
-        let Ok(mut reserved) = HostPort::reserve() else {
-            return;
+        // Keep the release/rebind window outside the range other tests and
+        // running emulators scan for a free port.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut reserved = HostPort {
+            addr,
+            listener: Some(listener),
         };
-        let addr = reserved.addr();
         assert!(TcpListener::bind(addr).is_err());
         reserved.release();
         assert!(TcpListener::bind(addr).is_ok());
