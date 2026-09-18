@@ -562,7 +562,11 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
         // A device that is not ready is one to wait for, so its mark is the
         // attention mark the house tools put on a locked or unpaired device.
         Value::Bool(state) if key == "ready" => {
-            let role = if *state { Role::Success } else { Role::Attention };
+            let role = if *state {
+                Role::Success
+            } else {
+                Role::Attention
+            };
             return theme.mark(role, if *state { "yes" } else { "no" });
         }
         _ => {}
