@@ -27,6 +27,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+use crate::bundle::Firmware;
 use crate::disk::{self, Reason};
 use crate::qemu::{GuestArch, HostPort};
 use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
@@ -39,8 +40,7 @@ pub(crate) struct Pending {
     pub(crate) boot: Boot,
     pub(crate) arch: GuestArch,
     pub(crate) host_port: HostPort,
-    pub(crate) kernel: PathBuf,
-    pub(crate) initrd: PathBuf,
+    pub(crate) firmware: Firmware,
     pub(crate) qemu_libs: Option<PathBuf>,
 }
 
@@ -298,8 +298,11 @@ mod tests {
             },
             arch: GuestArch::Amd64,
             host_port: HostPort::fixed("127.0.0.1:18181".parse::<SocketAddr>().unwrap()),
-            kernel: PathBuf::new(),
-            initrd: PathBuf::new(),
+            firmware: Firmware {
+                kernel: PathBuf::new(),
+                initrd: PathBuf::new(),
+                bundled: false,
+            },
             qemu_libs: None,
         };
         Launcher::booting(pending, Settings::load(dir).unwrap())

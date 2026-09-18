@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The QEMU command line: which system emulator to run, how the guest is
 //! wired up, and the qcow2 disk it boots from.
 //!
@@ -6,9 +12,14 @@
 //! one a packaged build ships a QEMU for. A cross-architecture guest always
 //! runs under TCG emulation and always needs a QEMU on `PATH`.
 //!
-//! The guest is minimal on purpose: virtio net and block, a serial console on
-//! stdio, no monitor and no graphics. One host port forwarded through SLIRP is
-//! the entire interface the UI and any host-side client talk to.
+//! The guest is minimal on purpose: virtio net and block, no monitor and no
+//! graphics. One host port forwarded through SLIRP is the entire interface the
+//! UI and any host-side client talk to.
+//!
+//! A bundled firmware boots with no serial device at all and `console=null`,
+//! the way the hardware does, so stdout stays empty. A firmware named with
+//! `--kernel` and `--initrd` keeps its console on stdout, which is where a
+//! developer booting their own build wants it.
 //!
 //! The guest side of that forward is fixed: the firmware listens on one port
 //! and has no way to be told otherwise. The host side is not, which is what
@@ -21,7 +32,7 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{bail, Context as _, Result};
 
-use crate::bundle::resolve_sidecar;
+use crate::bundle::{resolve_sidecar, Firmware};
 use crate::diagnostics::{self, log};
 use crate::orphan;
 use crate::platform::{
@@ -60,7 +71,7 @@ impl GuestArch {
 
     /// Serial console device of the guest: the arm virt machine exposes a
     /// PL011 at ttyAMA0, the x86 q35 machine a 16550 at ttyS0.
-    fn console(self) -> &'static str {
+    fn serial(self) -> &'static str {
         match self {
             Self::Arm64 => "ttyAMA0",
             Self::Amd64 => "ttyS0",
@@ -228,11 +239,9 @@ pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// Resolves the binary itself rather than using `tauri-plugin-shell`'s
 /// sidecar API, which exposes no pre-exec hook, and the Linux orphan
 /// protection needs one to arm `PR_SET_PDEATHSIG`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_qemu(
     arch: GuestArch,
-    kernel: &Path,
-    initrd: &Path,
+    firmware: &Firmware,
     disk: &Path,
     memory: u32,
     env: &str,
@@ -285,21 +294,26 @@ pub(crate) fn spawn_qemu(
         GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
     };
     cmd.args(accel_flags(native));
+    // A release boots the way the hardware does, with nothing on a console,
+    // and the firmware's own logging is compiled out of it anyway.
+    let console = if firmware.bundled {
+        "null"
+    } else {
+        arch.serial()
+    };
     cmd.arg("-m")
         .arg(memory.to_string())
         .args(["-nographic", "-kernel"])
-        .arg(kernel)
+        .arg(&firmware.kernel)
         .args(["-initrd"])
-        .arg(initrd)
+        .arg(&firmware.initrd)
         // rdinit=/sbin/init hands control to the firmware's init, which brings
         // up networking and the ArkOS services. arkos_env seeds the
         // environment binding the firmware burns into its OTP analog on first
         // boot.
         .args(["-append"])
         .arg(format!(
-            "console={} rdinit=/sbin/init arkos_env={}",
-            arch.console(),
-            env
+            "console={console} rdinit=/sbin/init arkos_env={env}"
         ))
         .args(["-netdev"])
         .arg(format!(
@@ -311,19 +325,17 @@ pub(crate) fn spawn_qemu(
             "file={},if=none,id=disk0,format=qcow2,discard=unmap,detect-zeroes=unmap",
             disk.display()
         ))
-        .args([
-            "-device",
-            "virtio-blk-pci,drive=disk0",
-            "-serial",
-            "stdio",
-            "-monitor",
-            "none",
-        ]);
+        .args(["-device", "virtio-blk-pci,drive=disk0", "-monitor", "none"]);
+
+    // -nographic would otherwise hand the serial device to stdio, so a build
+    // that wants no console has to say none. The developer's build keeps it on
+    // stdout.
+    cmd.args(["-serial", if firmware.bundled { "none" } else { "stdio" }]);
 
     // Captured rather than inherited so a packaged build, which has no console
     // to print to, can still put QEMU's own complaint in a crash report. The
     // caller must drain it or QEMU blocks once the pipe fills. Only stderr is
-    // taken: `-serial stdio` above is the guest console and needs stdout.
+    // taken: a serial console on stdio needs stdout.
     cmd.stderr(Stdio::piped());
 
     // From here it is QEMU that owns the port.

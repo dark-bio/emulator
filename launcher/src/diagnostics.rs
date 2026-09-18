@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! What the launcher knows about itself, kept ready for a crash report.
 //!
 //! A packaged build has nowhere to print: Windows release builds link as GUI
@@ -13,11 +19,21 @@
 //!
 //! [`report`] joins the two with an error chain into the text the user sees in
 //! the error window and can copy to us. Nothing is ever transmitted from here.
+//!
+//! Every launcher also keeps its lines in a file under the data directory,
+//! named by the port it holds, so that a second process can read what a
+//! running emulator has been up to. The port is the only identity a reader has
+//! before the registry answers. The file holds the launcher's own lines and
+//! QEMU's complaints; the guest never writes to it.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use anyhow::{Context as _, Result};
 
 /// Product name, matching `productName` in `tauri.conf.json`.
 const PRODUCT: &str = "Ark Emulator";
@@ -26,17 +42,47 @@ const PRODUCT: &str = "Ark Emulator";
 /// including QEMU's own complaints, short enough to paste into an email.
 const LOG_CAPACITY: usize = 200;
 
-/// Log ring and recorded facts, behind one lock because every writer touches
-/// them from a different thread (startup, the QEMU stderr reader, the wait
-/// thread) and none of it is hot.
+/// Name of the directory the log files live in, under the data directory.
+const LOGS: &str = "logs";
+
+/// Log ring, log file and recorded facts, behind one lock because every writer
+/// touches them from a different thread (startup, the QEMU stderr reader, the
+/// wait thread) and none of it is hot.
 static STATE: Mutex<State> = Mutex::new(State {
     log: VecDeque::new(),
     facts: Vec::new(),
+    file: None,
 });
 
 struct State {
     log: VecDeque<String>,
     facts: Vec<(&'static str, String)>,
+    file: Option<File>,
+}
+
+/// The directory every launcher writes its log file into.
+pub(crate) fn logs_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(LOGS)
+}
+
+/// Where the launcher holding `port` writes its log.
+pub(crate) fn log_path(data_dir: &Path, port: u16) -> PathBuf {
+    logs_dir(data_dir).join(format!("{port}.log"))
+}
+
+/// Start writing this launcher's lines to its own log file as well, replacing
+/// what an earlier launcher on the same port left there.
+pub(crate) fn log_to(data_dir: &Path, port: u16) -> Result<()> {
+    let dir = logs_dir(data_dir);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("could not create the log directory {}", dir.display()))?;
+    let path = log_path(data_dir, port);
+    let file =
+        File::create(&path).with_context(|| format!("could not write {}", path.display()))?;
+    if let Ok(mut state) = STATE.lock() {
+        state.file = Some(file);
+    }
+    Ok(())
 }
 
 /// Print a line to stderr and keep it for the crash report. Takes the same
@@ -50,12 +96,17 @@ macro_rules! log {
 }
 pub(crate) use log;
 
-/// Add an already-formatted line to the ring, dropping the oldest once full.
-/// Called by [`log!`]; use that instead.
+/// Add an already-formatted line to the ring and the log file, dropping the
+/// oldest ring entry once full. Called by [`log!`]; use that instead.
 pub(crate) fn push(line: String) {
     let Ok(mut state) = STATE.lock() else {
         return;
     };
+    if let Some(file) = state.file.as_mut() {
+        // A log file that cannot be written is not a reason to stop logging,
+        // and the line is still on stderr and in the ring.
+        let _ = writeln!(file, "{line}");
+    }
     if state.log.len() == LOG_CAPACITY {
         state.log.pop_front();
     }

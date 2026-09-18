@@ -30,15 +30,31 @@ use crate::platform::strip_verbatim_prefix;
 use crate::qemu::GuestArch;
 use crate::Boot;
 
+/// The firmware a guest boots, and where it came from.
+pub(crate) struct Firmware {
+    /// Kernel image the guest boots.
+    pub(crate) kernel: PathBuf,
+
+    /// Initramfs that goes with it.
+    pub(crate) initrd: PathBuf,
+
+    /// Whether this build carries the pair itself, rather than being pointed
+    /// at one with `--kernel` and `--initrd`. A bundled firmware is a release
+    /// and boots like the hardware does, silently.
+    pub(crate) bundled: bool,
+}
+
 /// Resolve the kernel/initrd paths to boot. Explicit `--kernel`/`--initrd`
 /// take priority, and are the only option in a source build.
-pub(crate) fn resolve_firmware(
-    app: &tauri::App,
-    boot: &Boot,
-    arch: GuestArch,
-) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn resolve_firmware(app: &tauri::App, boot: &Boot, arch: GuestArch) -> Result<Firmware> {
     match (&boot.kernel, &boot.initrd) {
-        (Some(kernel), Some(initrd)) => return Ok((kernel.clone(), initrd.clone())),
+        (Some(kernel), Some(initrd)) => {
+            return Ok(Firmware {
+                kernel: kernel.clone(),
+                initrd: initrd.clone(),
+                bundled: false,
+            })
+        }
         (None, None) => {}
         _ => bail!("--kernel and --initrd must be passed together"),
     }
@@ -62,7 +78,11 @@ pub(crate) fn resolve_firmware(
             );
         }
     }
-    Ok((kernel, initrd))
+    Ok(Firmware {
+        kernel,
+        initrd,
+        bundled: true,
+    })
 }
 
 /// Resolve this app's own data directory, creating it if missing. It holds

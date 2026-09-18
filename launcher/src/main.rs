@@ -287,6 +287,13 @@ fn prepare(
     diagnostics::record("Host address", host_port.addr().to_string());
 
     let data_dir = app_data_dir(app)?;
+
+    // Best effort, and early, so that everything a failing startup says lands
+    // in the file a second process can read.
+    if let Err(e) = diagnostics::log_to(&data_dir, host_port.port()) {
+        log!("[launcher] could not open a log file: {e:#}");
+    }
+
     let settings = Settings::load(&data_dir)?;
     diagnostics::record_path("Settings", settings.path());
 
@@ -298,9 +305,9 @@ fn prepare(
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
 
-    let (kernel, initrd) = resolve_firmware(app, &boot, arch)?;
-    diagnostics::record_path("Kernel", &kernel);
-    diagnostics::record_path("Initrd", &initrd);
+    let firmware = resolve_firmware(app, &boot, arch)?;
+    diagnostics::record_path("Kernel", &firmware.kernel);
+    diagnostics::record_path("Initrd", &firmware.initrd);
 
     let qemu_libs = resolve_qemu_libs(app);
 
@@ -318,8 +325,7 @@ fn prepare(
         boot,
         arch,
         host_port,
-        kernel,
-        initrd,
+        firmware,
         qemu_libs,
     };
     Ok((pending, settings, resolved))
@@ -337,8 +343,7 @@ fn launch(
     diagnostics::record_path("Disk", disk);
     let mut child = spawn_qemu(
         pending.arch,
-        &pending.kernel,
-        &pending.initrd,
+        &pending.firmware,
         disk,
         memory,
         env,
