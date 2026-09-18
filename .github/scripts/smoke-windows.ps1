@@ -34,18 +34,20 @@ function Write-Log {
 }
 
 # Runs one command of the emulator's own and answers with its exit code, having
-# written its result and its events where Write-Log can find them.
+# written its result and its events where Write-Log can find them. The wait is
+# on that one process: -Wait would also wait for its descendants, and `start`
+# leaves the emulator it booted running on purpose.
 function Invoke-Emulator([string[]]$commandArgs, [switch]$Append) {
     $startArgs = @{
         FilePath               = $Executable
         ArgumentList           = $commandArgs
         PassThru               = $true
-        Wait                   = $true
         NoNewWindow            = $true
         RedirectStandardOutput = "$log.part"
         RedirectStandardError  = "$events.part"
     }
     $proc = Start-Process @startArgs
+    $proc.WaitForExit()
     foreach ($pair in @(@($log, "$log.part"), @($events, "$events.part"))) {
         if (Test-Path $pair[1]) {
             if ($Append) { Get-Content $pair[1] | Add-Content $pair[0] }
