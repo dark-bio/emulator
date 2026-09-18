@@ -3,6 +3,13 @@ name = "launcher"
 version = "0.1.0"
 edition = "2021"
 
+# The executable is what people and agents type, so it carries the product's
+# name rather than the crate's. Every bundle and the Homebrew wrapper point at
+# this name.
+[[bin]]
+name = "ark-emulator"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The settings panel: what it is shown, and what it is allowed to do.
 //!
 //! The panel is the same tray that hangs off the device's bottom edge, grown to
@@ -24,13 +30,13 @@ use serde::Serialize;
 use crate::disk::{self, Reason};
 use crate::qemu::{GuestArch, HostPort};
 use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
-use crate::Config;
+use crate::Boot;
 
 /// Everything the guest needs to be started, held until it is. Taken by the
 /// start, so a second press of the button has nothing to work with and no
 /// second QEMU can be spawned.
 pub(crate) struct Pending {
-    pub(crate) cfg: Config,
+    pub(crate) boot: Boot,
     pub(crate) arch: GuestArch,
     pub(crate) host_port: HostPort,
     pub(crate) kernel: PathBuf,
@@ -128,13 +134,13 @@ impl Launcher {
     /// form rather than locking it, and only survives untouched on a launch
     /// that never puts the form up.
     pub(crate) fn effective(&self) -> (u32, String) {
-        let cfg = self.pending.as_ref().map(|pending| &pending.cfg);
-        let memory = cfg
-            .and_then(|cfg| cfg.memory)
+        let boot = self.pending.as_ref().map(|pending| &pending.boot);
+        let memory = boot
+            .and_then(|boot| boot.memory)
             .or_else(|| self.settings.memory())
             .unwrap_or(DEFAULT_MEMORY);
-        let env = cfg
-            .and_then(|cfg| cfg.env.clone())
+        let env = boot
+            .and_then(|boot| boot.env.clone())
             .or_else(|| self.settings.env().map(str::to_owned))
             .unwrap_or_else(|| DEFAULT_ENV.to_owned());
         (memory, env)
@@ -281,14 +287,14 @@ mod tests {
     /// A launcher that has not started its guest, carrying the flags given.
     fn waiting(dir: &Path, memory: Option<u32>, env: Option<&str>) -> Launcher {
         let pending = Pending {
-            cfg: Config {
-                kernel: None,
-                initrd: None,
-                arch: None,
+            boot: Boot {
                 disk: None,
                 env: env.map(str::to_owned),
-                host_addr: None,
                 memory,
+                arch: None,
+                kernel: None,
+                initrd: None,
+                host_addr: None,
             },
             arch: GuestArch::Amd64,
             host_port: HostPort::fixed("127.0.0.1:18181".parse::<SocketAddr>().unwrap()),

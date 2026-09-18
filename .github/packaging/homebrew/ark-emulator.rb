@@ -17,5 +17,5 @@ cask "ark-emulator" do
   # The launcher resolves its bundled QEMU and firmware from the path it was
   # started by, which a plain symlink would break.
   command_wrapper "ark-emulator",
-                  executable: "#{appdir}/Ark Emulator.app/Contents/MacOS/launcher"
+                  executable: "#{appdir}/Ark Emulator.app/Contents/MacOS/ark-emulator"
 end

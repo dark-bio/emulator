@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Locating what a packaged build ships alongside the launcher: firmware
 //! images, the QEMU sidecar binaries, and QEMU's shared libraries and datadir.
 //!
@@ -22,16 +28,16 @@ use tauri::{path::BaseDirectory, Manager};
 use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
 use crate::qemu::GuestArch;
-use crate::Config;
+use crate::Boot;
 
 /// Resolve the kernel/initrd paths to boot. Explicit `--kernel`/`--initrd`
 /// take priority, and are the only option in a source build.
 pub(crate) fn resolve_firmware(
     app: &tauri::App,
-    cfg: &Config,
+    boot: &Boot,
     arch: GuestArch,
 ) -> Result<(PathBuf, PathBuf)> {
-    match (&cfg.kernel, &cfg.initrd) {
+    match (&boot.kernel, &boot.initrd) {
         (Some(kernel), Some(initrd)) => return Ok((kernel.clone(), initrd.clone())),
         (None, None) => {}
         _ => bail!("--kernel and --initrd must be passed together"),

@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Spawns QEMU with the firmware image and hosts a Tauri window for the
 //! emulator UI. Window and QEMU are lifecycle-bound, so closing either tears
 //! down the other on every platform, even on a hard kill:
@@ -71,48 +77,64 @@ use panel::{Launcher, Pending};
 use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
 use settings::Settings;
 
-/// Launch configuration parsed from command-line arguments.
+/// The command line as parsed.
 #[derive(Parser)]
-#[command(about = "Ark device emulator: boots ArkOS in QEMU behind a small UI.")]
-struct Config {
-    /// Path to the kernel image (vmlinuz). Defaults to the firmware bundled
-    /// with this build for --arch. Must be given together with --initrd.
-    #[arg(long)]
-    kernel: Option<PathBuf>,
+#[command(
+    name = "ark-emulator",
+    about = "Ark Emulator: boots the Ark firmware in a virtual machine on this computer"
+)]
+struct Cli {
+    /// Everything a guest needs to be booted.
+    #[command(flatten)]
+    boot: Boot,
+}
 
-    /// Path to the initramfs (.gz). See --kernel.
-    #[arg(long)]
-    initrd: Option<PathBuf>,
+/// What an emulator boots from, shared by the bare run and by the command that
+/// boots one in the background.
+#[derive(clap::Args)]
+pub(crate) struct Boot {
+    /// Image to boot, created if missing [default: the remembered one]
+    ///
+    /// Read for this run only. It neither consults nor updates the settings
+    /// file, so a one-off boot from another image leaves the remembered choice
+    /// alone.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) disk: Option<PathBuf>,
 
-    /// CPU architecture of the firmware artifacts; defaults to the host's
-    /// architecture.
-    #[arg(long, value_enum)]
-    arch: Option<GuestArch>,
+    /// Cloud environment for a new image: release, staging, develop [default: remembered, else release]
+    ///
+    /// An existing image keeps the environment it was created with, since the
+    /// firmware burns that binding in on its first boot.
+    #[arg(long, value_name = "ENV", value_parser = settings::ENVS)]
+    pub(crate) env: Option<String>,
 
-    /// Path to the backing disk image; auto-allocated if it does not exist.
-    /// Defaults to the image remembered in the settings file, which the
-    /// launcher asks for the first time it needs one.
-    #[arg(long)]
-    disk: Option<PathBuf>,
+    /// Guest RAM [default: remembered, else 8192]
+    ///
+    /// In MiB. Lower it on a machine with little memory to spare.
+    #[arg(long, value_name = "MIB")]
+    pub(crate) memory: Option<u32>,
 
-    /// Cloud environment the device gets bound to when its disk is first
-    /// created; ignored for existing disks (the binding is burnt in). Defaults
-    /// to the environment remembered in the settings file, then to release.
-    /// Overrides the settings file without changing it.
-    #[arg(long, value_parser = settings::ENVS)]
-    env: Option<String>,
+    /// Firmware architecture: arm64, amd64 [default: this computer's]
+    ///
+    /// Only this computer's own architecture gets hardware acceleration, and
+    /// it is the only one a packaged build carries firmware and QEMU for.
+    #[arg(long, value_name = "ARCH", value_enum)]
+    pub(crate) arch: Option<GuestArch>,
 
-    /// Host address that SLIRP forwards into the guest's port. Defaults to the
-    /// first free loopback port from 18181 up, so that several emulators can
-    /// run at once without being told about each other.
-    #[arg(long)]
-    host_addr: Option<SocketAddr>,
+    /// Kernel image, with --initrd; a source build has no bundled firmware
+    #[arg(long, value_name = "PATH")]
+    pub(crate) kernel: Option<PathBuf>,
 
-    /// Guest RAM in MiB. Lower it on memory-constrained hosts. Defaults to the
-    /// amount remembered in the settings file, then to 8192. Overrides the
-    /// settings file without changing it.
-    #[arg(long)]
-    memory: Option<u32>,
+    /// Initramfs, with --kernel
+    #[arg(long, value_name = "PATH")]
+    pub(crate) initrd: Option<PathBuf>,
+
+    /// Loopback address forwarded into the guest [default: first free port from 18181]
+    ///
+    /// The guest's own port is fixed, so this is the host side of the forward
+    /// and the number an emulator is known by.
+    #[arg(long, value_name = "ADDR")]
+    pub(crate) host_addr: Option<SocketAddr>,
 }
 
 /// Label of the device face window, hidden until startup succeeds.
@@ -127,12 +149,12 @@ const STAGGER_STEP: u32 = 32;
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn main() {
-    let cfg: Config = Config::parse();
+    let cli = Cli::parse();
 
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
     // into `start` with every other one.
-    let host_port = match cfg.host_addr {
+    let host_port = match cli.boot.host_addr {
         Some(addr) => Ok(HostPort::fixed(addr)),
         None => HostPort::reserve(),
     };
@@ -162,7 +184,9 @@ fn main() {
             panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) = platform::install_menus(app).and_then(|()| start(app, cfg, host_port)) {
+            if let Err(err) =
+                platform::install_menus(app).and_then(|()| start(app, cli.boot, host_port))
+            {
                 error_dialog::show(app.handle(), "could not start", err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
@@ -187,8 +211,8 @@ fn main() {
 /// end up on the same reporting path. That includes resolving the guest
 /// architecture and reserving a host port, neither of which needs a Tauri app
 /// but both of which would otherwise be failures with nowhere to be displayed.
-fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<()> {
-    let (pending, settings, resolved) = prepare(app, cfg, host_port)?;
+fn start(app: &tauri::App, boot: Boot, host_port: Result<HostPort>) -> Result<()> {
+    let (pending, settings, resolved) = prepare(app, boot, host_port)?;
     let mut launcher = Launcher::booting(pending, settings);
     let slot = launcher.slot();
 
@@ -197,7 +221,7 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            if pending.cfg.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
+            if pending.boot.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())
                 })?;
@@ -223,12 +247,12 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
 /// read out of, and that decision.
 fn prepare(
     app: &tauri::App,
-    cfg: Config,
+    boot: Boot,
     host_port: Result<HostPort>,
 ) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
     // acceleration, so it is the default.
-    let arch = match cfg.arch {
+    let arch = match boot.arch {
         Some(arch) => arch,
         None => match std::env::consts::ARCH {
             "aarch64" => GuestArch::Arm64,
@@ -253,14 +277,14 @@ fn prepare(
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
 
-    let (kernel, initrd) = resolve_firmware(app, &cfg, arch)?;
+    let (kernel, initrd) = resolve_firmware(app, &boot, arch)?;
     diagnostics::record_path("Kernel", &kernel);
     diagnostics::record_path("Initrd", &initrd);
 
     let qemu_libs = resolve_qemu_libs(app);
 
     let resolved = disk::decide(
-        cfg.disk.as_deref(),
+        boot.disk.as_deref(),
         settings.disk(),
         settings.autostart(),
         &booted,
@@ -270,7 +294,7 @@ fn prepare(
     )?;
 
     let pending = Pending {
-        cfg,
+        boot,
         arch,
         host_port,
         kernel,

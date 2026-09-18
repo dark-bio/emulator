@@ -383,7 +383,7 @@ jobs:
         run: |
           $portableDir = "target/release/portable/Ark Emulator"
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-          Copy-Item "target/release/launcher.exe" (Join-Path $portableDir "Ark Emulator.exe")
+          Copy-Item "target/release/ark-emulator.exe" (Join-Path $portableDir "Ark Emulator.exe")
           Copy-Item "target/release/qemu-system-guest.exe" $portableDir
           Copy-Item "target/release/qemu-img.exe" $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
