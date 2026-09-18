@@ -43,11 +43,12 @@ port and 404 when it does not.
 `version` is 1 and changes only when something breaks. Adding a field or a
 route does not, so read what you know and ignore the rest.
 
-`port` identifies the emulator and is what a client dials: `ws://127.0.0.1:
-PORT/v1/usb` is the Ark's own bus, `/v1/hw` the device face. `disk` is the
-image's file name and `disk_id` an opaque digest of where it lives, which lets
-two launchers agree on an image without anybody publishing a path. No path is
-ever published, since any page in any browser can read a loopback port.
+`port` identifies the emulator and is what a client dials.
+`ws://127.0.0.1:PORT/v1/usb` is the Ark's own bus and `/v1/hw` the device
+face. `disk` is the image's file name and `disk_id` an opaque digest of where
+it lives, which lets two launchers agree on an image without anybody
+publishing a path. No path is ever published, since any page in any browser
+can read a loopback port.
 
 `ready` says the firmware has accepted a client. `env`, `name`, `serial` and
 `expiry` are absent until the device has reported them, and they are what the

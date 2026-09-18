@@ -43,12 +43,12 @@ cannot keep the two streams apart, run with -q --json.
 ## Checking state
 
 `ark-emulator list` shows every running emulator with its port, image, ready
-state and what the firmware has reported about the device. `ark-emulator
-info` shows the bundled firmware, QEMU, whether hardware acceleration is
-available, and where the data directory, the settings file and the logs are.
-Every emulator writes its launcher log to a file under the data directory,
-named by port; start --json and list --json name it, and a failed start
-quotes its tail. The device itself prints nothing.
+state and what the firmware has reported about the device.
+`ark-emulator info` shows the bundled firmware, QEMU, whether hardware
+acceleration is available, and where the data directory, the settings file
+and the logs are. Every emulator writes its launcher log to a file under the
+data directory, named by port; start --json and list --json name it, and a
+failed start quotes its tail. The device itself prints nothing.
 
 ## After it boots
 

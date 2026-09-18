@@ -52,12 +52,12 @@ The codes are stable.
 - io: a file could not be read or written. The message names it. Exit 1.
 - firmware-missing: this build carries no firmware for that architecture.
   Pass --kernel and --initrd. Exit 1.
-- qemu-missing: there is no QEMU to run. Install one, or use a packaged
-  build, which carries its own. Exit 1.
 - port-exhausted: every port in the range is taken. Pass --host-addr to name
   one, or stop an emulator. Exit 1.
 - stopped-unexpectedly: QEMU died while the emulator was starting. The
   message carries the tail of the launcher's log. Exit 1.
+- could-not-start: a bare run could not bring the emulator up. The message is
+  the report the error window would have shown. Exit 1.
 - disk-busy: an emulator is booted from that image. Stop it first. Exit 3.
 - no-emulator: nothing is running on that port. `ark-emulator list` shows
   what is. Exit 3.
