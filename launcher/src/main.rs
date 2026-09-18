@@ -1,4 +1,4 @@
-// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// ark-emulator: emulated Ark enclave for development and demos
 // Copyright 2026 Dark Bio AG. All rights reserved.
 //
 // Use of this source code is governed by a BSD-style
@@ -82,7 +82,7 @@ use settings::Settings;
 
 /// What the tool is, which opens every help page.
 const ABOUT: &str =
-    "Ark Emulator: boots the Ark firmware in a virtual machine on this computer\n\n\
+    "Ark Emulator: emulated Ark enclave for development and demos\n\n\
      An emulated Ark is the real firmware running in QEMU behind a small window \
      that stands in for the device's face. It exists for development and demos. \
      It is not a vault: everything lives in one plain disk image on this \

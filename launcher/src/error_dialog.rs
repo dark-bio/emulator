@@ -1,4 +1,4 @@
-// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// ark-emulator: emulated Ark enclave for development and demos
 // Copyright 2026 Dark Bio AG. All rights reserved.
 //
 // Use of this source code is governed by a BSD-style
