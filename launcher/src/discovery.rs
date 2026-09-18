@@ -317,8 +317,8 @@ mod tests {
     #[test]
     fn test_disk_id_is_stable_and_distinguishes_images() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let a = tmp.path().join("a.img");
-        let b = tmp.path().join("b.img");
+        let a = tmp.path().join("a.ark");
+        let b = tmp.path().join("b.ark");
         assert_eq!(disk_id(&a), disk_id(&a));
         assert_ne!(disk_id(&a), disk_id(&b));
     }
@@ -328,8 +328,8 @@ mod tests {
     fn test_disk_id_distinguishes_paths_that_are_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt as _;
-        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.img"));
-        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.img"));
+        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.ark"));
+        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.ark"));
         assert_ne!(disk_id(a), disk_id(b));
     }
 
@@ -337,9 +337,9 @@ mod tests {
     fn test_disk_id_agrees_across_spellings_of_one_image() {
         // Canonicalization needs the file to exist.
         let tmp = tempfile::TempDir::new().unwrap();
-        let direct = tmp.path().join("ark.img");
+        let direct = tmp.path().join("ark.ark");
         std::fs::write(&direct, b"").unwrap();
-        let indirect = tmp.path().join("sub").join("..").join("ark.img");
+        let indirect = tmp.path().join("sub").join("..").join("ark.ark");
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         assert_eq!(disk_id(&direct), disk_id(&indirect));
     }

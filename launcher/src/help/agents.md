@@ -59,5 +59,9 @@ login at the Ark Hub, then `ark pair` and `ark unlock` need the owner's phone.
 The firmware inside the emulator is the build bundled with this app.
 `ark firmware update` is unsupported on an emulator; `ark-emulator --version`
 names the bundled build, and a newer emulator release carries newer firmware.
+An emulated Ark's attested identity expires 30 days after `ark enroll`, and
+the cloud refuses an expired one. `ark-emulator list` and `ark status` show
+the day. After it, wipe the image and start a fresh device, which is the
+point: nothing worth keeping should build up inside an emulator.
 Worked apps to run on it, in Rust, Go, C and Python, are at
 https://github.com/dark-bio/examples.

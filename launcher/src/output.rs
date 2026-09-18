@@ -566,6 +566,8 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     }
     let text = scalar(value);
     match key {
+        // The day is what a reader scans for; the document keeps the instant.
+        "expiry" if text.len() >= 10 => text[..10].to_owned(),
         "env" => theme.paint(
             match text.as_str() {
                 "release" => Role::Accent,

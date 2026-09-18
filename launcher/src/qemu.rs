@@ -372,7 +372,7 @@ mod tests {
     #[ignore = "requires qemu-img"]
     fn test_create_disk_replaces_an_existing_image() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let disk = tmp.path().join("disk.img");
+        let disk = tmp.path().join("disk.ark");
         std::fs::write(&disk, b"old contents").unwrap();
         create_disk(&disk, None).unwrap();
         let first = std::fs::read(&disk).unwrap();
@@ -393,7 +393,7 @@ mod tests {
     #[ignore = "requires qemu-img"]
     fn test_create_disk_reports_an_invalid_destination() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let disk = tmp.path().join("missing-parent/disk.img");
+        let disk = tmp.path().join("missing-parent/disk.ark");
         let err = create_disk(&disk, None).unwrap_err().to_string();
         assert!(err.contains("qemu-img create failed"), "{err}");
         assert!(!disk.exists());

@@ -416,7 +416,7 @@ mod tests {
     fn instance(port: u16) -> Instance {
         Instance {
             port,
-            disk: "ark-disk.img".into(),
+            disk: "emulator.ark".into(),
             disk_id: "0123abcd".into(),
             ready: false,
             env: None,

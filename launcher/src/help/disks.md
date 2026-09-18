@@ -21,9 +21,10 @@ The launcher keeps what it writes in one directory per platform:
     Windows  %APPDATA%\bio.dark.emulator
 
 `ark-emulator info` prints the one this build uses, along with the settings
-file and the log directory inside it. An image the launcher allocates for
-itself lives there too; an image you name with --disk lives wherever you put
-it.
+file and the log directory inside it. The image the launcher allocates for
+itself, `emulator.ark`, lives there too; an image you name with --disk lives
+wherever you put it. Any name works, and the window's own picker uses the
+`.ark` extension so the files are easy to tell apart.
 
 ## What is remembered
 
@@ -45,6 +46,15 @@ the firmware first boots on it. The binding is burnt in and --env has no
 effect on an image that already exists. Since it is read back from the
 firmware, a start can only warn about a mismatch once the device is up. To
 move to another environment, create a new image.
+
+## Identity
+
+An emulated Ark starts with a self-signed identity. `ark enroll` gives it an
+attested one from the cloud, valid for 30 days, after which the cloud refuses
+the device. `ark-emulator list` shows the day it expires, and so does
+`ark status`. Copying the image copies the identity and its expiry with it.
+A device past its date is wiped and started again as a fresh one; an
+emulator holds nothing worth keeping that long.
 
 ## Wiping
 

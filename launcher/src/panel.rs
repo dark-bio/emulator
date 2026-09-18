@@ -350,11 +350,11 @@ mod tests {
 
         let mut external = Settings::load(tmp.path()).unwrap();
         external
-            .apply(Some(Path::new("saved.img")), false, 2048, "staging")
+            .apply(Some(Path::new("saved.ark")), false, 2048, "staging")
             .unwrap();
         let state = launcher.state().unwrap();
         assert_eq!(state.mode, "running");
-        assert_eq!(state.path, "saved.img");
+        assert_eq!(state.path, "saved.ark");
         assert!(!state.autostart);
         assert_eq!(state.memory, 2048);
         assert_eq!(state.env, "staging");
@@ -390,7 +390,7 @@ mod tests {
         launcher.ask(None, Reason::FirstRun);
         Settings::load(tmp.path())
             .unwrap()
-            .apply(Some(Path::new("other.img")), false, 2048, "staging")
+            .apply(Some(Path::new("other.ark")), false, 2048, "staging")
             .unwrap();
         let state = launcher.state().unwrap();
         assert_eq!(state.mode, "startup");
@@ -406,8 +406,8 @@ mod tests {
         let state = State {
             mode: "startup",
             note: "why".to_owned(),
-            path: "/tmp/a.img".to_owned(),
-            name: "a.img".to_owned(),
+            path: "/tmp/a.ark".to_owned(),
+            name: "a.ark".to_owned(),
             autostart: true,
             memory: 4096,
             env: "develop".to_owned(),

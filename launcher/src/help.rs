@@ -191,14 +191,14 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
         "start" => (
             "a disk image nobody has booted, and a free loopback port from 18181 up",
             "about 10 s with hardware acceleration, minutes without; --timeout bounds the wait",
-            "locator, disk, created, started, env, ready; JSON adds port, path, disk_id, log",
+            "locator, disk, created, started, env, ready, expires; JSON adds port, path, disk_id, log and the full expiry",
             "0 ready; 1 disk, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting",
-            "ark-emulator start\nark-emulator start --env develop --disk ~/arks/dev.img --json",
+            "ark-emulator start\nark-emulator start --env develop --disk ~/arks/dev.ark --json",
         ),
         "list" => (
             "nothing; no registry means no emulators",
             "immediate",
-            "port, disk, ready, env, name, serial; JSON adds locator, disk_id, expiry, log",
+            "port, disk, ready, env, name, serial, expires; JSON adds locator, disk_id, log and the full expiry",
             "0 done; 3 registry answered but could not be read",
             "ark-emulator list\nark-emulator list --json",
         ),
@@ -214,7 +214,7 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "immediate",
             "path, deleted, freed; JSON uses freed_bytes",
             "0 done; 1 confirmation or file problem; 2 usage; 3 booted by an emulator",
-            "ark-emulator wipe ~/arks/dev.img\nark-emulator wipe ~/arks/dev.img --yes",
+            "ark-emulator wipe ~/arks/dev.ark\nark-emulator wipe ~/arks/dev.ark --yes",
         ),
         "info" => (
             "nothing",
@@ -235,7 +235,7 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "the window opens at once; the device accepts clients about 10 s later with hardware acceleration, minutes without",
             "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
             "0 window closed; 1 could not start; 2 usage",
-            "ark-emulator\nark-emulator --env develop --disk ~/arks/dev.img",
+            "ark-emulator\nark-emulator --env develop --disk ~/arks/dev.ark",
         ),
     };
     [

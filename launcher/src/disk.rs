@@ -45,7 +45,7 @@ use crate::diagnostics::log;
 use crate::discovery::disk_id;
 
 /// Name used when an unattended launch needs to allocate an image.
-pub(crate) const DEFAULT_DISK: &str = "ark-disk.img";
+pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
 
 /// The image this run settled on, so that the device face can name it.
 static BOOTED: OnceLock<PathBuf> = OnceLock::new();
@@ -192,7 +192,7 @@ pub(crate) fn decide(
         if !booted.contains_key(&disk_id(&default)) {
             return Ok(Resolved::Boot(default));
         }
-        return Ok(Resolved::Boot(dir.join(format!("ark-disk-{port}.img"))));
+        return Ok(Resolved::Boot(dir.join(format!("emulator-{port}.ark"))));
     }
 
     Ok(Resolved::Ask {
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_opening_a_missing_image_does_not_create_it() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("missing.img");
+        let disk = tmp.path().join("missing.ark");
         let err = require_existing(&disk).unwrap_err().to_string();
         assert!(err.contains("Open"), "{err}");
         assert!(err.contains("New"), "{err}");
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_replacing_an_image_in_use_is_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("running.img");
+        let disk = tmp.path().join("running.ark");
         touch(&disk);
         let booted = Booted::from([(disk_id(&disk), PORT)]);
         let err = check_available(&disk, None, &booted)
@@ -376,15 +376,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("this window"), "{err}");
-        assert!(check_available(&tmp.path().join("new.img"), Some(&disk), &booted).is_ok());
+        assert!(check_available(&tmp.path().join("new.ark"), Some(&disk), &booted).is_ok());
     }
 
     #[cfg(unix)]
     #[test]
     fn test_an_alias_of_a_running_image_is_also_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("running.img");
-        let alias = tmp.path().join("alias.img");
+        let disk = tmp.path().join("running.ark");
+        let alias = tmp.path().join("alias.ark");
         touch(&disk);
         std::os::unix::fs::symlink(&disk, &alias).unwrap();
         assert!(check_available(&alias, Some(&disk), &Booted::new()).is_err());
@@ -395,8 +395,8 @@ mod tests {
     #[test]
     fn test_an_explicit_disk_wins() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("explicit.img");
-        let remembered = tmp.path().join("remembered.img");
+        let disk = tmp.path().join("explicit.ark");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn test_an_explicit_disk_that_is_booted_is_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("explicit.img");
+        let disk = tmp.path().join("explicit.ark");
         touch(&disk);
         let booted = Booted::from([(disk_id(&disk), 18181)]);
 
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_boots_without_asking() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn test_autostart_disabled_offers_the_remembered_disk() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn test_unattended_launch_boots_with_autostart_disabled() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_that_is_gone_asks() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
 
         let resolved = decide(
             None,
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_that_is_booted_asks() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
         let booted = Booted::from([(disk_id(&remembered), 18181)]);
 
@@ -573,6 +573,6 @@ mod tests {
         let Resolved::Boot(disk) = resolved else {
             panic!("an unattended launch asked anyway");
         };
-        assert_eq!(disk, tmp.path().join(format!("ark-disk-{PORT}.img")));
+        assert_eq!(disk, tmp.path().join(format!("emulator-{PORT}.ark")));
     }
 }

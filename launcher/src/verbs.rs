@@ -282,6 +282,7 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
             ("ENV", "env"),
             ("NAME", "name"),
             ("SERIAL", "serial"),
+            ("EXPIRES", "expiry"),
         ],
     );
     Ok(())
@@ -542,6 +543,7 @@ fn report(
             ("Started", "started"),
             ("Env", "env"),
             ("Ready", "ready"),
+            ("Expires", "expiry"),
         ],
     );
     Ok(())
@@ -605,7 +607,7 @@ fn choose(
     if !running.contains_key(&disk_id(&default)) {
         return Ok(default);
     }
-    settle(&paths.data.join(format!("ark-disk-{port}.img")))
+    settle(&paths.data.join(format!("emulator-{port}.ark")))
 }
 
 /// An image's path with the directories above it resolved, so that this
@@ -875,7 +877,7 @@ mod tests {
         let chosen = choose(None, &settings, &paths, PORT, &booted).unwrap();
         assert_eq!(
             chosen,
-            settle(&tmp.path().join("ark-disk-18182.img")).unwrap()
+            settle(&tmp.path().join("emulator-18182.ark")).unwrap()
         );
     }
 
