@@ -28,6 +28,8 @@ use crate::Global;
 pub(crate) enum Role {
     /// Content whose meaning needs no emphasis.
     Default,
+    /// Section titles, help headings and table headers.
+    Heading,
     /// Completed or verified states.
     Success,
     /// Warnings and states needing action.
@@ -139,6 +141,7 @@ impl Theme {
             Role::Muted => (124, 128, 152),
             Role::Staging => (147, 153, 178),
             Role::Develop => (108, 112, 134),
+            Role::Heading => return Style::new().bold(),
             Role::Default => return Style::new(),
         };
         // The three quiet roles stay plain so that what they sit beside reads
@@ -198,6 +201,18 @@ impl Theme {
             tail
         };
         console::truncate_str(text, width, tail).into_owned()
+    }
+
+    /// The same palette, handed to clap for the help it generates.
+    pub(crate) fn clap(&self) -> clap::builder::styling::Styles {
+        clap::builder::styling::Styles::plain()
+            .header(self.style(Role::Heading))
+            .usage(self.style(Role::Heading))
+            .literal(self.style(Role::Accent))
+            .placeholder(self.style(Role::Muted))
+            .error(self.style(Role::Failure))
+            .valid(self.style(Role::Success))
+            .invalid(self.style(Role::Attention))
     }
 
     /// Paint what backticks enclose as a command the reader may run. An

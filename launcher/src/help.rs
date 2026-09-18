@@ -1,0 +1,462 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//! The manual, which is the only thing an agent plans from.
+//!
+//! Every command carries its whole contract: what has to be true first, how
+//! long to expect it to take, what it prints and what it can exit with, then
+//! two examples. `-h` is the scan of that page, `--help` and
+//! `ark-emulator help <command>` are the contract, and the topics below are
+//! the reference a reader arrives at from either.
+//!
+//! Help prints text on stdout whatever the run asked for, since a caller that
+//! wanted JSON still has to read this.
+
+use clap::CommandFactory as _;
+
+use crate::output::{self, Color, Error, Role, Theme};
+use crate::Cli;
+
+/// The topics this build carries, in the order the manual prints them.
+const TOPICS: [&str; 4] = ["agents", "output", "disks", "registry"];
+
+/// The options a command takes whatever it is, which the root page lists for
+/// all of them.
+const GLOBAL: [&str; 6] = ["json", "timeout", "no_input", "log", "quiet", "verbose"];
+
+/// What a help page is styled with. It is written for reading even when the
+/// run answers in JSON, so the theme never follows that flag.
+fn theme() -> Theme {
+    Theme::new(false, false)
+}
+
+/// The command tree with the palette and every contract attached.
+fn command(theme: &Theme) -> clap::Command {
+    let mut command = Cli::command();
+    decorate(&mut command, "", theme);
+    command.build();
+    compact(&mut command, theme, true);
+    command
+}
+
+/// Print a command's page, a topic, or the whole manual. `long` is the
+/// contract rather than the scan, which is what `--help` asks for and `-h`
+/// does not.
+pub(crate) fn run(path: &[String], all: bool, long: bool) -> Result<(), Error> {
+    let theme = theme();
+    let mut root = command(&theme);
+    if all {
+        let mut pages = Vec::new();
+        collect(&mut root, &mut pages);
+        pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).expect("a listed topic"))));
+        let rule = theme.paint(Role::Muted, "-".repeat(theme.width.min(80)));
+        println!("{}", pages.join(&format!("\n\n{rule}\n\n")));
+        return Ok(());
+    }
+    if let [name] = path {
+        if let Some(text) = topic(name) {
+            println!("{}", markdown(&theme, text));
+            return Ok(());
+        }
+    }
+    let mut command = &mut root;
+    for name in path {
+        command = command.find_subcommand_mut(name).ok_or_else(|| {
+            Error::new(2, "usage", format!("no command or topic named {name:?}"))
+                .hint("`ark-emulator help` lists the commands and the topics")
+        })?;
+    }
+    let printed = if long {
+        command.print_long_help()
+    } else {
+        command.print_help()
+    };
+    printed.map_err(|err| Error::new(1, "io", format!("could not print the help: {err}")))
+}
+
+/// Attach the palette, the contract lines and the examples to one command and
+/// everything under it. clap keeps owning the syntax and the argument help.
+fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme) {
+    *command = command
+        .clone()
+        .styles(theme.clap())
+        .term_width(theme.width)
+        .color(if theme.color == Color::Off {
+            clap::ColorChoice::Never
+        } else {
+            clap::ColorChoice::Always
+        });
+    if parent.is_empty() {
+        // The boot options belong to the bare run and to `start`, and clap
+        // would otherwise offer them on one line together with a command.
+        *command = command
+            .clone()
+            .override_usage("ark-emulator [OPTIONS]\n       ark-emulator <COMMAND>");
+    } else {
+        *command = command.clone().arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(clap::ArgAction::Help)
+                .help("Print help (see more with '--help')")
+                .long_help("Print help (see a summary with '-h')"),
+        );
+    }
+    let path = if parent.is_empty() {
+        command.get_name().to_owned()
+    } else {
+        format!("{parent} {}", command.get_name())
+    };
+    let contract = contract(path.strip_prefix("ark-emulator").unwrap_or(&path).trim());
+    let footer = footer(theme, &contract);
+    let closing = "Output is formatted for reading; --json keeps complete, exact values.
+Scripts and AI agents: read `ark-emulator help agents` first.
+Topics: agents, output, disks, registry.";
+    let closing = closing
+        .lines()
+        .map(|line| output::wrap(&theme.inline(line), theme.width, 0))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut decorated = command.clone();
+    if parent.is_empty() {
+        decorated = decorated
+            .after_help(format!("{closing}\n"))
+            .after_long_help(format!("{footer}\n\n{closing}\n"));
+    } else {
+        decorated = decorated.after_long_help(format!("{footer}\n"));
+    }
+    *command = decorated;
+    for child in command.get_subcommands_mut() {
+        decorate(child, &path, theme);
+    }
+}
+
+/// Clap lays a long help's options out over two lines each. Render the short
+/// layout once and keep it, so the long page differs only by its footer.
+///
+/// This is also where the options every command takes drop off the pages that
+/// are not the root's, since the root lists them once for all of them.
+fn compact(command: &mut clap::Command, theme: &Theme, root: bool) {
+    if !root {
+        for name in GLOBAL {
+            *command = command
+                .clone()
+                .mut_arg(name, |argument| argument.hide(true));
+        }
+    }
+    let rendered = command
+        .clone()
+        .after_help(None)
+        .after_long_help(None)
+        .render_help()
+        .ansi()
+        .to_string();
+    let scan = rendered
+        .lines()
+        .map(|line| output::wrap(&theme.inline(line), theme.width, hanging(line)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    *command = command
+        .clone()
+        .help_template(format!("{}{{after-help}}", scan.trim_end()));
+    for child in command.get_subcommands_mut() {
+        compact(child, theme, false);
+    }
+}
+
+/// The column a rendered help line's text starts in, so that wrapping it
+/// keeps clap's layout. A row puts its text after a run of two or more
+/// spaces; a paragraph has none and wraps to the margin.
+fn hanging(line: &str) -> usize {
+    let plain = console::strip_ansi_codes(line);
+    let body = plain.trim_start();
+    let indent = plain.len() - body.len();
+    match body.find("  ") {
+        Some(gap) => {
+            let rest = &body[gap..];
+            indent + gap + (rest.len() - rest.trim_start().len())
+        }
+        None => indent,
+    }
+}
+
+/// What a command promises, by the words it is typed with. The bare run's
+/// contract sits under the empty path, since the root is a command too.
+fn contract(path: &str) -> [(&'static str, &'static str); 5] {
+    let (requires, time, prints, exits, examples) = match path {
+        "start" => (
+            "a disk image nobody has booted, and a free loopback port from 18181 up",
+            "about 10 s with hardware acceleration, minutes without; --timeout bounds the wait",
+            "locator, disk, created, started, env, ready; JSON adds port, path, disk_id, log",
+            "0 ready; 1 disk, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting",
+            "ark-emulator start\nark-emulator start --env develop --disk ~/arks/dev.img --json",
+        ),
+        "list" => (
+            "nothing; no registry means no emulators",
+            "immediate",
+            "port, disk, ready, env, name, serial; JSON adds locator, disk_id, expiry, log",
+            "0 done; 3 registry answered but could not be read",
+            "ark-emulator list\nark-emulator list --json",
+        ),
+        "stop" => (
+            "the port of a running emulator, from list or ark devices; --all stops every one",
+            "about a second to deliver, then seconds for the device to go",
+            "port, stopped; JSON lists every port under --all",
+            "0 done; 2 usage; 3 no emulator on that port; 7 it did not go in time",
+            "ark-emulator stop 18181\nark-emulator stop --all",
+        ),
+        "wipe" => (
+            "a disk image that is not booted; confirmation at a terminal, or --yes",
+            "immediate",
+            "path, deleted, freed; JSON uses freed_bytes",
+            "0 done; 1 confirmation or file problem; 2 usage; 3 booted by an emulator",
+            "ark-emulator wipe ~/arks/dev.img\nark-emulator wipe ~/arks/dev.img --yes",
+        ),
+        "info" => (
+            "nothing",
+            "immediate",
+            "version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry; JSON adds the firmware digests and the QEMU path",
+            "0 done",
+            "ark-emulator info\nark-emulator info --json",
+        ),
+        "help" => (
+            "nothing",
+            "immediate",
+            "help text on stdout, even under --json",
+            "0 done; 2 no such command or topic",
+            "ark-emulator help agents\nark-emulator help start",
+        ),
+        _ => (
+            "nothing on a packaged build; a source build needs --kernel and --initrd and a QEMU on PATH",
+            "the window opens at once; the device accepts clients about 10 s later with hardware acceleration, minutes without",
+            "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
+            "0 window closed; 1 could not start; 2 usage",
+            "ark-emulator\nark-emulator --env develop --disk ~/arks/dev.img",
+        ),
+    };
+    [
+        ("Requires", requires),
+        ("Time", time),
+        ("Prints", prints),
+        ("Exit", exits),
+        ("Examples", examples),
+    ]
+}
+
+/// The contract as it prints: four aligned lines, then the examples.
+fn footer(theme: &Theme, contract: &[(&str, &str); 5]) -> String {
+    let mut lines: Vec<String> = contract[..4]
+        .iter()
+        .map(|(label, text)| {
+            output::wrap(
+                &format!(
+                    "{}{}{}",
+                    theme.paint(Role::Muted, label),
+                    " ".repeat(11 - label.len()),
+                    theme.inline(text)
+                ),
+                theme.width,
+                11,
+            )
+        })
+        .collect();
+    lines.push(format!("\n{}", theme.paint(Role::Heading, "Examples")));
+    lines.extend(contract[4].1.lines().map(|line| {
+        output::wrap(
+            &format!("  $ {}", theme.paint(Role::Accent, line)),
+            theme.width,
+            4,
+        )
+    }));
+    lines.join("\n")
+}
+
+/// Render a topic: headings, paragraphs, bullets with their continuation
+/// lines, and code either fenced or indented by four spaces.
+fn markdown(theme: &Theme, text: &str) -> String {
+    let mut fenced = false;
+    let mut bullet = false;
+    let mut block = None;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        let content = line.trim_start();
+        let indent = line.len() - content.len();
+        let (line, hanging) = if fenced {
+            (format!("  {}", theme.paint(Role::Accent, line)), 2)
+        } else if indent >= 4 && !content.is_empty() {
+            let base = *block.get_or_insert(indent);
+            let code = &line[base.min(indent)..];
+            let pad = if bullet { 4 } else { 2 };
+            (
+                format!("{}{}", " ".repeat(pad), theme.paint(Role::Accent, code)),
+                pad,
+            )
+        } else {
+            block = None;
+            if content.is_empty() {
+                (String::new(), 0)
+            } else if line.starts_with('#') {
+                bullet = false;
+                (
+                    theme.paint(Role::Heading, content.trim_start_matches('#').trim_start()),
+                    0,
+                )
+            } else if line.starts_with("- ") {
+                bullet = true;
+                (format!("  {}", theme.inline(line)), 4)
+            } else if bullet && indent > 0 {
+                (format!("    {}", theme.inline(content)), 4)
+            } else {
+                bullet = false;
+                (theme.inline(line), 0)
+            }
+        };
+        lines.push(output::wrap(&line, theme.width, hanging));
+    }
+    lines.join("\n").trim_end().to_owned()
+}
+
+/// Every command's page, in the order the tree holds them.
+fn collect(command: &mut clap::Command, pages: &mut Vec<String>) {
+    pages.push(
+        command
+            .render_long_help()
+            .ansi()
+            .to_string()
+            .trim_end()
+            .to_owned(),
+    );
+    for child in command.get_subcommands_mut() {
+        collect(child, pages);
+    }
+}
+
+/// A topic by its public name, compiled into the binary.
+fn topic(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "agents" => include_str!("help/agents.md"),
+        "output" => include_str!("help/output.md"),
+        "disks" => include_str!("help/disks.md"),
+        "registry" => include_str!("help/registry.md"),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole manual, as `help --all` hands it to a reader or a model.
+    fn manual() -> String {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let mut root = command(&theme);
+        let mut pages = Vec::new();
+        collect(&mut root, &mut pages);
+        pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).unwrap())));
+        pages.join("\n\n")
+    }
+
+    #[test]
+    fn test_every_command_states_its_whole_contract() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let mut root = command(&theme);
+        for name in ["start", "list", "stop", "wipe", "info", "help"] {
+            let page = root
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for label in ["Requires", "Time", "Prints", "Exit", "Examples"] {
+                assert!(page.contains(label), "{name}: {label}");
+            }
+            assert_eq!(page.matches("  $ ark-emulator").count(), 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_the_bare_run_states_its_contract_on_the_root_page() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let page = command(&theme).render_long_help().to_string();
+        for label in ["Requires", "Time", "Prints", "Exit", "Examples"] {
+            assert!(page.contains(label), "{label}");
+        }
+        assert!(page.contains("Topics: agents, output, disks, registry."));
+    }
+
+    #[test]
+    fn test_the_root_scan_fits_on_a_screen() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let page = command(&theme).render_help().to_string();
+        assert!(page.lines().count() <= 42, "{}", page.lines().count());
+        for command in ["start", "list", "stop", "wipe", "info", "help"] {
+            assert!(page.contains(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_no_page_runs_past_the_width() {
+        for width in [80, 120] {
+            let theme = Theme::fixed(width, Color::Off, false);
+            let mut root = command(&theme);
+            let mut pages = Vec::new();
+            collect(&mut root, &mut pages);
+            pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).unwrap())));
+            for line in pages.join("\n").lines() {
+                assert!(console::measure_text_width(line) <= width, "{line}");
+            }
+        }
+    }
+
+    /// The command line tools, the example apps and the emulator are of no use
+    /// on their own, so the manual has to lead to the other two.
+    #[test]
+    fn test_the_manual_names_the_cli_and_the_example_apps() {
+        let manual = manual();
+        for link in [
+            "https://github.com/dark-bio/cli",
+            "https://github.com/dark-bio/examples",
+            "ark help agents",
+        ] {
+            assert!(manual.contains(link), "{link}");
+        }
+    }
+
+    #[test]
+    fn test_the_manual_names_every_error_code_a_command_can_exit_with() {
+        let manual = manual();
+        for code in [
+            "usage",
+            "confirmation-required",
+            "disk-missing",
+            "disk-busy",
+            "firmware-missing",
+            "port-exhausted",
+            "stopped-unexpectedly",
+            "no-emulator",
+            "registry-unreachable",
+            "timeout",
+        ] {
+            assert!(manual.contains(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn test_a_topic_renders_its_headings_bullets_and_code() {
+        let theme = Theme::fixed(80, Color::Basic, true);
+        assert_eq!(
+            markdown(
+                &theme,
+                "# Stopping\n\nRun `ark-emulator list` first.\n\n- One emulator at a time.\n\n    ark-emulator stop 18181\n"
+            ),
+            "\x1b[1mStopping\x1b[0m\n\nRun \x1b[1mark-emulator list\x1b[0m first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m"
+        );
+    }
+}

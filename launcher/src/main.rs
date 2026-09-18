@@ -52,6 +52,7 @@ mod diagnostics;
 mod discovery;
 mod disk;
 mod error_dialog;
+mod help;
 mod orphan;
 mod output;
 mod panel;
@@ -79,11 +80,22 @@ use panel::{Launcher, Pending};
 use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
 use settings::Settings;
 
+/// What the tool is, which opens every help page.
+const ABOUT: &str =
+    "Ark Emulator: boots the Ark firmware in a virtual machine on this computer\n\n\
+     An emulated Ark is the real firmware running in QEMU behind a small window \
+     that stands in for the device's face. It exists for development and demos. \
+     It is not a vault: everything lives in one plain disk image on this \
+     computer, so real data belongs on hardware. Talk to it with `ark`, exactly \
+     as you would to hardware, where the owner approves on their phone.";
+
 /// The command line as parsed.
 #[derive(Parser)]
 #[command(
     name = "ark-emulator",
-    about = "Ark Emulator: boots the Ark firmware in a virtual machine on this computer"
+    about = ABOUT,
+    disable_help_flag = true,
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Everything a guest needs to be booted.
@@ -93,6 +105,14 @@ struct Cli {
     /// The options that apply whatever is being run.
     #[command(flatten)]
     global: Global,
+
+    /// Short help; `help <command>` prints a full contract
+    #[arg(short = 'h', long)]
+    help: bool,
+
+    // The manual, also reachable as `ark-emulator help --all`.
+    #[arg(long, hide = true, requires = "help", conflicts_with = "version")]
+    all: bool,
 
     /// Emulator, bundled firmware and QEMU versions
     #[arg(short = 'V', long)]
@@ -108,7 +128,9 @@ impl Cli {
     /// to the bare run and to `start`, so naming one beside a command is a
     /// mistake rather than something to guess at.
     fn validate(&self) -> Result<(), output::Error> {
-        let message = if self.global.quiet && self.global.verbose {
+        let message = if self.help {
+            return Ok(());
+        } else if self.global.quiet && self.global.verbose {
             "--quiet cannot be combined with --verbose"
         } else if self.version && self.command.is_some() {
             "--version cannot be combined with a command"
@@ -126,24 +148,29 @@ impl Cli {
 /// command name means the same thing.
 #[derive(clap::Args)]
 pub(crate) struct Global {
-    /// Print results as JSON and stderr events as JSON Lines
+    /// Print results as JSON and events as JSON Lines
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Longest wait for the device or the registry, never a person
+    /// Longest wait for a machine reply
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
-    /// Never open a dialog; use the default image, and exit on failure
-    ///
-    /// A launch with nobody at the keyboard, such as a test run, takes the
-    /// default image instead of asking where to keep one, and a failure
-    /// prints its report and exits instead of opening a window.
+    /// Never ask; take the default image and exit on failure
+    // A launch with nobody at the keyboard, such as a test run, takes the
+    // default image instead of asking where to keep one, and a failure prints
+    // its report and exits instead of opening a window.
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
 
-    /// Diagnostics: debug for the launcher, trace adds registry traffic
-    #[arg(long, global = true, value_name = "LEVEL", value_enum)]
+    /// Diagnostics: debug, or trace with registry traffic
+    #[arg(
+        long,
+        global = true,
+        value_name = "LEVEL",
+        value_enum,
+        hide_possible_values = true
+    )]
     pub(crate) log: Option<Log>,
 
     /// Hide progress and notes; keep errors and hints
@@ -181,35 +208,33 @@ fn parse_timeout(value: &str) -> Result<u64, String> {
 /// boots one in the background.
 #[derive(clap::Args)]
 pub(crate) struct Boot {
-    /// Image to boot, created if missing [default: the remembered one]
-    ///
-    /// Read for this run only. It neither consults nor updates the settings
-    /// file, so a one-off boot from another image leaves the remembered choice
-    /// alone.
+    /// Image to boot, created if missing
+    // Read for this run only. It neither consults nor updates the settings
+    // file, so a one-off boot from another image leaves the remembered choice
+    // alone.
     #[arg(long, value_name = "PATH")]
     pub(crate) disk: Option<PathBuf>,
 
-    /// Cloud environment for a new image: release, staging, develop [default: remembered, else release]
-    ///
-    /// An existing image keeps the environment it was created with, since the
-    /// firmware burns that binding in on its first boot.
-    #[arg(long, value_name = "ENV", value_parser = settings::ENVS)]
+    /// Cloud environment for a new image
+    // An existing image keeps the environment it was created with, since the
+    // firmware burns that binding in on its first boot.
+    #[arg(long, value_name = "ENV", value_parser = settings::ENVS, hide_possible_values = true)]
     pub(crate) env: Option<String>,
 
-    /// Guest RAM [default: remembered, else 8192]
-    ///
-    /// In MiB. Lower it on a machine with little memory to spare.
+    /// Guest RAM in MiB
+    // Lower it on a machine with little memory to spare. The remembered
+    // amount answers when this does not.
     #[arg(long, value_name = "MIB")]
     pub(crate) memory: Option<u32>,
 
-    /// Firmware architecture: arm64, amd64 [default: this computer's]
-    ///
-    /// Only this computer's own architecture gets hardware acceleration, and
-    /// it is the only one a packaged build carries firmware and QEMU for.
-    #[arg(long, value_name = "ARCH", value_enum)]
+    /// Firmware architecture: arm64 or amd64
+    // This computer's own by default. It is the only one that gets hardware
+    // acceleration, and the only one a packaged build carries a QEMU for.
+    #[arg(long, value_name = "ARCH", value_enum, hide_possible_values = true)]
     pub(crate) arch: Option<GuestArch>,
 
-    /// Kernel image, with --initrd; a source build has no bundled firmware
+    /// Kernel image, with --initrd
+    // A source build bundles no firmware, so the two are its only way to boot.
     #[arg(long, value_name = "PATH")]
     pub(crate) kernel: Option<PathBuf>,
 
@@ -217,10 +242,10 @@ pub(crate) struct Boot {
     #[arg(long, value_name = "PATH")]
     pub(crate) initrd: Option<PathBuf>,
 
-    /// Loopback address forwarded into the guest [default: first free port from 18181]
-    ///
-    /// The guest's own port is fixed, so this is the host side of the forward
-    /// and the number an emulator is known by.
+    /// Loopback address forwarded into the guest
+    // The guest's own port is fixed, so this is the host side of the forward
+    // and the number an emulator is known by. The first free port from 18181
+    // up answers when this does not.
     #[arg(long, value_name = "ADDR")]
     pub(crate) host_addr: Option<SocketAddr>,
 }
@@ -269,6 +294,18 @@ fn main() {
     if let Err(err) = cli.validate() {
         output.error(&err);
         std::process::exit(err.exit);
+    }
+    if cli.help {
+        // clap folds -h and --help into one flag, and the two pages differ, so
+        // which was typed is read back from the arguments.
+        let long = std::env::args_os().any(|argument| argument == "--help");
+        std::process::exit(match help::run(&[], cli.all, long) {
+            Ok(()) => 0,
+            Err(err) => {
+                output.error(&err);
+                err.exit
+            }
+        });
     }
     if cli.version || cli.command.is_some() {
         std::process::exit(verbs::run(

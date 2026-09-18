@@ -88,6 +88,17 @@ pub(crate) enum Command {
 
     /// Bundled firmware, QEMU, acceleration and where files live
     Info,
+
+    /// Help for a command or a topic: agents, output, disks, registry
+    Help {
+        /// Command or topic to explain [default: this page]
+        #[arg(value_name = "COMMAND_OR_TOPIC")]
+        name: Option<String>,
+
+        // The root, every command and every topic as one document.
+        #[arg(long, hide = true, conflicts_with = "name")]
+        all: bool,
+    },
 }
 
 /// Run one command, print what it answers, and hand back the exit code. No
@@ -122,6 +133,11 @@ fn dispatch(
     identifier: &str,
     package: &PackageInfo,
 ) -> Result<(), Error> {
+    // Answered before anything is resolved, since a reader asking what a
+    // command does may be on a computer where nothing else would work.
+    if let Some(Command::Help { name, all }) = &command {
+        return crate::help::run(name.as_slice(), *all, true);
+    }
     let paths = Paths::resolve(identifier, package)
         .map_err(|err| Error::new(1, "io", format!("{err:#}")))?;
     match command {
@@ -130,6 +146,7 @@ fn dispatch(
         Some(Command::Stop { port, all }) => stop(port, all, global, output),
         Some(Command::Wipe { path, yes }) => wipe(&path, yes, output),
         Some(Command::Info) => info(output, &paths),
+        Some(Command::Help { .. }) => unreachable!("answered before the paths"),
         None => version(output, &paths),
     }
 }

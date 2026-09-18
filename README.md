@@ -65,6 +65,31 @@ Launch the app again to open another window. On macOS, use **New Window**
 (Cmd+N) in the app menu. Each running instance needs a different emulator file;
 use **Open** or **New** in that window to choose one.
 
+## Command line
+
+The app's executable is `ark-emulator`, and it manages emulators without
+opening a window. The Homebrew cask and the `.deb` put it on your `PATH`; from
+a portable build, run the executable inside the app.
+
+```sh
+ark-emulator start        # boot one, and print its locator once it is ready
+ark-emulator list         # show what is running on this computer
+ark-emulator stop 18181   # shut one down, the way closing its window does
+```
+
+Hand the locator to [`ark`](https://github.com/dark-bio/cli), which talks to an
+emulated Ark exactly as it talks to hardware:
+
+```sh
+ark -d emulator:18181 status
+```
+
+`ark-emulator --help` lists every command and option, and `ark-emulator help`
+names the reference topics. Scripts and AI agents should read
+`ark-emulator help agents` first, then `ark help agents` before driving the Ark
+itself. Apps to run on an emulator, in Rust, Go, C and Python, are at
+[examples](https://github.com/dark-bio/examples).
+
 ## Build from source
 
 Install Rust, the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/),
@@ -76,12 +101,14 @@ Source builds do not bundle QEMU or firmware.
 From this repository, run:
 
 ```sh
-cargo run --release -p launcher -- \
+cargo build --release -p launcher
+./target/release/ark-emulator \
   --kernel /path/to/kernel \
   --initrd /path/to/initrd.gz
 ```
 
-For command-line options, run `cargo run --release -p launcher -- --help`.
+For everything the executable can do, run
+`./target/release/ark-emulator --help`.
 
 ## Layout
 
