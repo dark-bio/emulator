@@ -379,6 +379,12 @@ impl Output {
         self.result(document, |theme| table(theme, rows, columns));
     }
 
+    /// Print a doctor's checks as a checklist, one row each with its mark,
+    /// detail and hint, or the whole document as JSON.
+    pub(crate) fn checklist(&self, document: &Value, rows: &[Value]) {
+        self.result(document, |theme| checklist(theme, rows));
+    }
+
     /// Claim the one result and write it. A second claim is ignored, so an
     /// error after a partial result cannot replace it.
     fn result(&self, document: &Value, render: impl FnOnce(&Theme) -> String) {
@@ -553,8 +559,10 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     match value {
         Value::Null => return theme.paint(Role::Muted, "-"),
         Value::Array(values) if values.is_empty() => return theme.paint(Role::Muted, "none"),
+        // A device that is not ready is one to wait for, so its mark is the
+        // attention mark the house tools put on a locked or unpaired device.
         Value::Bool(state) if key == "ready" => {
-            let role = if *state { Role::Success } else { Role::Default };
+            let role = if *state { Role::Success } else { Role::Attention };
             return theme.mark(role, if *state { "yes" } else { "no" });
         }
         _ => {}
@@ -705,6 +713,57 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
     let mut lines = vec![line(&headers, true)];
     lines.extend(cells.iter().map(|row| line(row, false)));
     lines.join("\n")
+}
+
+/// One line per check, the name marked by its result, the detail muted, and
+/// the hint on a line of its own beneath a failure.
+fn checklist(theme: &Theme, rows: &[Value]) -> String {
+    let labels = rows
+        .iter()
+        .map(|row| console::measure_text_width(row["name"].as_str().unwrap_or("")))
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let name = row["name"].as_str().unwrap_or("-");
+            let result = row["result"].as_str().unwrap_or("-");
+            let role = match result {
+                "ok" => Role::Success,
+                "fail" => Role::Failure,
+                _ => Role::Muted,
+            };
+            let detail = row["detail"].as_str().unwrap_or("-");
+            let detail = if result == "skip" {
+                format!("skipped: {detail}")
+            } else {
+                detail.to_owned()
+            };
+            let name = theme.mark(role, name);
+            // The mark is two cells as a glyph and three as its ASCII twin.
+            let width = labels + if theme.unicode { 2 } else { 3 };
+            let line = format!(
+                "  {}{}  {}",
+                name,
+                " ".repeat(width.saturating_sub(console::measure_text_width(&name))),
+                theme.paint(Role::Muted, &detail)
+            );
+            let mut line = wrap(&line, theme.width, 4);
+            if let Some(hint) = row["hint"].as_str() {
+                line.push('\n');
+                line.push_str(&wrap(
+                    &format!(
+                        "    {} {}",
+                        theme.paint(Role::Accent, "hint:"),
+                        theme.inline(hint)
+                    ),
+                    theme.width,
+                    6,
+                ));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Wrap styled text at `width` cells, indenting every line after the first by
@@ -899,6 +958,20 @@ mod tests {
             .split_whitespace()
             .collect::<String>()
             .contains("a-rather-long-name.ark"));
+    }
+
+    #[test]
+    fn test_a_checklist_marks_each_result_and_carries_the_hint() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let rows = [
+            json!({"name": "qemu", "result": "ok", "detail": "11.1.1 on PATH", "hint": null}),
+            json!({"name": "acceleration", "result": "fail", "detail": "software emulation only", "hint": "add your user to the kvm group"}),
+            json!({"name": "image", "result": "skip", "detail": "none chosen yet", "hint": null}),
+        ];
+        assert_eq!(
+            checklist(&theme, &rows),
+            "  ok qemu          11.1.1 on PATH\n  x acceleration   software emulation only\n    hint: add your user to the kvm group\n  - image          skipped: none chosen yet"
+        );
     }
 
     #[test]

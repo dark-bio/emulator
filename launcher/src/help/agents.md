@@ -17,8 +17,9 @@ Read `ark help agents` before driving the Ark itself.
   device, and --env for the cloud environment of an image created on this
   run; an existing image keeps the environment it was created with. Use
   --json for exact values.
-- Expect seconds with hardware acceleration and minutes without; `info`
-  reports which this computer has. --timeout bounds the wait. On timeout the
+- Expect seconds with hardware acceleration and minutes without;
+  `ark-emulator doctor` says which this computer has and what to do about
+  it. --timeout bounds the wait. On timeout the
   emulator keeps booting, the exit is 7, and `ark-emulator list` shows when
   it is ready.
 - start is idempotent. An image that is already booted is reported with
@@ -28,8 +29,9 @@ Read `ark help agents` before driving the Ark itself.
   `ark-emulator stop --all` stops every one.
 - `ark-emulator wipe PATH --yes` deletes a stopped image. The next start is a
   factory-fresh device that needs `ark enroll`, `ark pair` and `ark unlock`
-  again. Nothing else asks a question, and start, list, stop and info never
-  open a window. A bare `ark-emulator` opens the device window and may ask
+  again. Nothing else asks a question, and start, list, stop and doctor
+  never open a window. A bare `ark-emulator` opens the device window and may
+  ask
   where to keep the image; do not use it from a script.
 
 ## Reading results
@@ -44,9 +46,11 @@ cannot keep the two streams apart, run with -q --json.
 
 `ark-emulator list` shows every running emulator with its port, image, ready
 state and what the firmware has reported about the device.
-`ark-emulator info` shows the bundled firmware, QEMU, whether hardware
-acceleration is available, and where the data directory, the settings file
-and the logs are. Every emulator writes its launcher log to a file under the
+`ark-emulator doctor` checks this computer and this build, QEMU, the bundled
+firmware, hardware acceleration, the data directory, the settings, the
+remembered image, the registry and a free port, and says what to fix; its
+JSON also carries where everything lives. Every emulator writes its launcher
+log to a file under the
 data directory, named by port; start --json and list --json name it, and a
 failed start quotes its tail. The device itself prints nothing.
 

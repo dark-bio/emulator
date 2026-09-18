@@ -20,8 +20,9 @@ The launcher keeps what it writes in one directory per platform:
     Linux    ~/.local/share/bio.dark.emulator
     Windows  %APPDATA%\bio.dark.emulator
 
-`ark-emulator info` prints the one this build uses, along with the settings
-file and the log directory inside it. The image the launcher allocates for
+`ark-emulator doctor --json` prints the one this build uses, along with the
+settings file and the log directory inside it. The image the launcher
+allocates for
 itself, `emulator.ark`, lives there too; an image you name with --disk lives
 wherever you put it. Any name works, and the window's own picker uses the
 `.ark` extension so the files are easy to tell apart.

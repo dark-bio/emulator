@@ -86,8 +86,8 @@ pub(crate) enum Command {
         yes: bool,
     },
 
-    /// Bundled firmware, QEMU, acceleration and where files live
-    Info,
+    /// Check this computer and this build; suggest fixes
+    Doctor,
 
     /// Help for a command or a topic: agents, output, disks, registry
     Help {
@@ -145,7 +145,7 @@ fn dispatch(
         Some(Command::List) => list(output, &paths),
         Some(Command::Stop { port, all }) => stop(port, all, global, output),
         Some(Command::Wipe { path, yes }) => wipe(&path, yes, output),
-        Some(Command::Info) => info(output, &paths),
+        Some(Command::Doctor) => doctor(output, &paths),
         Some(Command::Help { .. }) => unreachable!("answered before the paths"),
         None => version(output, &paths),
     }
@@ -428,56 +428,250 @@ fn wipe(path: &Path, yes: bool, output: &Output) -> Result<(), Error> {
     Ok(())
 }
 
-/// Say what this build carries and where it keeps things.
-fn info(output: &Output, paths: &Paths) -> Result<(), Error> {
+/// Check this computer and this build, and say what to fix. Every check runs
+/// and the whole list prints; the first failure then sets the exit, so a
+/// caller sees everything that is wrong at once.
+fn doctor(output: &Output, paths: &Paths) -> Result<(), Error> {
+    let mut checks = Checks::new(output);
     let arch = architecture(None)?;
+
     let qemu = qemu::resolve_qemu(arch);
-    let firmware = bundle::bundled_firmware(paths.resources.as_deref(), arch).map(|firmware| {
-        json!({
-            "version": bundle::firmware_version(paths.resources.as_deref(), arch),
+    let qemu_version = qemu_version(&qemu.binary);
+    let origin = if qemu.bundled { "bundled" } else { "on PATH" };
+    match &qemu_version {
+        Some(version) => checks.ok(
+            "qemu",
+            &format!("{version} {origin} at {}", qemu.binary.display()),
+        ),
+        None => checks.fail(
+            "qemu",
+            Error::new(
+                1,
+                "qemu-missing",
+                format!("{} could not be run", qemu.binary.display()),
+            )
+            .hint(if qemu.bundled {
+                "the bundled QEMU is damaged; reinstall the emulator"
+            } else {
+                "install QEMU, or use a packaged build, which carries its own"
+            }),
+        ),
+    }
+
+    let firmware = bundle::bundled_firmware(paths.resources.as_deref(), arch);
+    let firmware_version = bundle::firmware_version(paths.resources.as_deref(), arch);
+    match &firmware {
+        Some(_) => checks.ok(
+            "firmware",
+            &format!(
+                "{} for {}",
+                firmware_version.as_deref().unwrap_or("unversioned"),
+                arch.name()
+            ),
+        ),
+        None => checks.fail(
+            "firmware",
+            Error::new(
+                1,
+                "firmware-missing",
+                format!("no firmware bundled for {}", arch.name()),
+            )
+            .hint("pass --kernel and --initrd to boot one"),
+        ),
+    }
+
+    let accel = qemu::accelerator(arch);
+    if accel == "tcg" {
+        checks.fail(
+            "acceleration",
+            Error::new(
+                1,
+                "no-acceleration",
+                "software emulation only, so a boot takes minutes",
+            )
+            .hint(acceleration_hint()),
+        );
+    } else {
+        checks.ok("acceleration", accel);
+    }
+
+    match writable(&paths.data) {
+        Ok(()) => checks.ok("data", &paths.data.display().to_string()),
+        Err(err) => checks.fail(
+            "data",
+            Error::new(
+                1,
+                "io",
+                format!("{} is not writable: {err}", paths.data.display()),
+            )
+            .hint("check the permissions on the data directory"),
+        ),
+    }
+
+    let settings = match Settings::load(&paths.data) {
+        Ok(settings) => {
+            checks.ok("settings", &settings.path().display().to_string());
+            Some(settings)
+        }
+        Err(err) => {
+            checks.fail(
+                "settings",
+                Error::new(1, "io", format!("{err:#}"))
+                    .hint("move the settings file aside to start over"),
+            );
+            None
+        }
+    };
+
+    let image = settings
+        .as_ref()
+        .and_then(|settings| settings.disk().map(Path::to_path_buf));
+    match &image {
+        None => checks.skip(
+            "image",
+            "none chosen yet; the window asks, and start allocates one",
+        ),
+        Some(image) => match std::fs::metadata(image) {
+            Ok(meta) if meta.is_file() => checks.ok(
+                "image",
+                &format!("{} ({})", image.display(), output::bytes(meta.len())),
+            ),
+            _ => checks.fail(
+                "image",
+                Error::new(
+                    1,
+                    "disk-missing",
+                    format!("{} is not there", image.display()),
+                )
+                .hint("open or create one in the window, or start with --disk"),
+            ),
+        },
+    }
+
+    let registry = discovery::list();
+    match &registry {
+        Ok(instances) if instances.is_empty() => checks.ok("registry", "no emulator running"),
+        Ok(instances) => checks.ok("registry", &format!("{} running", instances.len())),
+        Err(err) => checks.fail(
+            "registry",
+            Error::new(3, "registry-unreachable", format!("{err:#}"))
+                .hint("another program may be holding the emulator registry's port"),
+        ),
+    }
+
+    match HostPort::reserve() {
+        Ok(port) => checks.ok("ports", &format!("{} free", port.port())),
+        Err(err) => checks.fail(
+            "ports",
+            Error::new(1, "port-exhausted", format!("{err:#}"))
+                .hint("stop an emulator, or pass --host-addr to choose a port"),
+        ),
+    }
+
+    let document = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "firmware": firmware.as_ref().map(|firmware| json!({
+            "version": firmware_version,
             "kernel": digest(&firmware.kernel),
             "initrd": digest(&firmware.initrd),
-        })
+        })),
+        "qemu": {
+            "binary": qemu.binary,
+            "version": qemu_version,
+            "bundled": qemu.bundled,
+        },
+        "accel": accel,
+        "arch": arch.name(),
+        "data_dir": paths.data,
+        "settings": settings.as_ref().map(|settings| settings.path().to_path_buf()),
+        "disk": image,
+        "logs_dir": diagnostics::logs_dir(&paths.data),
+        "registry": {
+            "reachable": listening(REGISTRY_PORT),
+            "instances": registry.as_ref().map_or(0, Vec::len),
+        },
+        "checks": checks.rows,
     });
-    let settings = Settings::load(&paths.data).map_err(local)?;
-    let running = listing()?;
+    output.checklist(&document, &checks.rows);
+    match checks.failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
 
-    output.block(
-        &json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "firmware": firmware,
-            "qemu": {
-                "binary": qemu.binary,
-                "version": qemu_version(&qemu.binary),
-                "bundled": qemu.bundled,
-            },
-            "accel": qemu::accelerator(arch),
-            "arch": arch.name(),
-            "data_dir": paths.data,
-            "settings": settings.path(),
-            "disk": settings.disk(),
-            "logs_dir": diagnostics::logs_dir(&paths.data),
-            "registry": {
-                "reachable": listening(REGISTRY_PORT),
-                "instances": running.len(),
-            },
-        }),
-        &[
-            ("Version", "version"),
-            ("Firmware", "firmware.version"),
-            ("QEMU", "qemu.version"),
-            ("QEMU binary", "qemu.binary"),
-            ("Acceleration", "accel"),
-            ("Architecture", "arch"),
-            ("Data", "data_dir"),
-            ("Settings", "settings"),
-            ("Disk", "disk"),
-            ("Logs", "logs_dir"),
-            ("Registry", "registry.reachable"),
-            ("Emulators", "registry.instances"),
-        ],
-    );
-    Ok(())
+/// The diagnostics of one doctor run, in the order they ran, and the first
+/// failure among them, which is what the command exits with.
+struct Checks<'a> {
+    /// Where a step is narrated as each check lands.
+    output: &'a Output,
+
+    /// Every check as the document carries it.
+    rows: Vec<Value>,
+
+    /// The earliest failure, kept while the later checks still run.
+    failure: Option<Error>,
+}
+
+impl<'a> Checks<'a> {
+    /// An empty list, narrating to `output`.
+    fn new(output: &'a Output) -> Self {
+        Self {
+            output,
+            rows: Vec::new(),
+            failure: None,
+        }
+    }
+
+    /// Record a check that passed, with what it saw.
+    fn ok(&mut self, name: &str, detail: &str) {
+        self.add(name, "ok", detail, None);
+    }
+
+    /// Record a check that could not run, without failing the command.
+    fn skip(&mut self, name: &str, detail: &str) {
+        self.add(name, "skip", detail, None);
+    }
+
+    /// Record a failure with its first hint, keeping the earliest as the exit.
+    fn fail(&mut self, name: &str, error: Error) {
+        self.add(
+            name,
+            "fail",
+            &error.message,
+            error.hints.first().map(String::as_str),
+        );
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+    }
+
+    /// Append one check and narrate it as a step.
+    fn add(&mut self, name: &str, result: &str, detail: &str, hint: Option<&str>) {
+        self.output
+            .event("step", format!("{name}: {result}, {detail}"));
+        self.rows
+            .push(json!({"name": name, "result": result, "detail": detail, "hint": hint}));
+    }
+}
+
+/// What to do about a computer without hardware acceleration, by platform.
+fn acceleration_hint() -> &'static str {
+    match std::env::consts::OS {
+        "linux" => "add your user to the kvm group and log in again",
+        "macos" => {
+            "Hypervisor.framework is unavailable, which is usual inside another virtual machine"
+        }
+        "windows" => "enable Windows Hypervisor Platform, then reboot",
+        _ => "this platform has no hardware acceleration",
+    }
+}
+
+/// Whether a directory can be written to, proven by writing to it.
+fn writable(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let probe = dir.join(format!(".doctor-{}", std::process::id()));
+    std::fs::write(&probe, b"")?;
+    std::fs::remove_file(&probe)
 }
 
 /// What the emulators running on this computer look like, by the image each

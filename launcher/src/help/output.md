@@ -33,7 +33,7 @@ fields than the document; --json always has them all.
 
 Every emulator writes its launcher's own lines to a file under the data
 directory, named after the port it holds, replacing what an earlier emulator
-on that port left there. `info` names the directory, and `list --json` names
+on that port left there. `doctor --json` names the directory, and `list --json` names
 each emulator's file. The file holds the launcher's lines and what QEMU said,
 and never anything from the device: an emulator's guest prints nothing at all.
 
@@ -52,6 +52,10 @@ The codes are stable.
 - io: a file could not be read or written. The message names it. Exit 1.
 - firmware-missing: this build carries no firmware for that architecture.
   Pass --kernel and --initrd. Exit 1.
+- qemu-missing: the QEMU this build would run could not be run. Install
+  one, or use a packaged build, which carries its own. Exit 1.
+- no-acceleration: the guest would run under software emulation. The hint
+  names the platform's fix. Exit 1.
 - port-exhausted: every port in the range is taken. Pass --host-addr to name
   one, or stop an emulator. Exit 1.
 - stopped-unexpectedly: QEMU died while the emulator was starting. The

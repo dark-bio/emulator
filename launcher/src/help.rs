@@ -216,12 +216,12 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "0 done; 1 confirmation or file problem; 2 usage; 3 booted by an emulator",
             "ark-emulator wipe ~/arks/dev.ark\nark-emulator wipe ~/arks/dev.ark --yes",
         ),
-        "info" => (
-            "nothing",
-            "immediate",
-            "version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry; JSON adds the firmware digests and the QEMU path",
-            "0 done",
-            "ark-emulator info\nark-emulator info --json",
+        "doctor" => (
+            "nothing; a check that cannot run is skipped",
+            "seconds",
+            "checks: result, name, detail, hint; JSON adds version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry",
+            "0 done; 1 a check failed on this computer; 3 the registry could not be read",
+            "ark-emulator doctor\nark-emulator doctor --json",
         ),
         "help" => (
             "nothing",
@@ -368,7 +368,7 @@ mod tests {
     fn test_every_command_states_its_whole_contract() {
         let theme = Theme::fixed(80, Color::Off, false);
         let mut root = command(&theme);
-        for name in ["start", "list", "stop", "wipe", "info", "help"] {
+        for name in ["start", "list", "stop", "wipe", "doctor", "help"] {
             let page = root
                 .find_subcommand_mut(name)
                 .unwrap()
@@ -396,7 +396,7 @@ mod tests {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_help().to_string();
         assert!(page.lines().count() <= 42, "{}", page.lines().count());
-        for command in ["start", "list", "stop", "wipe", "info", "help"] {
+        for command in ["start", "list", "stop", "wipe", "doctor", "help"] {
             assert!(page.contains(command), "{command}");
         }
     }
@@ -438,6 +438,8 @@ mod tests {
             "disk-missing",
             "io",
             "firmware-missing",
+            "qemu-missing",
+            "no-acceleration",
             "port-exhausted",
             "stopped-unexpectedly",
             "could-not-start",
