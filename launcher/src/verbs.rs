@@ -91,7 +91,7 @@ pub(crate) enum Command {
 
     /// Help for a command or a topic: agents, output, disks, registry
     Help {
-        /// Command or topic to explain [default: this page]
+        /// Command or topic to explain
         #[arg(value_name = "COMMAND_OR_TOPIC")]
         name: Option<String>,
 
