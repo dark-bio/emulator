@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Telling the user the emulator is not going to work.
 //!
 //! This is a GUI-first app that people are meant to download and double-click,
@@ -33,12 +39,16 @@ const ISSUES_URL: &str = "https://github.com/dark-bio/emulator/issues";
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 750.0;
 
-/// Suppresses the window and exits immediately instead, and stands for the
-/// same thing wherever else the launcher would put a dialog in front of
-/// somebody (see [`crate::disk`]). Set by the CI smoke scripts, which run the
-/// app under a virtual display where a window nobody can dismiss would just
-/// stall until the job times out.
-pub(crate) const NO_DIALOG: &str = "ARK_EMULATOR_NO_DIALOG";
+/// Whether a failure exits after printing its report instead of opening a
+/// window. Also what stands for "nobody is here to ask" wherever else the
+/// launcher would put a dialog in front of somebody (see [`crate::disk`]).
+static NO_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Record what `--no-input` said. The reporting paths below are reached from
+/// threads that have no command line in hand, so they read it from here.
+pub(crate) fn no_input(value: bool) {
+    NO_INPUT.store(value, Ordering::SeqCst);
+}
 
 /// Whether a failure has already been reported. Startup failing and QEMU dying
 /// are not mutually exclusive, and the second one to arrive must not stack a
@@ -101,7 +111,7 @@ fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
     if REPORTED.swap(true, Ordering::SeqCst) {
         return None;
     }
-    if std::env::var_os(NO_DIALOG).is_some() {
+    if NO_INPUT.load(Ordering::SeqCst) {
         // Not app.exit: there is no UI state worth unwinding here, and the
         // caller may still be inside `setup` with no event loop yet to carry
         // the request. QEMU dies with us either way, via `orphan`.

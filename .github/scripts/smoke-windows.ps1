@@ -21,10 +21,6 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-# A fatal error opens a window the launcher waits on, and nothing here can
-# dismiss it, so ask for the report on stderr and an immediate exit instead.
-$env:ARK_EMULATOR_NO_DIALOG = "1"
-
 $timeout = if ($env:SMOKE_TIMEOUT) { [int]$env:SMOKE_TIMEOUT } else { 120 }
 $marker  = if ($env:SMOKE_MARKER)  { $env:SMOKE_MARKER }        else { "Starting runcore" }
 $log     = if ($env:SMOKE_LOG)     { $env:SMOKE_LOG }           else { "smoke.log" }
@@ -77,17 +73,20 @@ function Write-Log {
 
 New-Item -ItemType File -Force -Path $log, $errLog | Out-Null
 
+# A fatal error opens a window the launcher waits on, and nothing here can
+# dismiss it, so --no-input asks for the report on stderr and an immediate exit
+# instead.
+$launcherArgs = @("--no-input") + $Arguments
+
 $startArgs = @{
     FilePath               = $Executable
     PassThru               = $true
     RedirectStandardOutput = $log
     RedirectStandardError  = $errLog
-}
-if ($Arguments) {
-    $startArgs.ArgumentList = $Arguments
+    ArgumentList           = $launcherArgs
 }
 
-Write-Host "launching $Executable $Arguments"
+Write-Host "launching $Executable $launcherArgs"
 $proc = Start-Process @startArgs
 
 # The launcher ties QEMU's lifetime to its own via a Job Object, so killing

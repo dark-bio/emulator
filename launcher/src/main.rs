@@ -87,6 +87,24 @@ struct Cli {
     /// Everything a guest needs to be booted.
     #[command(flatten)]
     boot: Boot,
+
+    /// The options that apply whatever is being run.
+    #[command(flatten)]
+    global: Global,
+}
+
+/// The options every command carries, spelled the way the house tools spell
+/// them. They are accepted at any level, so `--no-input` before or after a
+/// command name means the same thing.
+#[derive(clap::Args)]
+pub(crate) struct Global {
+    /// Never open a dialog; use the default image, and exit on failure
+    ///
+    /// A launch with nobody at the keyboard, such as a test run, takes the
+    /// default image instead of asking where to keep one, and a failure
+    /// prints its report and exits instead of opening a window.
+    #[arg(long, global = true)]
+    pub(crate) no_input: bool,
 }
 
 /// What an emulator boots from, shared by the bare run and by the command that
@@ -150,6 +168,7 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     let cli = Cli::parse();
+    error_dialog::no_input(cli.global.no_input);
 
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
@@ -184,8 +203,9 @@ fn main() {
             panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) =
-                platform::install_menus(app).and_then(|()| start(app, cli.boot, host_port))
+            let no_input = cli.global.no_input;
+            if let Err(err) = platform::install_menus(app)
+                .and_then(|()| start(app, cli.boot, no_input, host_port))
             {
                 error_dialog::show(app.handle(), "could not start", err);
             }
@@ -211,8 +231,8 @@ fn main() {
 /// end up on the same reporting path. That includes resolving the guest
 /// architecture and reserving a host port, neither of which needs a Tauri app
 /// but both of which would otherwise be failures with nowhere to be displayed.
-fn start(app: &tauri::App, boot: Boot, host_port: Result<HostPort>) -> Result<()> {
-    let (pending, settings, resolved) = prepare(app, boot, host_port)?;
+fn start(app: &tauri::App, boot: Boot, no_input: bool, host_port: Result<HostPort>) -> Result<()> {
+    let (pending, settings, resolved) = prepare(app, boot, no_input, host_port)?;
     let mut launcher = Launcher::booting(pending, settings);
     let slot = launcher.slot();
 
@@ -221,7 +241,7 @@ fn start(app: &tauri::App, boot: Boot, host_port: Result<HostPort>) -> Result<()
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            if pending.boot.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
+            if pending.boot.disk.is_some() || no_input {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())
                 })?;
@@ -248,6 +268,7 @@ fn start(app: &tauri::App, boot: Boot, host_port: Result<HostPort>) -> Result<()
 fn prepare(
     app: &tauri::App,
     boot: Boot,
+    no_input: bool,
     host_port: Result<HostPort>,
 ) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
@@ -290,7 +311,7 @@ fn prepare(
         &booted,
         &data_dir,
         host_port.port(),
-        std::env::var_os(error_dialog::NO_DIALOG).is_some(),
+        no_input,
     )?;
 
     let pending = Pending {

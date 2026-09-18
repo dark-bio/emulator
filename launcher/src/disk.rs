@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Deciding which disk image the guest boots from.
 //!
 //! Three sources, in descending order of how deliberate they are:
@@ -118,11 +124,10 @@ pub(crate) enum Resolved {
 /// image the launcher allocates for itself lives, and `port` is the one this
 /// emulator holds.
 ///
-/// `no_dialog` is [`crate::error_dialog::NO_DIALOG`], which stands for "there
-/// is nobody here to ask". CI launches a packaged build with no flags at all
-/// and expects it to boot unattended, so it falls back to the image the
-/// launcher would have allocated for itself. A second unattended emulator
-/// cannot share that one, so it gets an image named after the port it holds.
+/// `no_input` stands for "there is nobody here to ask". A launch that cannot
+/// ask falls back to the image the launcher would have allocated for itself. A
+/// second unattended emulator cannot share that one, so it gets an image named
+/// after the port it holds.
 pub(crate) fn decide(
     explicit: Option<&Path>,
     remembered: Option<&Path>,
@@ -130,7 +135,7 @@ pub(crate) fn decide(
     booted: &Booted,
     dir: &Path,
     port: u16,
-    no_dialog: bool,
+    no_input: bool,
 ) -> Result<Resolved> {
     if let Some(disk) = explicit {
         let disk = std::path::absolute(disk)
@@ -154,14 +159,14 @@ pub(crate) fn decide(
                 "[launcher] the remembered disk image {} is already booted on port {port}",
                 disk.display()
             );
-            if !no_dialog {
+            if !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: None,
                     reason,
                 });
             }
         } else if disk.is_file() {
-            if !autostart && !no_dialog {
+            if !autostart && !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: Some(disk.to_path_buf()),
                     reason: Reason::AutostartDisabled,
@@ -174,7 +179,7 @@ pub(crate) fn decide(
                 "[launcher] the remembered disk image {} is gone",
                 disk.display()
             );
-            if !no_dialog {
+            if !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: None,
                     reason,
@@ -183,7 +188,7 @@ pub(crate) fn decide(
         }
     }
 
-    if no_dialog {
+    if no_input {
         if !booted.contains_key(&disk_id(&default)) {
             return Ok(Resolved::Boot(default));
         }
