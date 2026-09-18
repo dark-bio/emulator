@@ -868,11 +868,32 @@ fn detach(command: &mut std::process::Command) {
 }
 
 /// The same, plus the flag that keeps Windows from giving a console-subsystem
-/// child a console window of its own.
+/// child a console window of its own, and this process's own streams made
+/// private first. The child gets null streams of its own, but Windows would
+/// still hand it an inheritable copy of these, and a file that `start`'s
+/// output was redirected to would then stay open for as long as the emulator
+/// runs.
 #[cfg(windows)]
 fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: a standard handle this process owns, or null, or the invalid
+        // value, is read and then only handed back to Win32 to clear one flag
+        // on it; nothing is dereferenced.
+        unsafe {
+            let handle = GetStdHandle(stream);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
