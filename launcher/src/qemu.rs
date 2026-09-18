@@ -16,10 +16,11 @@
 //! graphics. One host port forwarded through SLIRP is the entire interface the
 //! UI and any host-side client talk to.
 //!
-//! A bundled firmware boots with no serial device at all and `console=null`,
-//! the way the hardware does, so stdout stays empty. A firmware named with
-//! `--kernel` and `--initrd` keeps its console on stdout, which is where a
-//! developer booting their own build wants it.
+//! A bundled firmware boots with its serial console attached to a null
+//! device, so the guest's output goes nowhere and stdout stays empty. A
+//! firmware named with `--kernel` and `--initrd` keeps its console on stdout,
+//! which is where a developer booting their own build wants it. The console
+//! device itself stays, since the firmware stops serving its bus without one.
 //!
 //! The guest side of that forward is fixed: the firmware listens on one port
 //! and has no way to be told otherwise. The host side is not, which is what
@@ -314,13 +315,11 @@ pub(crate) fn spawn_qemu(
         GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
     };
     cmd.args(accel_flags(native));
-    // A release boots the way the hardware does, with nothing on a console,
-    // and the firmware's own logging is compiled out of it anyway.
-    let console = if firmware.bundled {
-        "null"
-    } else {
-        arch.serial()
-    };
+    // The firmware's own logging is compiled out of a release, and what the
+    // kernel and the init system still print is discarded below. The console
+    // device stays on the command line either way, since the firmware stops
+    // serving its bus when it has none.
+    let console = arch.serial();
     cmd.arg("-m")
         .arg(memory.to_string())
         .args(["-nographic", "-kernel"])
@@ -348,9 +347,9 @@ pub(crate) fn spawn_qemu(
         .args(["-device", "virtio-blk-pci,drive=disk0", "-monitor", "none"]);
 
     // -nographic would otherwise hand the serial device to stdio, so a build
-    // that wants no console has to say none. The developer's build keeps it on
-    // stdout.
-    cmd.args(["-serial", if firmware.bundled { "none" } else { "stdio" }]);
+    // that wants nothing printed points it at a null device instead. The
+    // developer's build keeps it on stdout.
+    cmd.args(["-serial", if firmware.bundled { "null" } else { "stdio" }]);
 
     // Captured rather than inherited so a packaged build, which has no console
     // to print to, can still put QEMU's own complaint in a crash report. The
