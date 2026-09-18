@@ -257,7 +257,7 @@ pub(crate) fn start_emulator(
     // error window replaces the device face rather than the panel offering a
     // retry that has nothing left to retry with.
     if let Err(err) = crate::launch(&app, pending, &disk, memory, &env) {
-        crate::error_dialog::show_from_thread(&app, "could not start", err);
+        crate::error_dialog::show_from_thread(&app, crate::error_dialog::COULD_NOT_START, err);
     }
     Ok(())
 }

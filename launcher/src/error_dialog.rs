@@ -21,10 +21,12 @@
 //! both still see it when no window can be shown at all.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::diagnostics::{self, log};
+use crate::output::{Error, Output};
 use crate::MAIN_WINDOW;
 
 /// Label of the error window this module creates.
@@ -39,15 +41,33 @@ const ISSUES_URL: &str = "https://github.com/dark-bio/emulator/issues";
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 750.0;
 
+/// What a failure before the guest is up is reported under. Dying during
+/// startup and dying an hour in read very differently to somebody who had a
+/// working emulator a moment ago.
+pub(crate) const COULD_NOT_START: &str = "could not start";
+
+/// What a failure after the guest is up is reported under.
+pub(crate) const STOPPED: &str = "stopped unexpectedly";
+
 /// Whether a failure exits after printing its report instead of opening a
 /// window. Also what stands for "nobody is here to ask" wherever else the
 /// launcher would put a dialog in front of somebody (see [`crate::disk`]).
 static NO_INPUT: AtomicBool = AtomicBool::new(false);
 
-/// Record what `--no-input` said. The reporting paths below are reached from
-/// threads that have no command line in hand, so they read it from here.
-pub(crate) fn no_input(value: bool) {
-    NO_INPUT.store(value, Ordering::SeqCst);
+/// The output layer a failure goes through when this run answers in JSON.
+/// Absent for a run that reports in plain words.
+static EVENTS: Mutex<Option<Output>> = Mutex::new(None);
+
+/// Record how this run reports a failure. The reporting paths below are
+/// reached from threads that have no command line in hand, so they read it
+/// from here.
+pub(crate) fn reporting(output: &Output, no_input: bool) {
+    NO_INPUT.store(no_input, Ordering::SeqCst);
+    if output.json() {
+        if let Ok(mut events) = EVENTS.lock() {
+            *events = Some(output.clone());
+        }
+    }
 }
 
 /// Whether a failure has already been reported. Startup failing and QEMU dying
@@ -71,9 +91,7 @@ pub(crate) fn report_issue() {
 }
 
 /// Report a fatal error from the main thread, which is where Tauri's `setup`
-/// hook runs. `title` distinguishes failing to start from failing later, since
-/// the two read very differently to someone who had a working emulator a
-/// moment ago.
+/// hook runs. `title` is [`COULD_NOT_START`] or [`STOPPED`].
 pub(crate) fn show(app: &AppHandle, title: &str, err: anyhow::Error) {
     let Some(report) = prepare(title, err) else {
         return;
@@ -106,7 +124,12 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
 /// in which case the process is exiting instead.
 fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
     let report = diagnostics::report(title, &err);
-    eprintln!("{report}");
+    match EVENTS.lock().ok().and_then(|events| events.clone()) {
+        // The code is the title with its spaces hyphenated, so the two cannot
+        // drift apart.
+        Some(output) => output.error(&Error::new(1, code(title), report.clone())),
+        None => eprintln!("{report}"),
+    }
 
     if REPORTED.swap(true, Ordering::SeqCst) {
         return None;
@@ -118,6 +141,14 @@ fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
         std::process::exit(1);
     }
     Some(report)
+}
+
+/// The stable code for a failure, taken from the words it is reported under.
+fn code(title: &str) -> &'static str {
+    match title {
+        STOPPED => "stopped-unexpectedly",
+        _ => "could-not-start",
+    }
 }
 
 /// Build the error window, falling back to exiting if even that fails.

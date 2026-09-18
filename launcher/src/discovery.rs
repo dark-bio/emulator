@@ -40,7 +40,7 @@ use crate::registry::{self, Beat, Instance, Listing, REGISTRY_PORT};
 /// How often this emulator re-registers itself. It is the heartbeat keeping
 /// its entry alive, so it has to stay well below the registry's expiry, and it
 /// is also how long a stop takes to arrive.
-const HEARTBEAT: Duration = Duration::from_secs(1);
+pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// How long any single request to the registry may take, bounded so a wedged
 /// one cannot hold up a boot.
@@ -55,22 +55,24 @@ fn registry_addr() -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT)
 }
 
-/// Ask the registry what is running. An empty list is also what a machine with
-/// nobody hosting one looks like, and a caller does not need to tell.
-pub(crate) fn list() -> Vec<Instance> {
-    match request("GET", "/v1/instances", None) {
-        Ok(body) => match serde_json::from_slice::<Listing>(&body) {
-            Ok(listing) => listing.instances,
-            Err(e) => {
-                log!("[discovery] could not read the registry's answer: {e}");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            log!("[discovery] could not read the registry: {e}");
-            Vec::new()
-        }
-    }
+/// Ask the registry what is running. Nothing serving one is a computer with no
+/// emulators on it, so it answers with an empty list rather than a failure. An
+/// answer that arrives and cannot be read is a failure, since something is
+/// there and it is not a registry this build understands.
+pub(crate) fn list() -> Result<Vec<Instance>> {
+    let Ok(body) = request("GET", "/v1/instances", None) else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_slice::<Listing>(&body)
+        .context("could not read the registry's answer")?
+        .instances)
+}
+
+/// Ask the emulator on `port` to shut down. The request waits in the registry
+/// until that emulator's next heartbeat collects it.
+pub(crate) fn request_stop(port: u16) -> Result<()> {
+    request("POST", &format!("/v1/instances/{port}/stop"), None)?;
+    Ok(())
 }
 
 /// Make sure the registry is being served, hosting it here if nobody else is.

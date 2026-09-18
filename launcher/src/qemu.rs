@@ -27,7 +27,7 @@
 //! the range starting at [`FIRST_HOST_PORT`].
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{bail, Context as _, Result};
@@ -122,6 +122,39 @@ const QEMU_SIDECAR: &str = "qemu-system-guest";
 /// points at the same directory. Harmless on a build that has no modules, and
 /// on a source build there is nothing bundled to point at.
 const QEMU_MODULE_DIR: &str = "QEMU_MODULE_DIR";
+
+/// The QEMU system emulator a guest is booted with.
+pub(crate) struct Qemu {
+    /// The binary to run, either an absolute path to the bundled one or the
+    /// name that is looked up on `PATH`.
+    pub(crate) binary: PathBuf,
+
+    /// Whether this build ships it.
+    pub(crate) bundled: bool,
+}
+
+/// Work out which QEMU boots `arch`. Only the host's own architecture is ever
+/// bundled, so a cross-architecture guest always falls back to `PATH`, which a
+/// packaged build will not have.
+pub(crate) fn resolve_qemu(arch: GuestArch) -> Qemu {
+    match arch.host().then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
+        Some(binary) => Qemu {
+            binary,
+            bundled: true,
+        },
+        None => Qemu {
+            binary: PathBuf::from(arch.qemu_binary()),
+            bundled: false,
+        },
+    }
+}
+
+/// The accelerator a guest of this architecture gets on this computer, which
+/// is the difference between a boot in seconds and one in minutes. `tcg` is
+/// QEMU's own software emulation.
+pub(crate) fn accelerator(arch: GuestArch) -> &'static str {
+    accel_flags(arch.host()).get(1).copied().unwrap_or("tcg")
+}
 
 /// A host port reserved for an emulator, held until the moment QEMU takes it
 /// over. Keeping the listener bound is what stops two launchers starting at
@@ -249,27 +282,14 @@ pub(crate) fn spawn_qemu(
     host_port: &mut HostPort,
 ) -> Result<Child> {
     let native = arch.host();
-    // Only the host-native architecture is ever bundled, so a cross-arch
-    // request always falls through to a PATH-installed QEMU, which a packaged
-    // build will not have.
-    let mut cmd = match native.then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
-        Some(bundled) => {
-            log!(
-                "[launcher] using bundled QEMU sidecar at {}",
-                bundled.display()
-            );
-            diagnostics::record("QEMU", format!("{} (bundled)", bundled.display()));
-            Command::new(bundled)
-        }
-        None => {
-            log!(
-                "[launcher] no bundled QEMU sidecar found, falling back to {} on PATH",
-                arch.qemu_binary()
-            );
-            diagnostics::record("QEMU", format!("{} (on PATH)", arch.qemu_binary()));
-            Command::new(arch.qemu_binary())
-        }
-    };
+    let qemu = resolve_qemu(arch);
+    let origin = if qemu.bundled { "bundled" } else { "on PATH" };
+    log!(
+        "[launcher] using the {origin} QEMU at {}",
+        qemu.binary.display()
+    );
+    diagnostics::record("QEMU", format!("{} ({origin})", qemu.binary.display()));
+    let mut cmd = Command::new(&qemu.binary);
     suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
         log!("[launcher] passing -L {} to QEMU", libs.display());
@@ -342,7 +362,7 @@ pub(crate) fn spawn_qemu(
     host_port.release();
     orphan::guard(cmd)
         .spawn()
-        .with_context(|| format!("could not start {}", arch.qemu_binary()))
+        .with_context(|| format!("could not start {}", qemu.binary.display()))
 }
 
 #[cfg(test)]

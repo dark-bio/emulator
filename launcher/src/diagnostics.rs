@@ -8,9 +8,9 @@
 //!
 //! A packaged build has nowhere to print: Windows release builds link as GUI
 //! apps and a macOS `.app` or Linux AppImage started from a file manager has no
-//! visible stderr. So everything that would have been a diagnostic `eprintln!`
-//! goes through [`log!`] instead, which still writes to stderr and also keeps
-//! the line in a bounded ring buffer. QEMU's own stderr is teed in here too.
+//! visible stderr. So every diagnostic goes through [`log!`] instead, which
+//! keeps the line in a bounded ring buffer and hands it to whichever [`Sink`]
+//! this run chose. QEMU's own stderr is teed in here too.
 //!
 //! Alongside the log sits a small ordered set of facts about this run (guest
 //! architecture, which QEMU was picked, the paths in play). They are recorded
@@ -52,12 +52,34 @@ static STATE: Mutex<State> = Mutex::new(State {
     log: VecDeque::new(),
     facts: Vec::new(),
     file: None,
+    sink: Sink::Stderr,
 });
 
 struct State {
     log: VecDeque<String>,
     facts: Vec<(&'static str, String)>,
     file: Option<File>,
+    sink: Sink,
+}
+
+/// Where a log line goes besides the ring and the log file.
+pub(crate) enum Sink {
+    /// Straight to stderr, which is what a run with a window does.
+    Stderr,
+
+    /// Through a command's output layer, as `log` events.
+    Events(crate::output::Output),
+
+    /// Nowhere, which is a command that was not asked for diagnostics.
+    Quiet,
+}
+
+/// Choose where this run echoes its log lines. The ring and the log file get
+/// them whatever is chosen, so a crash report is never short of them.
+pub(crate) fn log_sink(sink: Sink) {
+    if let Ok(mut state) = STATE.lock() {
+        state.sink = sink;
+    }
 }
 
 /// The directory every launcher writes its log file into.
@@ -85,27 +107,31 @@ pub(crate) fn log_to(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Print a line to stderr and keep it for the crash report. Takes the same
+/// Record one diagnostic line and hand it to this run's sink. Takes the same
 /// arguments as [`eprintln!`], which it replaces throughout the launcher.
 macro_rules! log {
     ($($arg:tt)*) => {{
-        let line = format!($($arg)*);
-        eprintln!("{line}");
-        $crate::diagnostics::push(line);
+        $crate::diagnostics::push(format!($($arg)*));
     }};
 }
 pub(crate) use log;
 
-/// Add an already-formatted line to the ring and the log file, dropping the
-/// oldest ring entry once full. Called by [`log!`]; use that instead.
+/// Add an already-formatted line to the ring, the log file and the sink,
+/// dropping the oldest ring entry once full. Called by [`log!`]; use that
+/// instead.
 pub(crate) fn push(line: String) {
     let Ok(mut state) = STATE.lock() else {
         return;
     };
     if let Some(file) = state.file.as_mut() {
         // A log file that cannot be written is not a reason to stop logging,
-        // and the line is still on stderr and in the ring.
+        // and the line is still in the ring.
         let _ = writeln!(file, "{line}");
+    }
+    match &state.sink {
+        Sink::Stderr => eprintln!("{line}"),
+        Sink::Events(output) => output.event("log", &line),
+        Sink::Quiet => {}
     }
     if state.log.len() == LOG_CAPACITY {
         state.log.pop_front();

@@ -20,15 +20,37 @@
 //! AppImage's own AppRun moves it inside the read-only FUSE mount before the
 //! launcher runs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
-use tauri::{path::BaseDirectory, Manager};
+use tauri::PackageInfo;
 
 use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
 use crate::qemu::GuestArch;
 use crate::Boot;
+
+/// Where this build keeps its files, resolved without a window so that a
+/// command line run never has to start one.
+pub(crate) struct Paths {
+    /// Everything the launcher writes: the settings file, the logs, and the
+    /// disk images it allocates for itself.
+    pub(crate) data: PathBuf,
+
+    /// What a packaged build ships beside the executable. `None` in a source
+    /// build, which ships nothing.
+    pub(crate) resources: Option<PathBuf>,
+}
+
+impl Paths {
+    /// Work out both, creating the data directory if it is missing.
+    pub(crate) fn resolve(identifier: &str, package: &PackageInfo) -> Result<Self> {
+        Ok(Self {
+            data: app_data_dir(identifier)?,
+            resources: resource_dir(package),
+        })
+    }
+}
 
 /// The firmware a guest boots, and where it came from.
 pub(crate) struct Firmware {
@@ -46,7 +68,11 @@ pub(crate) struct Firmware {
 
 /// Resolve the kernel/initrd paths to boot. Explicit `--kernel`/`--initrd`
 /// take priority, and are the only option in a source build.
-pub(crate) fn resolve_firmware(app: &tauri::App, boot: &Boot, arch: GuestArch) -> Result<Firmware> {
+pub(crate) fn resolve_firmware(
+    resources: Option<&Path>,
+    boot: &Boot,
+    arch: GuestArch,
+) -> Result<Firmware> {
     match (&boot.kernel, &boot.initrd) {
         (Some(kernel), Some(initrd)) => {
             return Ok(Firmware {
@@ -60,42 +86,62 @@ pub(crate) fn resolve_firmware(app: &tauri::App, boot: &Boot, arch: GuestArch) -
     }
 
     let dir = arch.firmware_dir();
-    let kernel = strip_verbatim_prefix(
-        &app.path()
-            .resolve(format!("firmware/{dir}/kernel"), BaseDirectory::Resource)
-            .context("could not resolve the bundled kernel's location")?,
-    );
-    let initrd = strip_verbatim_prefix(
-        &app.path()
-            .resolve(format!("firmware/{dir}/initrd.gz"), BaseDirectory::Resource)
-            .context("could not resolve the bundled initramfs' location")?,
-    );
-    for (label, path) in [("kernel", &kernel), ("initrd", &initrd)] {
-        if !path.exists() {
-            bail!(
-                "no bundled {label} for {dir}: pass --kernel and --initrd explicitly \
-                 (a development build has no bundled firmware)"
-            );
-        }
-    }
-    Ok(Firmware {
+    bundled_firmware(resources, arch).with_context(|| {
+        format!(
+            "no bundled firmware for {dir}: pass --kernel and --initrd explicitly \
+             (a development build has no bundled firmware)"
+        )
+    })
+}
+
+/// The firmware this build ships for `arch`, if it ships one at all.
+pub(crate) fn bundled_firmware(resources: Option<&Path>, arch: GuestArch) -> Option<Firmware> {
+    let dir = resources?.join("firmware").join(arch.firmware_dir());
+    let kernel = dir.join("kernel");
+    let initrd = dir.join("initrd.gz");
+    (kernel.exists() && initrd.exists()).then_some(Firmware {
         kernel,
         initrd,
         bundled: true,
     })
 }
 
-/// Resolve this app's own data directory, creating it if missing. It holds
-/// everything the launcher writes: the settings file, and the disk image when
-/// that is where the user keeps it.
-pub(crate) fn app_data_dir(app: &tauri::App) -> Result<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .context("could not locate this app's data directory")?;
+/// The release the bundled firmware was taken from, written beside the images
+/// by whatever fetched them. Absent in a build that ships no firmware.
+pub(crate) fn firmware_version(resources: Option<&Path>, arch: GuestArch) -> Option<String> {
+    let path = resources?
+        .join("firmware")
+        .join(arch.firmware_dir())
+        .join("version");
+    let tag = std::fs::read_to_string(path).ok()?;
+    let tag = tag.trim().to_owned();
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// Resolve this app's own data directory, creating it if missing. It is the
+/// platform's data directory joined with this app's bundle identifier, which
+/// is what the window side resolves to as well.
+fn app_data_dir(identifier: &str) -> Result<PathBuf> {
+    let dir = dirs::data_dir()
+        .context("could not locate this computer's data directory")?
+        .join(identifier);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("could not create the data directory {}", dir.display()))?;
     Ok(dir)
+}
+
+/// Resolve where a packaged build's resources sit, which is beside or above
+/// the executable depending on the platform. `None` when there is no such
+/// directory, which is the ordinary state of a source build.
+fn resource_dir(package: &PackageInfo) -> Option<PathBuf> {
+    let dir = match tauri::utils::platform::resource_dir(package, &tauri::Env::default()) {
+        Ok(dir) => strip_verbatim_prefix(&dir),
+        Err(e) => {
+            log!("[launcher] could not resolve the resource directory: {e}");
+            return None;
+        }
+    };
+    dir.exists().then_some(dir)
 }
 
 /// Resolve a bundled sidecar binary next to the launcher's own executable,
@@ -125,13 +171,10 @@ pub(crate) fn resolve_sidecar(name: &str) -> Option<PathBuf> {
 /// Logs unconditionally: a wrong directory here surfaces later as an opaque
 /// library or firmware error, so this is the one place that can say what it
 /// picked.
-pub(crate) fn resolve_qemu_libs(app: &tauri::App) -> Option<PathBuf> {
-    let dir = match app.path().resolve("qemu-libs", BaseDirectory::Resource) {
-        Ok(dir) => strip_verbatim_prefix(&dir),
-        Err(e) => {
-            log!("[launcher] could not resolve qemu-libs resource directory: {e}");
-            return None;
-        }
+pub(crate) fn resolve_qemu_libs(resources: Option<&Path>) -> Option<PathBuf> {
+    let Some(dir) = resources.map(|dir| dir.join("qemu-libs")) else {
+        log!("[launcher] no bundled resources, using QEMU's own search paths");
+        return None;
     };
     if !dir.exists() {
         log!("[launcher] no bundled qemu-libs, using QEMU's own search paths");

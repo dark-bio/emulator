@@ -303,6 +303,7 @@ pub(crate) fn require_existing(path: &Path) -> Result<()> {
 /// registry is unavailable.
 pub(crate) fn require_available(path: &Path) -> Result<()> {
     let booted: Booted = crate::discovery::list()
+        .unwrap_or_default()
         .into_iter()
         .map(|instance| (instance.disk_id, instance.port))
         .collect();

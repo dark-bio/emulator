@@ -53,11 +53,13 @@ mod discovery;
 mod disk;
 mod error_dialog;
 mod orphan;
+mod output;
 mod panel;
 mod platform;
 mod qemu;
 mod registry;
 mod settings;
+mod verbs;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -70,7 +72,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use clap::Parser;
 use tauri::{Manager, WindowEvent};
 
-use bundle::{app_data_dir, resolve_firmware, resolve_qemu_libs};
+use bundle::{resolve_firmware, resolve_qemu_libs, Paths};
 use diagnostics::log;
 use disk::Resolved;
 use panel::{Launcher, Pending};
@@ -91,6 +93,32 @@ struct Cli {
     /// The options that apply whatever is being run.
     #[command(flatten)]
     global: Global,
+
+    /// Emulator, bundled firmware and QEMU versions
+    #[arg(short = 'V', long)]
+    version: bool,
+
+    /// What to do, or nothing at all, which opens the device window.
+    #[command(subcommand)]
+    command: Option<verbs::Command>,
+}
+
+impl Cli {
+    /// Reject the combinations clap cannot express. The boot options belong
+    /// to the bare run and to `start`, so naming one beside a command is a
+    /// mistake rather than something to guess at.
+    fn validate(&self) -> Result<(), output::Error> {
+        let message = if self.global.quiet && self.global.verbose {
+            "--quiet cannot be combined with --verbose"
+        } else if self.version && self.command.is_some() {
+            "--version cannot be combined with a command"
+        } else if self.command.is_some() && self.boot.named() {
+            "the boot options belong to a bare run or to `ark-emulator start`"
+        } else {
+            return Ok(());
+        };
+        Err(output::Error::new(2, "usage", message))
+    }
 }
 
 /// The options every command carries, spelled the way the house tools spell
@@ -98,6 +126,14 @@ struct Cli {
 /// command name means the same thing.
 #[derive(clap::Args)]
 pub(crate) struct Global {
+    /// Print results as JSON and stderr events as JSON Lines
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+
+    /// Longest wait for the device or the registry, never a person
+    #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
+    pub(crate) timeout: u64,
+
     /// Never open a dialog; use the default image, and exit on failure
     ///
     /// A launch with nobody at the keyboard, such as a test run, takes the
@@ -105,6 +141,40 @@ pub(crate) struct Global {
     /// prints its report and exits instead of opening a window.
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
+
+    /// Diagnostics: debug for the launcher, trace adds registry traffic
+    #[arg(long, global = true, value_name = "LEVEL", value_enum)]
+    pub(crate) log: Option<Log>,
+
+    /// Hide progress and notes; keep errors and hints
+    #[arg(short = 'q', long, global = true)]
+    pub(crate) quiet: bool,
+
+    /// Show steps
+    #[arg(short = 'v', long, global = true)]
+    pub(crate) verbose: bool,
+}
+
+/// How much diagnostic detail a run asks for, independent of step narration.
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub(crate) enum Log {
+    /// The launcher's own lines.
+    Debug,
+    /// Those and every registry request.
+    Trace,
+}
+
+/// Longest wait for a machine, in seconds. One number for the whole tool, so
+/// there is one to remember, and it is generous enough to cover a boot with no
+/// hardware acceleration behind it.
+const DEFAULT_TIMEOUT: u64 = 120;
+
+/// Reject a wait that cannot be waited out.
+fn parse_timeout(value: &str) -> Result<u64, String> {
+    match value.parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Ok(seconds),
+        _ => Err("the timeout is a positive number of seconds".to_owned()),
+    }
 }
 
 /// What an emulator boots from, shared by the bare run and by the command that
@@ -155,6 +225,19 @@ pub(crate) struct Boot {
     pub(crate) host_addr: Option<SocketAddr>,
 }
 
+impl Boot {
+    /// Whether any of these was typed.
+    fn named(&self) -> bool {
+        self.disk.is_some()
+            || self.env.is_some()
+            || self.memory.is_some()
+            || self.arch.is_some()
+            || self.kernel.is_some()
+            || self.initrd.is_some()
+            || self.host_addr.is_some()
+    }
+}
+
 /// Label of the device face window, hidden until startup succeeds.
 pub(crate) const MAIN_WINDOW: &str = "main";
 
@@ -177,7 +260,32 @@ pub(crate) fn shut_down() -> ! {
 
 fn main() {
     let cli = Cli::parse();
-    error_dialog::no_input(cli.global.no_input);
+    let output = output::Output::new(&cli.global);
+    error_dialog::reporting(&output, cli.global.no_input);
+
+    // Compiled in rather than read at run time, so a command line run never
+    // opens a window or touches the display to find out where things are.
+    let context = tauri::generate_context!();
+    if let Err(err) = cli.validate() {
+        output.error(&err);
+        std::process::exit(err.exit);
+    }
+    if cli.version || cli.command.is_some() {
+        std::process::exit(verbs::run(
+            cli.command,
+            &cli.global,
+            &context.config().identifier,
+            context.package_info(),
+        ));
+    }
+
+    // From here the window is the product. A source build's guest console has
+    // stdout, so nothing this layer would put there is written, and the
+    // launcher's own lines are the only thing on stderr.
+    output.release_stdout();
+    if output.json() {
+        diagnostics::log_sink(diagnostics::Sink::Events(output));
+    }
 
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
@@ -216,19 +324,22 @@ fn main() {
             if let Err(err) = platform::install_menus(app)
                 .and_then(|()| start(app, cli.boot, no_input, host_port))
             {
-                error_dialog::show(app.handle(), "could not start", err);
+                error_dialog::show(app.handle(), error_dialog::COULD_NOT_START, err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
             // out of run(), and then there is no event loop left to show the
             // error in and nothing but a panic message nobody can read.
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .unwrap_or_else(|err| {
             // The webview runtime itself did not come up, so no window of ours
             // can either. Stderr is all that is left.
             let err = anyhow!(err).context("the window system could not be started");
-            eprintln!("{}", diagnostics::report("could not start", &err));
+            eprintln!(
+                "{}",
+                diagnostics::report(error_dialog::COULD_NOT_START, &err)
+            );
             std::process::exit(1);
         });
 }
@@ -295,7 +406,8 @@ fn prepare(
     let host_port = host_port?;
     diagnostics::record("Host address", host_port.addr().to_string());
 
-    let data_dir = app_data_dir(app)?;
+    let paths = Paths::resolve(&app.config().identifier, app.package_info())?;
+    let data_dir = paths.data.clone();
 
     // Best effort, and early, so that everything a failing startup says lands
     // in the file a second process can read.
@@ -310,15 +422,16 @@ fn prepare(
     // including nothing at all, this emulator still boots.
     discovery::ensure_registry();
     let booted: disk::Booted = discovery::list()
+        .unwrap_or_default()
         .into_iter()
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
 
-    let firmware = resolve_firmware(app, &boot, arch)?;
+    let firmware = resolve_firmware(paths.resources.as_deref(), &boot, arch)?;
     diagnostics::record_path("Kernel", &firmware.kernel);
     diagnostics::record_path("Initrd", &firmware.initrd);
 
-    let qemu_libs = resolve_qemu_libs(app);
+    let qemu_libs = resolve_qemu_libs(paths.resources.as_deref());
 
     let resolved = disk::decide(
         boot.disk.as_deref(),
@@ -391,11 +504,11 @@ fn launch(
             }
             let err =
                 anyhow!("the emulated device stopped unexpectedly: QEMU exited with {status}");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
         Err(e) => {
             let err = anyhow!(e).context("lost track of the QEMU process");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
     });
 
