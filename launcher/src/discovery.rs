@@ -1,3 +1,9 @@
+// ark-emulator: boots the Ark firmware in a virtual machine on this computer
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The launcher's side of the registry: making sure it is being served, and
 //! keeping this emulator's entry in it up to date.
 //!
@@ -10,6 +16,12 @@
 //! publish themselves to whoever did (see [`crate::registry`]). Takeover rides
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
+//!
+//! The heartbeat is also how a shutdown arrives. The registry answers a beat
+//! with whatever has been left for this emulator, and a stop waiting there
+//! takes it down the way closing its window does. A launcher that hosts the
+//! registry beats to itself over the loopback like every other one, so it
+//! reads its own mailbox on the same path.
 
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -23,11 +35,12 @@ use anyhow::{bail, Context as _, Result};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::log;
-use crate::registry::{self, Instance, Listing, REGISTRY_PORT};
+use crate::registry::{self, Beat, Instance, Listing, REGISTRY_PORT};
 
-/// How often this emulator re-registers itself, which is also the heartbeat
-/// keeping its entry alive, so it has to stay below the registry's expiry.
-const HEARTBEAT: Duration = Duration::from_secs(5);
+/// How often this emulator re-registers itself. It is the heartbeat keeping
+/// its entry alive, so it has to stay well below the registry's expiry, and it
+/// is also how long a stop takes to arrive.
+const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// How long any single request to the registry may take, bounded so a wedged
 /// one cannot hold up a boot.
@@ -130,7 +143,7 @@ pub(crate) fn nameplate(
     publish();
 }
 
-/// Send the current entry to the registry.
+/// Send the current entry to the registry, and act on whatever comes back.
 fn publish() {
     let Some(entry) = ENTRY.get() else {
         return;
@@ -144,7 +157,8 @@ fn publish() {
         }
     };
 
-    if request("POST", "/v1/instances", Some(&body)).is_ok() {
+    if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+        obey(&answer);
         return;
     }
 
@@ -153,8 +167,18 @@ fn publish() {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    if let Err(e) = request("POST", "/v1/instances", Some(&body)) {
-        log!("[discovery] could not register: {e}");
+    match request("POST", "/v1/instances", Some(&body)) {
+        Ok(answer) => obey(&answer),
+        Err(e) => log!("[discovery] could not register: {e}"),
+    }
+}
+
+/// Act on what the registry answered a heartbeat with. A stop waiting there is
+/// the only thing it can carry, and an answer with no body carries nothing.
+fn obey(answer: &[u8]) {
+    if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
+        log!("[discovery] asked to shut down");
+        crate::shut_down();
     }
 }
 

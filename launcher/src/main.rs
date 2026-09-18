@@ -166,6 +166,15 @@ const STAGGER_STEP: u32 = 32;
 /// both arrive as the same dead child process.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+/// Take this emulator down the way closing its window does. Withdraw it from
+/// the registry, then go, which lets go of QEMU: the orphan guard kills it
+/// with this process.
+pub(crate) fn shut_down() -> ! {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    discovery::deregister();
+    std::process::exit(0);
+}
+
 fn main() {
     let cli = Cli::parse();
     error_dialog::no_input(cli.global.no_input);
