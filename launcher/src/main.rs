@@ -295,6 +295,9 @@ fn main() {
         output.error(&err);
         std::process::exit(err.exit);
     }
+    if cli.help || cli.version || cli.command.is_some() {
+        platform::attach_console();
+    }
     if cli.help {
         // clap folds -h and --help into one flag, and the two pages differ, so
         // which was typed is read back from the arguments.
