@@ -51,8 +51,9 @@ move to another environment, create a new image.
 
 An emulated Ark starts with a self-signed identity. `ark enroll` gives it an
 attested one from the cloud, valid for 30 days, after which the cloud refuses
-the device. `ark-emulator list` shows the day it expires, and so does
-`ark status`. Copying the image copies the identity and its expiry with it.
+the device. `ark-emulator list` shows the day it expires, and `ark genuine`
+says when it has passed. Copying the image copies the identity and its
+expiry with it.
 A device past its date is wiped and started again as a fresh one; an
 emulator holds nothing worth keeping that long.
 
