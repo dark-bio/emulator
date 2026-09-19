@@ -8,7 +8,7 @@
 //!
 //! Three sources, in descending order of how deliberate they are:
 //!
-//!   - `--disk`, typed at a shell for this one run. Never consults or updates
+//!   - `--image`, typed at a shell for this one run. Never consults or updates
 //!     the settings, so a one-off boot from some other image leaves the
 //!     remembered choice alone.
 //!   - The image remembered in `settings`, when autostart is enabled and it
@@ -20,7 +20,7 @@
 //!
 //! Crossing all three is whether an image is already booted by another
 //! emulator, since two guests writing one qcow2 would corrupt it. An explicit
-//! `--disk` naming a booted image is an error, because substituting another
+//! `--image` naming a booted image is an error, because substituting another
 //! file silently is worse than saying no, while a remembered one falls through
 //! to asking the way a deleted one does.
 //!
@@ -206,23 +206,20 @@ pub(crate) fn decide(
 
 /// Which image a command boots. An image named on the command line wins, then
 /// the remembered one, which is the device the owner opens by double-click,
-/// and then the image the launcher allocates for itself. Whether the chosen
-/// image is already booted is the caller's question, since a start states a
-/// goal and reports a running emulator rather than refusing it.
+/// and then the image the launcher allocates for itself. A remembered image
+/// that is gone is still the one, created afresh, since substituting another
+/// file would boot a device the owner never chose. Whether the chosen image is
+/// already booted is the caller's question, since a start states a goal and
+/// reports a running emulator rather than refusing it.
 pub(crate) fn select(
     named: Option<&Path>,
     remembered: Option<&Path>,
     dir: &Path,
 ) -> Result<PathBuf> {
-    if let Some(image) = named {
-        return settle(image);
+    match named.or(remembered) {
+        Some(image) => settle(image),
+        None => settle(&dir.join(DEFAULT_DISK)),
     }
-    if let Some(image) = remembered
-        && image.is_file()
-    {
-        return settle(image);
-    }
-    settle(&dir.join(DEFAULT_DISK))
 }
 
 /// An image's path with the directories above it resolved, so that a command
@@ -458,7 +455,7 @@ mod tests {
         )
         .unwrap();
         let Resolved::Boot(chosen) = resolved else {
-            panic!("an explicit --disk was not taken");
+            panic!("an explicit --image was not taken");
         };
         assert_eq!(chosen, settle(&disk).unwrap());
     }
@@ -613,13 +610,20 @@ mod tests {
         );
     }
 
+    /// A remembered image that is gone is recreated in place, never swapped
+    /// for the launcher's own; only nothing remembered at all falls back to it.
     #[test]
-    fn test_a_command_falls_back_to_the_default_image() {
+    fn test_a_command_keeps_a_remembered_image_that_is_gone() {
         let tmp = TempDir::new().unwrap();
         let gone = tmp.path().join("deleted.ark");
-        let default = settle(&tmp.path().join(DEFAULT_DISK)).unwrap();
-        assert_eq!(select(None, Some(&gone), tmp.path()).unwrap(), default);
-        assert_eq!(select(None, None, tmp.path()).unwrap(), default);
+        assert_eq!(
+            select(None, Some(&gone), tmp.path()).unwrap(),
+            settle(&gone).unwrap()
+        );
+        assert_eq!(
+            select(None, None, tmp.path()).unwrap(),
+            settle(&tmp.path().join(DEFAULT_DISK)).unwrap()
+        );
     }
 
     /// The emulator resolves the path it is handed all over again, so a link

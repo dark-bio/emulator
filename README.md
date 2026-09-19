@@ -74,7 +74,7 @@ a portable build, run the executable inside the app.
 ```sh
 ark-emulator start        # boot one, and print its locator once it is ready
 ark-emulator list         # show what is running on this computer
-ark-emulator stop 18181   # shut one down, the way closing its window does
+ark-emulator stop         # shut it down, the way closing its window does
 ```
 
 Hand the locator to [`ark`](https://github.com/dark-bio/cli), which talks to an

@@ -59,15 +59,17 @@ object whose one member is `error`. The codes are stable.
   one, or use a packaged build, which carries its own. Exit 1.
 - no-acceleration: the guest would run under software emulation. The hint
   names the platform's fix. Exit 1.
-- port-exhausted: every port in the range is taken. Pass --host-addr to name
-  one, or stop an emulator. Exit 1.
+- port-exhausted: every port in the range is taken. Pass --port to name one,
+  or stop an emulator. Exit 1.
 - stopped-unexpectedly: QEMU died while the emulator was starting. The
   message carries the tail of the launcher's log. Exit 1.
 - could-not-start: a bare run could not bring the emulator up. The message is
   the report the error window would have shown. Exit 1.
-- disk-busy: an emulator is booted from that image. Stop it first. Exit 3.
-- no-emulator: nothing is running on that port. `ark-emulator list` shows
-  what is. Exit 3.
+- disk-busy: an emulator holds that image. Stop it first. Exit 3.
+- no-emulator: nothing running matches, or nothing is running at all.
+  `ark-emulator list` shows what is. Exit 3.
+- ambiguous-emulator: several emulators match, or several run and none was
+  named. Name one by its locator, or pass --all to stop. Exit 3.
 - registry-unreachable: something answered on the registry's port and could
   not be read. Exit 3.
 - timeout: the device was not ready, or did not stop, within --timeout. The
@@ -75,6 +77,7 @@ object whose one member is `error`. The codes are stable.
 
 ## Exit codes
 
-0 done, 1 a local file or a confirmation, 2 usage, 3 no such emulator or an
-unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. Ctrl-C during
-a start ends the wait only; the emulator carries on booting.
+0 done, 1 a local file or a confirmation, 2 usage, 3 no such emulator, an
+ambiguous one or an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143
+SIGTERM. Ctrl-C during a start ends the wait only; the emulator carries on
+booting.

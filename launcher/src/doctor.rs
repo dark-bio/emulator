@@ -140,7 +140,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths) -> Result<(), Error> {
                     Code::DiskMissing,
                     format!("{} is not there", image.display()),
                 )
-                .hint("open or create one in the window, or start with --disk"),
+                .hint("open or create one in the window, or start with --image"),
             ),
         },
     }
@@ -161,7 +161,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths) -> Result<(), Error> {
         Err(err) => checks.fail(
             "ports",
             Error::new(Code::PortExhausted, format!("{err:#}"))
-                .hint("stop an emulator, or pass --host-addr to choose a port"),
+                .hint("stop an emulator, or pass --port to choose one"),
         ),
     }
 

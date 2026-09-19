@@ -90,8 +90,8 @@ fn dispatch(
     match command {
         Some(Command::Start { boot }) => start(&boot, global, output, &paths),
         Some(Command::List) => list(output, &paths),
-        Some(Command::Stop { port, all }) => stop(port, all, global, output),
-        Some(Command::Wipe { path, yes }) => wipe(&path, yes, output, &paths),
+        Some(Command::Stop { emulator, all }) => stop(emulator.as_deref(), all, global, output),
+        Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
         Some(Command::Doctor) => crate::doctor::doctor(output, &paths),
         Some(Command::Completions { .. } | Command::Help { .. }) => {
             unreachable!("answered above")
@@ -147,7 +147,7 @@ fn version(output: &Output, paths: &Paths) -> Result<(), Error> {
 fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result<(), Error> {
     let arch = architecture(boot.arch)?;
     let settings = Settings::load(&paths.data).map_err(|err| Error::io(format!("{err:#}")))?;
-    let image = disk::select(boot.disk.as_deref(), settings.disk(), &paths.data)
+    let image = disk::select(boot.image.as_deref(), settings.disk(), &paths.data)
         .map_err(|err| Error::io(format!("{err:#}")))?;
 
     if let Some(instance) = discovery::booted(&listing()?, &image) {
@@ -161,8 +161,8 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
         return report(output, paths, &instance, &image, false, false);
     }
 
-    let reservation = match boot.host_addr {
-        Some(address) => HostPort::fixed(address),
+    let reservation = match boot.port {
+        Some(port) => HostPort::fixed(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
         None => HostPort::reserve().map_err(|err| {
             Error::new(Code::PortExhausted, format!("{err:#}"))
                 .hint("pass `--host-addr` to choose the port yourself")
@@ -301,42 +301,37 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
         &json!({ "emulators": rows }),
         &rows,
         &[
-            ("PORT", "port"),
-            ("DISK", "disk"),
+            ("LOCATOR", "locator"),
+            ("IMAGE", "image"),
             ("READY", "ready"),
-            ("ENV", "env"),
+            ("ENV", "environment"),
             ("NAME", "name"),
             ("SERIAL", "serial"),
-            ("EXPIRES", "expiry"),
+            ("EXPIRES", "expires"),
         ],
     )
 }
 
-/// Shut one emulator down, or every one of them. The ports that went are the
-/// result, and on a timeout they are the partial result before the failure.
-fn stop(port: Option<u16>, all: bool, global: &Global, output: &Output) -> Result<(), Error> {
+/// Shut one emulator down, or every one of them. The emulator is named the
+/// way `ark -d` names it, and the only one running needs no name. The
+/// locators that went are the result, and on a timeout they are the partial
+/// result before the failure.
+fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> Result<(), Error> {
     let running = listing()?;
-    let mut pending: Vec<u16> = match port {
-        Some(port) => {
-            if !running.iter().any(|instance| instance.port == port) {
-                return Err(Error::new(
-                    Code::NoEmulator,
-                    format!("no emulator is running on port {port}"),
-                )
-                .hint("`ark-emulator list` shows the ports in use"));
-            }
-            vec![port]
-        }
-        None => running.iter().map(|instance| instance.port).collect(),
+    let mut targets = if all {
+        running
+    } else {
+        pick(&running, selector)?
     };
-    pending.sort_unstable();
-    if pending.is_empty() && all {
+    targets.sort_by_key(|instance| instance.port);
+    if targets.is_empty() {
         output.event("note", "no emulators are running");
     }
-    for port in &pending {
-        output.event("step", format!("asking the emulator on {port} to stop"));
+    for instance in &targets {
+        output.event("step", format!("asking {} to stop", locator(instance)));
     }
 
+    let mut pending: Vec<u16> = targets.iter().map(|instance| instance.port).collect();
     let mut done: Vec<u16> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(global.timeout);
     let mut asked: Option<Instant> = None;
@@ -364,12 +359,11 @@ fn stop(port: Option<u16>, all: bool, global: &Global, output: &Output) -> Resul
             break;
         }
         if Instant::now() >= deadline {
-            done.sort_unstable();
-            output.block(&json!({ "stopped": done }), &[("Stopped", "stopped")])?;
+            output.block(&stopped(&done), &[("Stopped", "stopped")])?;
             return Err(Error::new(
                 Code::Timeout,
                 format!(
-                    "the emulator on port {} was still up after {} s",
+                    "emulator:{} was still up after {} s",
                     pending[0], global.timeout
                 ),
             )
@@ -377,15 +371,23 @@ fn stop(port: Option<u16>, all: bool, global: &Global, output: &Output) -> Resul
         }
         std::thread::sleep(POLL);
     }
-    done.sort_unstable();
-    output.block(&json!({ "stopped": done }), &[("Stopped", "stopped")])
+    output.block(&stopped(&done), &[("Stopped", "stopped")])
 }
 
-/// Delete a stopped image, so that the next boot on it is a fresh device. The
-/// registry says which emulator holds an image, and QEMU's own lock on the
-/// file says whether one still does when the registry is between hosts.
-fn wipe(path: &Path, yes: bool, output: &Output, paths: &Paths) -> Result<(), Error> {
-    let path = disk::settle(path).map_err(|err| Error::io(format!("{err:#}")))?;
+/// Reset a stopped image to a fresh device, so that its next boot needs
+/// enrolling, pairing and unlocking again. The file stays where it is, so
+/// the window and `start` find it afterwards. The registry says which
+/// emulator holds an image, and QEMU's own lock on the file says whether one
+/// still does when the registry is between hosts.
+fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Result<(), Error> {
+    let local = |err: anyhow::Error| Error::io(format!("{err:#}"));
+    let path = match path {
+        Some(path) => disk::settle(path).map_err(local)?,
+        None => {
+            let settings = Settings::load(&paths.data).map_err(local)?;
+            disk::select(None, settings.disk(), &paths.data).map_err(local)?
+        }
+    };
     let size = std::fs::metadata(&path)
         .map_err(|err| {
             Error::new(
@@ -398,15 +400,11 @@ fn wipe(path: &Path, yes: bool, output: &Output, paths: &Paths) -> Result<(), Er
     if let Some(instance) = discovery::booted(&listing()?, &path) {
         return Err(Error::new(
             Code::DiskBusy,
-            format!(
-                "{} is booted by the emulator on port {}",
-                path.display(),
-                instance.port
-            ),
+            format!("{} is booted by {}", path.display(), locator(instance)),
         )
         .hint(format!(
             "stop it first with `ark-emulator stop {}`",
-            instance.port
+            locator(instance)
         )));
     }
     let libs = bundle::resolve_qemu_libs(paths.resources.as_deref());
@@ -420,8 +418,8 @@ fn wipe(path: &Path, yes: bool, output: &Output, paths: &Paths) -> Result<(), Er
 
     if !yes
         && !output.confirm(
-            &format!("Delete {}, {}?", path.display(), output::bytes(size)),
-            &format!("deleting {} was not confirmed", path.display()),
+            &format!("Wipe {}, {}?", path.display(), output::bytes(size)),
+            &format!("wiping {} was not confirmed", path.display()),
             "--yes",
         )?
     {
@@ -431,15 +429,11 @@ fn wipe(path: &Path, yes: bool, output: &Output, paths: &Paths) -> Result<(), Er
         ));
     }
 
-    std::fs::remove_file(&path)
-        .map_err(|err| Error::io(format!("could not delete {}: {err}", path.display())))?;
+    qemu::create_disk(&path, libs.as_deref())
+        .map_err(|err| Error::io(format!("could not reset {}: {err:#}", path.display())))?;
     output.block(
-        &json!({"path": path.display().to_string(), "deleted": true, "size_bytes": size}),
-        &[
-            ("Path", "path"),
-            ("Deleted", "deleted"),
-            ("Size", "size_bytes"),
-        ],
+        &json!({"path": path.display().to_string(), "wiped": true}),
+        &[("Path", "path"), ("Wiped", "wiped")],
     )
 }
 
@@ -462,21 +456,103 @@ fn gone(port: u16) -> bool {
     }
 }
 
-/// One emulator as both outputs carry it. The log file is worked out here
-/// rather than read from the registry, which publishes no paths.
+/// One emulator as both outputs carry it, under the names `ark devices` uses
+/// for the same facts. The log file is worked out here rather than read from
+/// the registry, which publishes no paths.
 fn row(paths: &Paths, instance: &Instance) -> Value {
     json!({
-        "locator": format!("emulator:{}", instance.port),
+        "locator": locator(instance),
         "port": instance.port,
-        "disk": instance.disk,
-        "disk_id": instance.disk_id,
+        "image": instance.disk,
         "ready": instance.ready,
-        "env": instance.env,
+        "environment": instance.env,
         "name": instance.name,
         "serial": instance.serial,
-        "expiry": instance.expiry.and_then(iso8601),
+        "expires": instance.expiry.and_then(iso8601),
         "log": diagnostics::log_path(&paths.data, instance.port).display().to_string(),
     })
+}
+
+/// The locator a running emulator is addressed by, in this tool and in `ark`.
+fn locator(instance: &Instance) -> String {
+    format!("emulator:{}", instance.port)
+}
+
+/// The result of a stop: the locators of the emulators that went.
+fn stopped(ports: &[u16]) -> Value {
+    let mut ports = ports.to_vec();
+    ports.sort_unstable();
+    let locators: Vec<String> = ports
+        .iter()
+        .map(|port| format!("emulator:{port}"))
+        .collect();
+    json!({ "stopped": locators })
+}
+
+/// The running emulators a selector names, as `ark -d` reads one: an exact
+/// locator, a unique serial, a unique name or a unique image basename. The
+/// bare word `emulator`, like no selector at all, means the only one running.
+fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, Error> {
+    let listed =
+        |instances: &[Instance]| instances.iter().map(locator).collect::<Vec<_>>().join(", ");
+    let Some(selector) = selector.filter(|selector| *selector != "emulator") else {
+        return match running {
+            [] => Err(Error::new(Code::NoEmulator, "no emulator is running")
+                .hint("`ark-emulator start` boots one")),
+            [only] => Ok(vec![only.clone()]),
+            _ => Err(Error::new(
+                Code::AmbiguousEmulator,
+                format!("several emulators are running: {}", listed(running)),
+            )
+            .hint("name one, or pass `--all`")),
+        };
+    };
+    if let Some(port) = selector.strip_prefix("emulator:") {
+        let port = port.parse::<u16>().ok();
+        return match running.iter().find(|instance| Some(instance.port) == port) {
+            Some(instance) => Ok(vec![instance.clone()]),
+            None => Err(Error::new(
+                Code::NoEmulator,
+                format!("no emulator is running as {selector}"),
+            )
+            .hint("`ark-emulator list` shows what is")),
+        };
+    }
+    let matches: Vec<&Instance> = running
+        .iter()
+        .filter(|instance| {
+            instance.serial.as_deref() == Some(selector)
+                || instance.name.as_deref() == Some(selector)
+                || instance.disk == selector
+        })
+        .collect();
+    match matches[..] {
+        [] => {
+            let mut error = Error::new(
+                Code::NoEmulator,
+                format!("nothing running matches {selector:?}"),
+            );
+            if selector.parse::<u16>().is_ok() {
+                error = error.hint(format!(
+                    "a port is named by its locator, emulator:{selector}"
+                ));
+            }
+            Err(error.hint("`ark-emulator list` shows what is running"))
+        }
+        [only] => Ok(vec![only.clone()]),
+        _ => Err(Error::new(
+            Code::AmbiguousEmulator,
+            format!(
+                "{selector:?} matches several emulators: {}",
+                matches
+                    .iter()
+                    .map(|instance| locator(instance))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .hint("name one by its locator")),
+    }
 }
 
 /// Print what a start settled on: where the emulator is, which image it holds,
@@ -497,12 +573,12 @@ fn report(
         &document,
         &[
             ("Locator", "locator"),
-            ("Disk", "disk"),
+            ("Image", "image"),
             ("Created", "created"),
             ("Started", "started"),
-            ("Env", "env"),
+            ("Environment", "environment"),
             ("Ready", "ready"),
-            ("Expires", "expiry"),
+            ("Expires", "expires"),
         ],
     )
 }
@@ -544,10 +620,10 @@ fn spawn(boot: &Boot, arch: GuestArch, image: &Path, address: SocketAddr) -> any
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("--no-input")
-        .arg("--disk")
+        .arg("--image")
         .arg(image)
-        .arg("--host-addr")
-        .arg(address.to_string())
+        .arg("--port")
+        .arg(address.port().to_string())
         .arg("--arch")
         .arg(arch.name());
     if let Some(env) = &boot.env {
@@ -645,6 +721,56 @@ mod tests {
         assert_eq!(
             iso8601(1_788_000_000).as_deref(),
             Some("2026-08-29T10:40:00Z")
+        );
+    }
+
+    /// A running emulator, as the registry would list it.
+    fn running(port: u16, image: &str, name: Option<&str>, serial: Option<&str>) -> Instance {
+        Instance {
+            port,
+            disk: image.into(),
+            disk_id: format!("{port:016x}"),
+            ready: true,
+            env: None,
+            name: name.map(str::to_owned),
+            serial: serial.map(str::to_owned),
+            expiry: None,
+        }
+    }
+
+    /// A selector reads as `ark -d` reads it, and the only emulator running
+    /// needs none.
+    #[test]
+    fn test_a_selector_names_one_running_emulator() {
+        let both = [
+            running(18181, "a.ark", Some("demo"), None),
+            running(18182, "b.ark", None, Some("abc123")),
+        ];
+        let ports = |picked: Vec<Instance>| picked.iter().map(|i| i.port).collect::<Vec<_>>();
+        assert_eq!(ports(pick(&both, Some("emulator:18182")).unwrap()), [18182]);
+        assert_eq!(ports(pick(&both, Some("demo")).unwrap()), [18181]);
+        assert_eq!(ports(pick(&both, Some("b.ark")).unwrap()), [18182]);
+        assert_eq!(ports(pick(&both, Some("abc123")).unwrap()), [18182]);
+        assert_eq!(ports(pick(&both[..1], None).unwrap()), [18181]);
+        assert_eq!(ports(pick(&both[..1], Some("emulator")).unwrap()), [18181]);
+
+        assert_eq!(pick(&both, None).unwrap_err().code, Code::AmbiguousEmulator);
+        assert_eq!(pick(&[], None).unwrap_err().code, Code::NoEmulator);
+        assert_eq!(
+            pick(&both, Some("emulator:1")).unwrap_err().code,
+            Code::NoEmulator
+        );
+        let bare = pick(&both, Some("18181")).unwrap_err();
+        assert_eq!(bare.code, Code::NoEmulator);
+        assert!(bare.hints[0].contains("emulator:18181"), "{:?}", bare.hints);
+
+        let twins = [
+            running(18181, "same.ark", None, None),
+            running(18182, "same.ark", None, None),
+        ];
+        assert_eq!(
+            pick(&twins, Some("same.ark")).unwrap_err().code,
+            Code::AmbiguousEmulator
         );
     }
 

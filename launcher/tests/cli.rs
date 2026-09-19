@@ -59,14 +59,14 @@ fn test_both_help_forms_answer_on_every_command() {
 
 #[test]
 fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
-    let plain = run(&["stop"]);
+    let plain = run(&["list", "--bogus"]);
     assert_eq!(plain.status.code(), Some(2));
     assert!(stdout(&plain).is_empty());
     let err = stderr(&plain);
     assert!(err.starts_with("error[usage]: "), "{err}");
     assert!(err.contains("\nhint: "), "{err}");
 
-    let json = run(&["--json", "stop"]);
+    let json = run(&["--json", "list", "--bogus"]);
     assert_eq!(json.status.code(), Some(2));
     let document: serde_json::Value =
         serde_json::from_str(&stdout(&json)).expect("one document on stdout");

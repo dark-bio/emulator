@@ -10,7 +10,6 @@
 //! The types here are parsed through the help tree, so that the pages the
 //! manual prints and the arguments a run accepts are one and the same thing.
 
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -22,10 +21,10 @@ use crate::settings;
 /// What the tool is, which opens every help page.
 pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos\n\n\
      An emulated Ark is the real firmware running in QEMU behind a small window \
-     that stands in for the device's face. It exists for development and demos. \
-     It is not a vault, since everything lives in one plain disk image on this \
-     computer, so real data belongs on hardware. Talk to it with `ark`, exactly \
-     as you would to hardware, where the owner approves on their phone.";
+     that stands in for the device's face. It is not a vault, since everything \
+     lives in one plain disk image on this computer, so real data belongs on \
+     hardware. Talk to it with `ark`, exactly as you would to hardware, where \
+     the owner approves on their phone.";
 
 /// Longest wait for a machine, in seconds. One number for the whole tool, so
 /// there is one to remember, and it is generous enough to cover a boot with no
@@ -81,7 +80,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Longest wait for a machine reply
+    /// Whole wait for a start or a stop, in seconds
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
@@ -134,18 +133,12 @@ fn parse_timeout(value: &str) -> Result<u64, String> {
 /// A year, which is as long as any wait could sensibly be asked for.
 const MAX_TIMEOUT: u64 = 365 * 24 * 60 * 60;
 
-/// Accept only what the registry, the locators and the shutdown probe can
-/// name: an IPv4 loopback address with a port.
-fn parse_host_addr(value: &str) -> Result<SocketAddr, String> {
-    let address: SocketAddr = value
-        .parse()
-        .map_err(|_| "the address is an IP and a port, such as 127.0.0.1:18181".to_owned())?;
-    if address.ip() != Ipv4Addr::LOCALHOST || address.port() == 0 {
-        return Err(
-            "the address is 127.0.0.1 with a port, since emulators live on the loopback".to_owned(),
-        );
+/// A port an emulator can hold, which is any but the one that means none.
+fn parse_port(value: &str) -> Result<u16, String> {
+    match value.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err("the port is a number from 1 to 65535".to_owned()),
     }
-    Ok(address)
 }
 
 /// What an emulator boots from, shared by the bare run and by the command that
@@ -157,7 +150,7 @@ pub(crate) struct Boot {
     // file, so a one-off boot from another image leaves the remembered choice
     // alone.
     #[arg(long, value_name = "PATH")]
-    pub(crate) disk: Option<PathBuf>,
+    pub(crate) image: Option<PathBuf>,
 
     /// Cloud environment for a new image
     // An existing image keeps the environment it was created with, since the
@@ -186,24 +179,23 @@ pub(crate) struct Boot {
     #[arg(long, value_name = "PATH", requires = "kernel")]
     pub(crate) initrd: Option<PathBuf>,
 
-    /// Loopback address forwarded into the guest
+    /// Port to hold; the first free from 18181 otherwise
     // The guest's own port is fixed, so this is the host side of the forward
-    // and the number an emulator is known by. The first free port from 18181
-    // up answers when this does not.
-    #[arg(long, value_name = "ADDR", value_parser = parse_host_addr)]
-    pub(crate) host_addr: Option<SocketAddr>,
+    // and the number an emulator is known by.
+    #[arg(long, value_name = "PORT", value_parser = parse_port)]
+    pub(crate) port: Option<u16>,
 }
 
 impl Boot {
     /// Whether any of these was typed.
     pub(crate) fn named(&self) -> bool {
-        self.disk.is_some()
+        self.image.is_some()
             || self.env.is_some()
             || self.memory.is_some()
             || self.arch.is_some()
             || self.kernel.is_some()
             || self.initrd.is_some()
-            || self.host_addr.is_some()
+            || self.port.is_some()
     }
 }
 
@@ -222,26 +214,22 @@ pub(crate) enum Command {
 
     /// Shut an emulator down, like closing its window
     Stop {
-        /// Port of the emulator to stop, from `list` or `ark devices`
-        #[arg(
-            value_name = "PORT",
-            required_unless_present = "all",
-            conflicts_with = "all"
-        )]
-        port: Option<u16>,
+        /// Locator, serial, name or image, as ark -d takes it; the only one otherwise
+        #[arg(value_name = "EMULATOR", conflicts_with = "all")]
+        emulator: Option<String>,
 
         /// Stop every emulator on this computer
         #[arg(long)]
         all: bool,
     },
 
-    /// Delete a stopped image so the next boot is a fresh device
+    /// Reset a stopped image so its next boot is a fresh device
     Wipe {
-        /// Image to delete
+        /// Image to reset; the image start would boot otherwise
         #[arg(value_name = "PATH")]
-        path: PathBuf,
+        path: Option<PathBuf>,
 
-        /// Delete without being asked to confirm
+        /// Reset without being asked to confirm
         #[arg(short = 'y', long)]
         yes: bool,
     },
@@ -258,7 +246,7 @@ pub(crate) enum Command {
 
     /// Help for a command or a topic
     Help {
-        /// Command or topic to explain: agents, output, disks, registry
+        /// Command or topic to explain: agents, output, images, registry
         #[arg(value_name = "COMMAND_OR_TOPIC")]
         name: Option<String>,
 
@@ -281,10 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn test_a_host_address_is_the_loopback_with_a_port() {
-        assert!(parse_host_addr("127.0.0.1:18181").is_ok());
-        for bad in ["127.0.0.1:0", "10.0.0.1:18181", "[::1]:18181", "18181"] {
-            assert!(parse_host_addr(bad).is_err(), "{bad}");
+    fn test_a_port_is_a_number_an_emulator_can_hold() {
+        assert_eq!(parse_port("18181"), Ok(18181));
+        for bad in ["0", "65536", "127.0.0.1:18181", "port"] {
+            assert!(parse_port(bad).is_err(), "{bad}");
         }
     }
 }

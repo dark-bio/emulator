@@ -288,13 +288,13 @@ mod tests {
     fn waiting(dir: &Path, memory: Option<u32>, env: Option<&str>) -> Launcher {
         let pending = Pending {
             boot: Boot {
-                disk: None,
+                image: None,
                 env: env.map(str::to_owned),
                 memory,
                 arch: None,
                 kernel: None,
                 initrd: None,
-                host_addr: None,
+                port: None,
             },
             arch: GuestArch::Amd64,
             host_port: HostPort::fixed("127.0.0.1:18181".parse::<SocketAddr>().unwrap()),

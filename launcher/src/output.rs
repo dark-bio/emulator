@@ -319,8 +319,8 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     let text = style::cell(&scalar(value));
     match key {
         // The day is what a reader scans for; the document keeps the instant.
-        "expiry" if text.len() >= 10 => text[..10].to_owned(),
-        "env" => theme.paint(
+        "expires" if text.len() >= 10 => text[..10].to_owned(),
+        "environment" => theme.paint(
             match text.as_str() {
                 "release" => Role::Accent,
                 "staging" => Role::Staging,
@@ -551,13 +551,16 @@ mod tests {
     #[test]
     fn test_a_block_aligns_labels_and_spells_absent_values() {
         let theme = Theme::fixed(80, Color::Off, true);
-        let document = json!({"locator": "emulator:18181", "env": null, "ready": true});
+        let document = json!({"locator": "emulator:18181", "environment": null, "ready": true});
         let rows = [
             (
                 "Locator".to_owned(),
                 value(&theme, "locator", &document["locator"]),
             ),
-            ("Env".to_owned(), value(&theme, "env", &document["env"])),
+            (
+                "Env".to_owned(),
+                value(&theme, "environment", &document["environment"]),
+            ),
             (
                 "Ready".to_owned(),
                 value(&theme, "ready", &document["ready"]),

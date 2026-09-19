@@ -93,7 +93,7 @@ try {
     Write-Host "the device on port $port accepts clients"
 
     Write-Host "stopping the emulator on port $port"
-    $stopArgs = @("stop", $port, "--no-input", "--json", "--timeout", "$timeout")
+    $stopArgs = @("stop", "emulator:$port", "--no-input", "--json", "--timeout", "$timeout")
     $status = Invoke-Emulator $stopArgs -Append
     if ($status -ne 0) {
         Write-Host "stop exited with status $status"
@@ -107,6 +107,6 @@ try {
 }
 finally {
     if ($port -and $started -eq "true") {
-        Invoke-Emulator @("stop", $port, "--no-input") -Append | Out-Null
+        Invoke-Emulator @("stop", "emulator:$port", "--no-input") -Append | Out-Null
     }
 }

@@ -11,27 +11,30 @@ Read `ark help agents` before driving the Ark itself.
 
 ## Running
 
-- `ark-emulator start` boots the remembered disk image, the same device the
+- `ark-emulator start` boots the remembered image, the same device the
   owner opens by double-click, and returns once the firmware accepts clients.
-  It prints the locator to pass to `ark -d`. Pass --disk for a separate
-  device, and --env for the cloud environment of an image created on this
-  run; an existing image keeps the environment it was created with. Use
-  --json for exact values.
+  It prints the locator to pass to `ark -d`. The emulator runs in a process
+  of its own and shows the device face in a window, so it needs a display.
+  Pass --image for a separate device, and --env for the cloud environment of
+  an image created on this run; an existing image keeps the environment it
+  was created with. Use --json for exact values.
 - Expect seconds with hardware acceleration and minutes without;
   `ark-emulator doctor` says which this computer has and what to do about
   it. --timeout bounds the wait. On timeout the emulator keeps booting, the
   exit is 7, and `ark-emulator list` shows when it is ready.
-- start is idempotent. An image that is already booted is reported with
-  started false and exit 0. Several emulators run at once, each on its own
-  image and its own port from 18181 up.
-- `ark-emulator stop PORT` shuts one down the way closing its window does.
-  `ark-emulator stop --all` stops every one.
-- `ark-emulator wipe PATH --yes` deletes a stopped image. The next start is a
-  factory-fresh device that needs `ark enroll`, `ark pair` and `ark unlock`
-  again. Nothing else asks a question, and no command opens a window of its
-  own; the emulator that `start` boots runs as its own process and shows the
-  device face, so it needs a display. A bare `ark-emulator` opens the device
-  window and may ask where to keep the image; do not use it from a script.
+- start is idempotent. An image that is already booted is waited for and
+  reported with started false and exit 0. A second device is asked for by
+  naming a second image; each runs on its own port from 18181 up.
+- `ark-emulator stop` shuts the only running emulator down the way closing
+  its window does. With several running, name one as `ark -d` would, by its
+  locator, serial, name or image, or pass --all for every one.
+- `ark-emulator wipe --yes` resets the image start would boot to a fresh
+  device, and `wipe PATH --yes` another one. The file stays, so the next
+  start boots a factory-fresh device that needs `ark enroll`, `ark pair` and
+  `ark unlock` again. The reset loop is stop, wipe, start.
+- Nothing else asks a question, and no command opens a window of its own. A
+  bare `ark-emulator` opens the device window and may ask where to keep the
+  image; do not use it from a script.
 
 ## Reading results
 
@@ -51,8 +54,9 @@ background and follow stderr, without starting another:
 
 ## Checking state
 
-`ark-emulator list` shows every running emulator with its port, image, ready
-state and what the firmware has reported about the device.
+`ark-emulator list` shows every running emulator with its locator, image,
+ready state and what the firmware has reported about the device, under the
+names `ark devices` uses for the same facts.
 `ark-emulator doctor` checks this computer and this build, QEMU, the bundled
 firmware, hardware acceleration, the data directory, the settings, the
 remembered image, the registry and a free port, and says what to fix; its
@@ -72,7 +76,9 @@ The firmware inside the emulator is the build bundled with this app.
 names the bundled build, and a newer emulator release carries newer firmware.
 An emulated Ark's attested identity expires 30 days after `ark enroll`, and
 the cloud refuses an expired one. `ark-emulator list` shows the day, and
-`ark genuine` says when it has passed. After it, wipe the image and start a
-fresh device; nothing worth keeping should build up inside an emulator.
+`ark genuine` says when it has passed. After it, stop, wipe and start again;
+nothing worth keeping should build up inside an emulator. Copying a stopped
+image copies the device, which is the snapshot; a copy boots locked and needs
+`ark unlock` again.
 Worked apps to run on it, in Rust, Go, C and Python, are at
 https://github.com/dark-bio/examples.

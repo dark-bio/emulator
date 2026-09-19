@@ -76,6 +76,7 @@ mod style;
 mod verbs;
 
 use std::io::{BufRead, BufReader};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -193,8 +194,11 @@ fn main() {
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
     // into `start` with every other one.
-    let host_port = match cli.boot.host_addr {
-        Some(addr) => Ok(HostPort::fixed(addr)),
+    let host_port = match cli.boot.port {
+        Some(port) => Ok(HostPort::fixed(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            port,
+        )))),
         None => HostPort::reserve(),
     };
 
@@ -264,7 +268,7 @@ fn start(app: &tauri::App, boot: Boot, no_input: bool, host_port: Result<HostPor
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            if pending.boot.disk.is_some() || no_input {
+            if pending.boot.image.is_some() || no_input {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())
                 })?;
@@ -336,7 +340,7 @@ fn prepare(
     let qemu_libs = resolve_qemu_libs(paths.resources.as_deref());
 
     let resolved = disk::decide(
-        boot.disk.as_deref(),
+        boot.image.as_deref(),
         settings.disk(),
         settings.autostart(),
         &booted,

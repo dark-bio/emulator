@@ -1,11 +1,11 @@
-# The disk image is the device
+# The image is the device
 
 An emulated Ark is one `.ark` file. It holds everything the device knows: its
 identity, its pairing, its data. Copy the file and you have copied the device;
 delete it and the device is gone. Two emulators can never share one image,
 since two guests writing one file would destroy it. The window refuses a
-second boot of an image, and `start` reports the emulator that already holds
-it instead of booting another.
+second boot of an image, and `start` waits for and reports the emulator that
+already holds it instead of booting another.
 
 The file is a plain qcow2 image with no encryption of any kind. It starts at a
 few megabytes and grows as the guest writes, up to a virtual ceiling of about
@@ -24,21 +24,21 @@ The launcher keeps what it writes in one directory per platform:
 `ark-emulator doctor --json` prints the one this build uses, along with the
 settings file and the log directory inside it. The image the launcher
 allocates for itself, `emulator.ark`, lives there too; an image you name with
---disk lives wherever you put it. Any name works, and the window's own picker
-uses the `.ark` extension so the files are easy to tell apart.
+--image lives wherever you put it. Any name works, and the window's own
+picker uses the `.ark` extension so the files are easy to tell apart.
 
 ## What is remembered
 
 `settings.toml` in that directory holds the image to boot, whether to boot it
 without asking, the guest memory, and the environment a newly created image is
 bound to. The window's settings panel writes it. The command line reads it and
-never writes it, so a `start --disk` somewhere else leaves the remembered
+never writes it, so a `start --image` somewhere else leaves the remembered
 choice alone.
 
-A start with no --disk takes the remembered image, which is the device the
-owner opens by double-click. When there is none, or the remembered one is
-gone, it takes the image the launcher allocates for itself, and one named
-after the port when that is already booted.
+A start with no --image takes the remembered image, which is the device the
+owner opens by double-click, and creates it afresh if it is gone rather than
+booting another file. Only when nothing was ever remembered does it take the
+image the launcher allocates for itself.
 
 ## Environments
 
@@ -59,8 +59,8 @@ emulator holds nothing worth keeping that long.
 
 ## Wiping
 
-`ark-emulator wipe PATH` deletes a stopped image, and the next start on that
-path is a factory-fresh device that needs `ark enroll`, `ark pair` and
-`ark unlock` again. It deletes the file and nothing else, so the remembered
-path stays, the window comes up saying its emulator is missing, and a start
-falls back to the default image unless --disk names the path to recreate.
+`ark-emulator wipe` resets the image start would boot to a fresh device, and
+`wipe PATH` another one. The file is replaced by an empty image at the same
+path, so the window and the next start find it as before, and the device on
+it is factory fresh, needing `ark enroll`, `ark pair` and `ark unlock` again.
+A booted image is refused; stop the emulator first.

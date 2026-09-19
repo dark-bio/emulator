@@ -53,7 +53,7 @@ dump() {
 # an emulator already running leaves it to whoever started it.
 cleanup() {
   if [ -n "$port" ] && [ "$started" = "true" ]; then
-    "$exe" stop "$port" --no-input >/dev/null 2>&1 || true
+    "$exe" stop "emulator:$port" --no-input >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -89,7 +89,7 @@ echo "the device on port $port accepts clients"
 
 echo "stopping the emulator on port $port"
 status=0
-"$exe" stop "$port" --no-input --json --timeout "$timeout" >>"$log" 2>>"$events" || status=$?
+"$exe" stop "emulator:$port" --no-input --json --timeout "$timeout" >>"$log" 2>>"$events" || status=$?
 if [ "$status" -ne 0 ]; then
   echo "stop exited with status $status" >&2
   dump

@@ -52,8 +52,10 @@ can read a loopback port.
 
 `ready` says the firmware has accepted a client. `env`, `name`, `serial` and
 `expiry` are absent until the device has reported them, and they are what the
-launcher heard rather than anything it verified. Discovery is not identity: a
-handshake with the device is.
+launcher heard rather than anything it verified. Discovery is not identity; a
+handshake with the device is. The tool prints these under the names `ark
+devices` uses, `image`, `environment` and `expires`, and the wire keeps its
+own, since the listing is versioned on its own.
 
 ## Heartbeats and stopping
 

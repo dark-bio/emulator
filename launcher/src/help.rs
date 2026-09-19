@@ -23,7 +23,7 @@ use crate::error::{Code, Error};
 use crate::style::{self, Color, Role, Theme};
 
 /// The topics this build carries, in the order the manual prints them.
-const TOPICS: [&str; 4] = ["agents", "output", "disks", "registry"];
+const TOPICS: [&str; 4] = ["agents", "output", "images", "registry"];
 
 /// The column the contract's values start in, one past the widest label and
 /// its colon.
@@ -130,7 +130,7 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
                     .short('h')
                     .long("help")
                     .action(clap::ArgAction::Help)
-                    .help("Print help; `ark-emulator help --all` prints the manual"),
+                    .help("Print help; `help --all` prints the manual"),
             );
     } else {
         for global in globals {
@@ -146,7 +146,7 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
     let footer = footer(theme, &contract);
     let closing = "Output is formatted for reading; --json keeps complete, exact values.
 Scripts and AI agents: read `ark-emulator help agents` first.
-Topics: agents, output, disks, registry.";
+Topics: agents, output, images, registry.";
     let closing = closing
         .lines()
         .map(|line| style::wrap(&theme.inline(line), theme.width, 0))
@@ -211,32 +211,32 @@ fn hanging(line: &str) -> usize {
 fn contract(path: &str) -> [(&'static str, &'static str); 5] {
     let (requires, time, prints, exits, examples) = match path {
         "start" => (
-            "a disk image nobody has booted, and a free loopback port from 18181 up",
-            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait",
-            "locator, disk, created, started, env, ready, expires; JSON adds port, path, disk_id, name, serial, log and the full expiry",
-            "0 ready; 1 disk, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
-            "ark-emulator start\nark-emulator start --env develop --disk ~/arks/dev.ark --json",
+            "a free loopback port from 18181 up, or --port; a source build needs --kernel and --initrd",
+            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; the device window opens in a process of its own",
+            "locator, image, created, started, environment, ready, expires; JSON adds port, path, name, serial and log",
+            "0 ready; 1 image, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
+            "ark-emulator start\nark-emulator start --env develop --image ~/arks/dev.ark --json",
         ),
         "list" => (
             "nothing; no registry means no emulators",
             "immediate",
-            "port, disk, ready, env, name, serial, expires; JSON adds locator, disk_id, log and the full expiry",
+            "locator, image, ready, environment, name, serial, expires; JSON adds port and log",
             "0 done; 2 usage; 3 registry answered but could not be read; 130/143 interrupted",
             "ark-emulator list\nark-emulator list --json",
         ),
         "stop" => (
-            "the port of a running emulator, from list or ark devices; --all stops every one",
+            "a running emulator, named as ark -d names it, or the only one running; --all stops every one",
             "about a second to deliver, then seconds for the device to go; --timeout bounds the whole wait",
-            "stopped, the ports that went, which is the partial result on a timeout",
-            "0 done; 2 usage; 3 no emulator on that port; 7 one did not go in time; 130/143 interrupted",
-            "ark-emulator stop 18181\nark-emulator stop --all",
+            "stopped, the locators that went, which is the partial result on a timeout",
+            "0 done; 2 usage; 3 none matches, or several do; 7 one did not go in time; 130/143 interrupted",
+            "ark-emulator stop\nark-emulator stop emulator:18181 --json",
         ),
         "wipe" => (
-            "a disk image that is not booted; confirmation at a terminal, or --yes",
-            "immediate",
-            "path, deleted, size; JSON uses size_bytes",
+            "an existing image no emulator holds; confirmation at a terminal, or --yes",
+            "a second",
+            "path, wiped",
             "0 done; 1 confirmation or file problem; 2 usage; 3 held by an emulator; 130/143 interrupted",
-            "ark-emulator wipe ~/arks/dev.ark\nark-emulator wipe ~/arks/dev.ark --yes",
+            "ark-emulator wipe\nark-emulator wipe ~/arks/dev.ark --yes",
         ),
         "doctor" => (
             "nothing; a check that cannot run is skipped",
@@ -264,7 +264,7 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "the window opens at once; the device accepts clients about 10 s later with hardware acceleration, minutes without",
             "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
             "0 window closed; 1 could not start; 2 usage",
-            "ark-emulator\nark-emulator --env develop --disk ~/arks/dev.ark",
+            "ark-emulator\nark-emulator --env develop --image ~/arks/dev.ark",
         ),
     };
     [
@@ -388,7 +388,7 @@ fn topic(name: &str) -> Option<&'static str> {
     Some(match name {
         "agents" => include_str!("help/agents.md"),
         "output" => include_str!("help/output.md"),
-        "disks" => include_str!("help/disks.md"),
+        "images" => include_str!("help/images.md"),
         "registry" => include_str!("help/registry.md"),
         _ => return None,
     })
@@ -459,7 +459,7 @@ mod tests {
         for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
             assert!(page.contains(label), "{label}");
         }
-        assert!(page.contains("Topics: agents, output, disks, registry."));
+        assert!(page.contains("Topics: agents, output, images, registry."));
     }
 
     #[test]
@@ -488,7 +488,7 @@ mod tests {
                 "{arguments:?}"
             );
             let page = error.render().to_string();
-            assert!(page.contains("Delete a stopped image"), "{arguments:?}");
+            assert!(page.contains("Reset a stopped image"), "{arguments:?}");
             assert_eq!(page.contains("Requires:"), contract, "{arguments:?}");
         }
     }

@@ -229,7 +229,7 @@ pub(crate) struct HostPort {
 
 impl HostPort {
     /// Take `addr` exactly as asked for, without checking it is free. Used for
-    /// an explicit `--host-addr`, where QEMU reports a collision perfectly well
+    /// an explicit `--port`, where QEMU reports a collision perfectly well
     /// by itself.
     pub(crate) fn fixed(addr: SocketAddr) -> Self {
         Self {
@@ -250,7 +250,7 @@ impl HostPort {
             }
         }
         bail!(
-            "no free port between {FIRST_HOST_PORT} and {}; pass --host-addr to choose one",
+            "no free port between {FIRST_HOST_PORT} and {}; pass --port to choose one",
             FIRST_HOST_PORT + HOST_PORT_RANGE - 1
         )
     }
@@ -280,7 +280,7 @@ impl HostPort {
 }
 
 /// Lazily creates the backing qcow2 disk image if missing, and the directory
-/// it lives in. Idempotent; to reset device state with `--disk`, delete the
+/// it lives in. Idempotent; to reset device state, `wipe` the image or delete
 /// file and re-launch.
 pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
     if path.exists() {
