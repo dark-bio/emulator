@@ -15,7 +15,7 @@
 //! Nothing here speaks to the firmware. Everything about an emulated Ark's
 //! identity, pairing and data belongs to `ark`.
 
-use std::io::{ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -347,12 +347,17 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
             asked = Some(Instant::now());
         }
 
-        // An emulator holds its port for as long as it is up, so a port that
-        // refuses a connection is a device that has gone. That is a firmer
-        // answer than the listing, which a change of registry can empty for a
-        // moment, and only a refusal counts: a port that does not answer is
-        // one still held by something.
-        let (gone, held): (Vec<u16>, Vec<u16>) = pending.iter().partition(|port| gone(**port));
+        // An emulator withdraws from the registry as it goes, and QEMU lets go
+        // of its port with it; the two together say it has gone. Either alone
+        // misleads: the listing empties for a moment when the registry changes
+        // hosts, and on Windows a closed port times out the way a busy one
+        // does. A registry that cannot be read this round settles nothing.
+        let listed: Option<Vec<u16>> = listing()
+            .ok()
+            .map(|instances| instances.iter().map(|instance| instance.port).collect());
+        let (gone, held): (Vec<u16>, Vec<u16>) = pending.iter().partition(|port| {
+            listed.as_ref().is_some_and(|listed| !listed.contains(port)) && !answering(**port)
+        });
         done.extend(gone);
         pending = held;
         if pending.is_empty() {
@@ -446,14 +451,11 @@ fn listing() -> Result<Vec<Instance>, Error> {
     })
 }
 
-/// Whether nothing accepts connections on a loopback port any more. Only a
-/// refused connection says so; a port that does not answer is still held.
-fn gone(port: u16) -> bool {
+/// Whether something accepts connections on a loopback port, which QEMU does
+/// for as long as the emulator holding it lives.
+fn answering(port: u16) -> bool {
     let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    match TcpStream::connect_timeout(&address.into(), DIAL) {
-        Ok(_) => false,
-        Err(err) => err.kind() == ErrorKind::ConnectionRefused,
-    }
+    TcpStream::connect_timeout(&address.into(), DIAL).is_ok()
 }
 
 /// One emulator as both outputs carry it, under the names `ark devices` uses
