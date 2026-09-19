@@ -19,7 +19,7 @@ use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::Global;
 
@@ -171,11 +171,7 @@ impl Theme {
 
     /// Pick a glyph or its ASCII twin, without changing what the line says.
     pub(crate) fn glyph<'a>(&self, unicode: &'a str, ascii: &'a str) -> &'a str {
-        if self.unicode {
-            unicode
-        } else {
-            ascii
-        }
+        if self.unicode { unicode } else { ascii }
     }
 
     /// Put a role's mark before a state, so the state survives without color.
@@ -582,10 +578,10 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
         }
         _ => {}
     }
-    if key.ends_with("_bytes") {
-        if let Some(count) = value.as_u64() {
-            return bytes(count);
-        }
+    if key.ends_with("_bytes")
+        && let Some(count) = value.as_u64()
+    {
+        return bytes(count);
     }
     let text = scalar(value);
     match key {
@@ -969,10 +965,12 @@ mod tests {
         for line in narrow.lines() {
             assert!(console::measure_text_width(line) <= theme.width, "{line}");
         }
-        assert!(narrow
-            .split_whitespace()
-            .collect::<String>()
-            .contains("a-rather-long-name.ark"));
+        assert!(
+            narrow
+                .split_whitespace()
+                .collect::<String>()
+                .contains("a-rather-long-name.ark")
+        );
     }
 
     #[test]

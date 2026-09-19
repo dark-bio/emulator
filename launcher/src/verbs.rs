@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::PackageInfo;
 
 use crate::bundle::{self, Paths};
 use crate::diagnostics::{self, Sink};
 use crate::discovery::{self, disk_id};
-use crate::disk::{name_of, DEFAULT_DISK};
+use crate::disk::{DEFAULT_DISK, name_of};
 use crate::output::{self, Error, Output};
 use crate::qemu::{self, GuestArch, HostPort};
 use crate::registry::{Instance, REGISTRY_PORT};
@@ -902,7 +902,7 @@ fn detach(command: &mut std::process::Command) {
 fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt as _;
     use windows_sys::Win32::Foundation::{
-        SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     };
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,

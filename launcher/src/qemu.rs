@@ -31,9 +31,9 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
-use crate::bundle::{resolve_sidecar, Firmware};
+use crate::bundle::{Firmware, resolve_sidecar};
 use crate::diagnostics::{self, log};
 use crate::orphan;
 use crate::platform::{

@@ -17,8 +17,8 @@
 
 use clap::CommandFactory as _;
 
-use crate::output::{self, Color, Error, Role, Theme};
 use crate::Cli;
+use crate::output::{self, Color, Error, Role, Theme};
 
 /// The topics this build carries, in the order the manual prints them.
 const TOPICS: [&str; 4] = ["agents", "output", "disks", "registry"];
@@ -66,11 +66,11 @@ pub(crate) fn run(path: &[String], all: bool, long: bool) -> Result<(), Error> {
         println!("{}", pages.join(&format!("\n\n{rule}\n\n")));
         return Ok(());
     }
-    if let [name] = path {
-        if let Some(text) = topic(name) {
-            println!("{}", markdown(&theme, text));
-            return Ok(());
-        }
+    if let [name] = path
+        && let Some(text) = topic(name)
+    {
+        println!("{}", markdown(&theme, text));
+        return Ok(());
     }
     let mut command = &mut root;
     for name in path {

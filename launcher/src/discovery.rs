@@ -31,7 +31,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::log;
@@ -102,9 +102,11 @@ pub(crate) fn register(port: u16, disk: &Path) {
     }
 
     publish();
-    thread::spawn(|| loop {
-        thread::sleep(HEARTBEAT);
-        publish();
+    thread::spawn(|| {
+        loop {
+            thread::sleep(HEARTBEAT);
+            publish();
+        }
     });
 }
 

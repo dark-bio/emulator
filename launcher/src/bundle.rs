@@ -22,13 +22,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use tauri::PackageInfo;
 
+use crate::Boot;
 use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
 use crate::qemu::GuestArch;
-use crate::Boot;
 
 /// Where this build keeps its files, resolved without a window so that a
 /// command line run never has to start one.
@@ -79,7 +79,7 @@ pub(crate) fn resolve_firmware(
                 kernel: kernel.clone(),
                 initrd: initrd.clone(),
                 bundled: false,
-            })
+            });
         }
         (None, None) => {}
         _ => bail!("--kernel and --initrd must be passed together"),

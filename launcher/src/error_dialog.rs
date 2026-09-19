@@ -20,14 +20,14 @@
 //! The report always reaches stderr first, so a developer at a terminal and CI
 //! both still see it when no window can be shown at all.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+use crate::MAIN_WINDOW;
 use crate::diagnostics::{self, log};
 use crate::output::{Error, Output};
-use crate::MAIN_WINDOW;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
@@ -63,10 +63,10 @@ static EVENTS: Mutex<Option<Output>> = Mutex::new(None);
 /// from here.
 pub(crate) fn reporting(output: &Output, no_input: bool) {
     NO_INPUT.store(no_input, Ordering::SeqCst);
-    if output.json() {
-        if let Ok(mut events) = EVENTS.lock() {
-            *events = Some(output.clone());
-        }
+    if output.json()
+        && let Ok(mut events) = EVENTS.lock()
+    {
+        *events = Some(output.clone());
     }
 }
 

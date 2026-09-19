@@ -5,7 +5,7 @@
 
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 
 use crate::diagnostics::log;

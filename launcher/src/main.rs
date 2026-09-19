@@ -65,19 +65,19 @@ mod verbs;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{FromArgMatches as _, Parser};
 use tauri::{Manager, WindowEvent};
 
-use bundle::{resolve_firmware, resolve_qemu_libs, Paths};
+use bundle::{Paths, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
 use disk::Resolved;
 use panel::{Launcher, Pending};
-use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
+use qemu::{GuestArch, HostPort, ensure_disk, spawn_qemu};
 use settings::Settings;
 
 /// What the tool is, which opens every help page.

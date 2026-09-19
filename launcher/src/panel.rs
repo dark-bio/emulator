@@ -27,11 +27,11 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+use crate::Boot;
 use crate::bundle::Firmware;
 use crate::disk::{self, Reason};
 use crate::qemu::{GuestArch, HostPort};
-use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
-use crate::Boot;
+use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY, Settings};
 
 /// Everything the guest needs to be started, held until it is. Taken by the
 /// start, so a second press of the button has nothing to work with and no
