@@ -26,7 +26,7 @@
 //! reads its own mailbox on the same path.
 
 use std::fmt::Write as _;
-use std::io::{ErrorKind, Read as _, Write as _};
+use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -62,10 +62,10 @@ fn registry_addr() -> SocketAddrV4 {
 }
 
 /// Ask the registry what is running. Nothing serving one is a computer with no
-/// emulators on it, so a refused connection answers with an empty list. Any
-/// other failure, an answer that cannot be read, a version this build does
-/// not know, a wedged host, is reported, since something is there and it is
-/// not a registry this build can trust.
+/// emulators on it, so a connection that cannot be made answers with an empty
+/// list. Any failure after that, an answer that cannot be read, a version
+/// this build does not know, a host that stops answering, is reported, since
+/// something is there and it is not a registry this build can trust.
 pub(crate) fn list() -> Result<Vec<Instance>> {
     let body = match request("GET", "/v1/instances", None) {
         Ok(body) => body,
@@ -282,9 +282,13 @@ pub(crate) fn disk_id(disk: &Path) -> String {
 /// Why a request got no answer: nobody is serving the registry, or something
 /// is and the exchange failed.
 enum Unanswered {
-    /// The connection was refused, which is a computer with no registry.
+    /// No connection could be made, which is a computer with no registry. A
+    /// closed loopback port is refused on Unix and left to time out on
+    /// Windows, so the kind of the error does not matter, only that nothing
+    /// ever answered.
     Refused,
-    /// Anything else, which is a registry that could not be used.
+    /// Anything after a connection was made, which is a registry that could
+    /// not be used.
     Failed(anyhow::Error),
 }
 
@@ -315,16 +319,7 @@ impl From<Unanswered> for anyhow::Error {
 /// feed this forever.
 fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Unanswered> {
     let addr = registry_addr();
-    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT).map_err(|err| {
-        if err.kind() == ErrorKind::ConnectionRefused {
-            Refused
-        } else {
-            Failed(
-                anyhow::Error::new(err)
-                    .context(format!("could not connect to the registry at {addr}")),
-            )
-        }
-    })?;
+    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT).map_err(|_| Refused)?;
     let mut exchange = || -> Result<Vec<u8>> {
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
