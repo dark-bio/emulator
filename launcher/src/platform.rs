@@ -28,6 +28,11 @@
 //!     share a name across platforms.
 //!   - **Application menu**: macOS has an app-menu action for starting another
 //!     emulator explicitly.
+//!   - **Detaching a child**: a process group of its own, so a Ctrl-C meant
+//!     for a command's wait does not reach the emulator it started, and on
+//!     Windows the flags and handles that keep it off the console.
+//!   - **Native console**: a Windows console carries the full palette without
+//!     anything in the environment saying so.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -156,6 +161,60 @@ pub(crate) fn attach_console() {
 
 #[cfg(not(windows))]
 pub(crate) fn attach_console() {}
+
+/// Put a child in a process group of its own, so that a Ctrl-C at the terminal
+/// ends the command's wait and leaves the emulator it started booting.
+#[cfg(unix)]
+pub(crate) fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+/// The same, plus the flag that keeps Windows from giving a console-subsystem
+/// child a console window of its own, with this process's own streams made
+/// private first. The child gets null streams, but Windows would still hand it
+/// an inheritable copy of these, and a file that the command's output was
+/// redirected to would then stay open for as long as the emulator runs.
+#[cfg(windows)]
+pub(crate) fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: a standard handle this process owns, or null, or the invalid
+        // value, is read and then only handed back to Win32 to clear one flag
+        // on it; nothing is dereferenced.
+        unsafe {
+            let handle = GetStdHandle(stream);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
+/// Whether this stream is a Windows console, which carries the full palette
+/// without anything in the environment saying so.
+#[cfg(windows)]
+pub(crate) fn native_console(terminal: &console::Term) -> bool {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+    let mut mode = 0;
+    // SAFETY: a handle this process owns in, a status code out. The call
+    // reads nothing through the pointer beyond the mode it writes.
+    unsafe { GetConsoleMode(terminal.as_raw_handle(), &mut mode) != 0 }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn native_console(_terminal: &console::Term) -> bool {
+    false
+}
 
 /// Hand a URL to whatever the desktop has set as its browser. Spawned and
 /// left alone: the launcher has no use for the browser's exit status, and

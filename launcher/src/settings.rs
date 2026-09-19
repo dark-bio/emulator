@@ -1,7 +1,13 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! What the launcher remembers between runs.
 //!
-//! A single TOML file in the app's data directory, written on first run and
-//! rewritten whenever a value changes. Nothing ships with the app, so a
+//! A single TOML file in the app's data directory, written when the panel
+//! saves a value and never by reading. Nothing ships with the app, so a
 //! portable copy carried to a new machine starts from the same blank slate an
 //! installer would. It holds the handful of choices that would otherwise have
 //! to be retyped as flags on every launch: which disk image to boot, how much
@@ -88,14 +94,15 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
-    /// Read the settings out of `dir`, creating them at the current version if
-    /// there are none yet. `dir` is expected to exist already.
+    /// Read the settings out of `dir`. None yet is the blank slate a first run
+    /// starts from, and nothing is written until the panel saves a value, so a
+    /// command that only reads leaves the directory as it found it.
     pub(crate) fn load(dir: &Path) -> Result<Self> {
         let path = dir.join(FILE);
         let body = match fs::read_to_string(&path) {
             Ok(body) => body,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let settings = Self {
+                return Ok(Self {
                     path,
                     stored: Stored {
                         version: VERSION,
@@ -104,9 +111,7 @@ impl Settings {
                         memory: None,
                         env: None,
                     },
-                };
-                settings.save()?;
-                return Ok(settings);
+                });
             }
             Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
         };
@@ -123,14 +128,10 @@ impl Settings {
             );
         }
 
-        let settings = Self { path, stored };
-        if settings.stored.version < VERSION {
-            // Nothing to migrate yet: version 1 is the first shape there has
-            // ever been. Older files are simply rewritten at the current
-            // version, which is where a real migration would go.
-            settings.save()?;
-        }
-        Ok(settings)
+        // Nothing to migrate yet, since version 1 is the first shape there has
+        // ever been. An older file is read as it is and rewritten at the current
+        // version the next time the panel saves.
+        Ok(Self { path, stored })
     }
 
     /// Reload saved preferences without replacing the current values on failure.
@@ -194,6 +195,10 @@ impl Settings {
         // that would then name a different file.
         let body = toml::to_string(&self.stored)
             .with_context(|| format!("could not serialize {}", self.path.display()))?;
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("could not create {}", dir.display()))?;
+        }
         let tmp = self
             .path
             .with_extension(format!("toml.{}.tmp", std::process::id()));
@@ -208,21 +213,24 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Reading is not writing: a first run starts blank, and the file appears
+    /// once something is saved.
     #[test]
-    fn test_creates_file_when_missing() {
+    fn test_a_missing_file_reads_as_defaults_and_writes_nothing() {
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let settings = Settings::load(dir).unwrap();
+        let dir = tmp.path().join("data");
+        let mut settings = Settings::load(&dir).unwrap();
         assert!(settings.disk().is_none());
         assert!(settings.memory().is_none());
         assert!(settings.env().is_none());
+        assert!(settings.autostart());
+        assert!(!dir.exists());
 
+        settings.apply(None, true, 2048, "release").unwrap();
         let body = fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(body.contains("version = 1"));
         assert!(body.contains("autostart = true"));
         assert!(!body.contains("disk"));
-        assert!(!body.contains("memory"));
-        assert!(!body.contains("env"));
     }
 
     #[test]

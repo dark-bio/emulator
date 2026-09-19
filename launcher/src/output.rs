@@ -6,14 +6,14 @@
 
 //! What a command prints, in the two shapes every Dark Bio tool prints in.
 //!
-//! stdout carries the result and nothing else, as a block or a table for
-//! reading or as one JSON document. stderr carries everything a person reads
-//! along the way: notes, warnings, hints, steps, diagnostic logs and errors,
-//! one line each, or one JSON object per line.
+//! stdout carries the result and nothing else, as a block, a table or a
+//! checklist for reading or as one JSON document. stderr carries everything a
+//! person reads along the way: notes, warnings, hints, steps, diagnostic logs
+//! and errors, one line each, or one JSON object per line.
 //!
-//! Color, glyphs and width are what a terminal adds on top, and each stream
-//! decides for itself, so a pipe sees the same rows without the styling. None
-//! of that styling carries information: every state also has a word.
+//! Every value that came from outside the tool, a device's name, a path, a
+//! line of a log, goes through the style module's escaping first, so nothing
+//! a device says can steer the terminal or pass for a line of the tool's own.
 
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,269 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::Global;
-
-/// Semantic emphasis, the same seven roles every Dark Bio tool paints with.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Role {
-    /// Content whose meaning needs no emphasis.
-    Default,
-    /// Section titles, help headings and table headers.
-    Heading,
-    /// Completed or verified states.
-    Success,
-    /// Warnings and states needing action.
-    Attention,
-    /// Errors and failed checks.
-    Failure,
-    /// Commands, identifiers and links the reader may act on.
-    Accent,
-    /// Labels and secondary context.
-    Muted,
-    /// The staging environment's label.
-    Staging,
-    /// The develop environment's label.
-    Develop,
-}
-
-/// How much styling a stream can carry.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Color {
-    /// No escape sequences at all, not even bold.
-    Off,
-    /// Bold emphasis without palette colors.
-    Basic,
-    /// The palette approximated on the 256 color cube.
-    Ansi256,
-    /// The palette exactly.
-    True,
-}
-
-/// What one stream can do, resolved once for the whole run.
-#[derive(Clone)]
-pub(crate) struct Theme {
-    /// Whether this stream is a terminal that may be styled.
-    pub(crate) interactive: bool,
-
-    /// Whether the terminal and the locale allow the Unicode glyphs.
-    pub(crate) unicode: bool,
-
-    /// How much styling depth this stream has.
-    pub(crate) color: Color,
-
-    /// Width in display cells, falling back to 80 columns.
-    pub(crate) width: usize,
-}
-
-impl Theme {
-    /// Resolve one stream's capabilities from the terminal and the
-    /// environment. A pipe keeps the reading layouts and loses the styling.
-    pub(crate) fn new(json: bool, stderr: bool) -> Self {
-        let terminal = if stderr {
-            console::Term::stderr()
-        } else {
-            console::Term::stdout()
-        };
-        let attended = if stderr {
-            io::stderr().is_terminal()
-        } else {
-            io::stdout().is_terminal()
-        };
-        let term = std::env::var("TERM").unwrap_or_default();
-        let interactive = !json && attended && term != "dumb";
-        let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
-            .into_iter()
-            .filter_map(|key| std::env::var(key).ok())
-            .find(|value| !value.is_empty());
-        let unicode = interactive
-            && locale.is_none_or(|locale| {
-                let locale = locale.to_ascii_uppercase().replace('-', "");
-                locale.contains("UTF8") || cfg!(windows)
-            });
-        let color = if !interactive
-            || std::env::var_os("NO_COLOR").is_some()
-            || std::env::var("CLICOLOR").is_ok_and(|value| value == "0")
-        {
-            Color::Off
-        } else if native_console(&terminal)
-            || std::env::var("COLORTERM")
-                .is_ok_and(|value| matches!(value.as_str(), "truecolor" | "24bit"))
-        {
-            Color::True
-        } else if term.contains("256color") {
-            Color::Ansi256
-        } else {
-            Color::Basic
-        };
-        let width = terminal
-            .size_checked()
-            .map_or(80, |(_, width)| usize::from(width).max(20));
-        Self {
-            interactive,
-            unicode,
-            color,
-            width,
-        }
-    }
-
-    /// The escape sequence a role is painted with, degrading to bold and then
-    /// to nothing as the stream's depth runs out.
-    fn style(&self, role: Role) -> clap::builder::styling::Style {
-        use clap::builder::styling::{Ansi256Color, RgbColor, Style};
-        if self.color == Color::Off || role == Role::Default {
-            return Style::new();
-        }
-        let rgb = match role {
-            Role::Success => (148, 202, 110),
-            Role::Attention => (232, 162, 74),
-            Role::Failure => (235, 96, 112),
-            Role::Accent => (137, 180, 250),
-            Role::Muted => (124, 128, 152),
-            Role::Staging => (147, 153, 178),
-            Role::Develop => (108, 112, 134),
-            Role::Heading => return Style::new().bold(),
-            Role::Default => return Style::new(),
-        };
-        // The three quiet roles stay plain so that what they sit beside reads
-        // as the louder of the two.
-        let style = if matches!(role, Role::Muted | Role::Staging | Role::Develop) {
-            Style::new()
-        } else {
-            Style::new().bold()
-        };
-        match self.color {
-            Color::True => style.fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into())),
-            Color::Ansi256 => {
-                let cell = |channel: u8| ((u16::from(channel) * 5 + 127) / 255) as u8;
-                style.fg_color(Some(
-                    Ansi256Color(16 + 36 * cell(rgb.0) + 6 * cell(rgb.1) + cell(rgb.2)).into(),
-                ))
-            }
-            _ => style,
-        }
-    }
-
-    /// Wrap `text` in a role's style and its reset, or leave it as it is.
-    pub(crate) fn paint(&self, role: Role, text: impl AsRef<str>) -> String {
-        let style = self.style(role);
-        format!("{style}{}{style:#}", text.as_ref())
-    }
-
-    /// Pick a glyph or its ASCII twin, without changing what the line says.
-    pub(crate) fn glyph<'a>(&self, unicode: &'a str, ascii: &'a str) -> &'a str {
-        if self.unicode { unicode } else { ascii }
-    }
-
-    /// Put a role's mark before a state, so the state survives without color.
-    pub(crate) fn mark(&self, role: Role, text: &str) -> String {
-        let icon = match role {
-            Role::Success => self.glyph("\u{2713}", "ok"),
-            Role::Failure => self.glyph("\u{2717}", "x"),
-            Role::Attention => "!",
-            _ => self.glyph("\u{00b7}", "-"),
-        };
-        self.paint(role, format!("{icon} {text}"))
-    }
-
-    /// Cut `text` to `width` cells, marking what was dropped.
-    pub(crate) fn truncate(&self, text: &str, width: usize) -> String {
-        if console::measure_text_width(text) <= width {
-            return text.to_owned();
-        }
-        let tail = self.glyph("\u{2026}", "...");
-        let tail = if width < console::measure_text_width(tail) {
-            ""
-        } else {
-            tail
-        };
-        console::truncate_str(text, width, tail).into_owned()
-    }
-
-    /// The same palette, handed to clap for the help it generates.
-    pub(crate) fn clap(&self) -> clap::builder::styling::Styles {
-        clap::builder::styling::Styles::plain()
-            .header(self.style(Role::Heading))
-            .usage(self.style(Role::Heading))
-            .literal(self.style(Role::Accent))
-            .placeholder(self.style(Role::Muted))
-            .error(self.style(Role::Failure))
-            .valid(self.style(Role::Success))
-            .invalid(self.style(Role::Attention))
-    }
-
-    /// Paint what backticks enclose as a command the reader may run. An
-    /// unmatched backtick stays the character it is.
-    pub(crate) fn inline(&self, text: &str) -> String {
-        let mut painted = String::new();
-        let mut rest = text;
-        while let Some((before, after)) = rest.split_once('`') {
-            let Some((code, tail)) = after.split_once('`') else {
-                break;
-            };
-            painted.push_str(before);
-            painted.push_str(&self.paint(Role::Accent, code));
-            rest = tail;
-        }
-        painted.push_str(rest);
-        painted
-    }
-}
-
-/// Whether this stream is a Windows console, which carries the full palette
-/// without anything in the environment saying so.
-#[cfg(windows)]
-fn native_console(terminal: &console::Term) -> bool {
-    use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::System::Console::GetConsoleMode;
-    let mut mode = 0;
-    // SAFETY: a handle this process owns in, a status code out. The call
-    // reads nothing through the pointer beyond the mode it writes.
-    unsafe { GetConsoleMode(terminal.as_raw_handle(), &mut mode) != 0 }
-}
-
-#[cfg(not(windows))]
-fn native_console(_terminal: &console::Term) -> bool {
-    false
-}
-
-/// A failure, in the shape both outputs render it from.
-#[derive(Debug)]
-pub(crate) struct Error {
-    /// Exit class, one of the numbers the house tools share.
-    pub(crate) exit: i32,
-
-    /// Stable code, which is what a caller matches on.
-    pub(crate) code: &'static str,
-
-    /// What went wrong, in a sentence.
-    pub(crate) message: String,
-
-    /// What to do next, wherever the tool knows.
-    pub(crate) hints: Vec<String>,
-}
-
-impl Error {
-    /// A failure with no next step to name.
-    pub(crate) fn new(exit: i32, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            exit,
-            code,
-            message: message.into(),
-            hints: Vec::new(),
-        }
-    }
-
-    /// The same failure, with one more line saying what to do about it.
-    pub(crate) fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hints.push(hint.into());
-        self
-    }
-
-    /// The error object, which is what `--json` carries.
-    fn json(&self) -> Value {
-        json!({"code": self.code, "message": self.message})
-    }
-}
+use crate::args::Global;
+use crate::error::{Code, Error};
+use crate::style::{self, Role, Theme, wrap};
 
 /// The two streams of one run, shared by everything that prints.
 #[derive(Clone)]
@@ -348,11 +88,8 @@ impl Output {
     }
 
     /// Print a command's one result: the named rows as a block of label and
-    /// value lines, or the whole document as JSON.
-    ///
-    /// Each row names the document key it shows, and a dot reaches into a
-    /// nested object. The reading view may carry fewer fields than the
-    /// document; the document always carries them all.
+    /// value lines, or the whole document as JSON. The reading view may carry
+    /// fewer fields than the document; the document always carries them all.
     pub(crate) fn block(&self, document: &Value, rows: &[(&str, &str)]) -> Result<(), Error> {
         self.result(document, |theme| {
             let rows: Vec<(String, String)> = rows
@@ -360,7 +97,7 @@ impl Output {
                 .map(|(label, key)| {
                     (
                         (*label).to_owned(),
-                        value(theme, key, pick(document, key).unwrap_or(&Value::Null)),
+                        value(theme, key, document.get(*key).unwrap_or(&Value::Null)),
                     )
                 })
                 .collect();
@@ -408,7 +145,7 @@ impl Output {
             stdout.flush()
         })();
         spacing.out_block = self.0.out.interactive;
-        written.map_err(|err| Error::new(1, "io", format!("could not write the result: {err}")))
+        written.map_err(|err| Error::io(format!("could not write the result: {err}")))
     }
 
     /// Whether a result has been claimed, which is what keeps a failure from
@@ -417,8 +154,9 @@ impl Output {
         self.0.printed.load(Ordering::SeqCst)
     }
 
-    /// Give stdout up to something else for this run, such as a guest console.
-    /// Nothing this layer would have written there is written at all.
+    /// Give stdout up to something else for this run, such as a guest console
+    /// or a completion script. Nothing this layer would have written there is
+    /// written at all.
     pub(crate) fn release_stdout(&self) {
         self.0.printed.store(true, Ordering::SeqCst);
     }
@@ -431,14 +169,14 @@ impl Output {
         if kind == "step" && !self.0.verbose {
             return;
         }
-        let message = message.as_ref();
+        let message = style::printable(message.as_ref());
         let mut spacing = self.0.spacing.lock().expect("output not poisoned");
         let mut stderr = io::stderr().lock();
         if self.json() {
             let _ = writeln!(stderr, "{}", json!({"event": kind, "message": message}));
         } else {
             separate(&mut spacing, &mut stderr);
-            let _ = writeln!(stderr, "{}", event(&self.0.err, kind, message));
+            let _ = writeln!(stderr, "{}", event(&self.0.err, kind, &message));
         }
         spacing.err_printed = true;
         let _ = stderr.flush();
@@ -474,12 +212,13 @@ impl Output {
             let mut stderr = io::stderr().lock();
             separate(&mut spacing, &mut stderr);
             let theme = &self.0.err;
+            let code = error.code.name();
             let line = format!(
                 "{} {}",
-                theme.paint(Role::Failure, format!("error[{}]:", error.code)),
-                theme.inline(&error.message)
+                theme.paint(Role::Failure, format!("error[{code}]:")),
+                theme.inline(&style::printable(&error.message))
             );
-            let _ = writeln!(stderr, "{}", wrap(&line, theme.width, error.code.len() + 9));
+            let _ = writeln!(stderr, "{}", wrap(&line, theme.width, code.len() + 9));
             spacing.err_printed = true;
             let _ = stderr.flush();
         }
@@ -492,7 +231,7 @@ impl Output {
     /// else the question is the failure that names the flag answering it.
     pub(crate) fn confirm(&self, question: &str, refusal: &str, flag: &str) -> Result<bool, Error> {
         if self.json() || self.0.no_input || !io::stdin().is_terminal() {
-            return Err(Error::new(1, "confirmation-required", refusal)
+            return Err(Error::new(Code::ConfirmationRequired, refusal)
                 .hint(format!("pass `{flag}` to confirm without being asked")));
         }
         {
@@ -500,11 +239,12 @@ impl Output {
             let mut stderr = io::stderr().lock();
             separate(&mut spacing, &mut stderr);
             let theme = &self.0.err;
+            let question = style::printable(question);
             let line = if theme.interactive {
                 format!(
                     "{} {} {}",
                     theme.paint(Role::Attention, "?"),
-                    theme.inline(question),
+                    theme.inline(&question),
                     theme.paint(Role::Muted, "(y/N)")
                 )
             } else {
@@ -518,7 +258,7 @@ impl Output {
         io::stdin()
             .lock()
             .read_line(&mut answer)
-            .map_err(|err| Error::new(1, "io", format!("could not read the answer: {err}")))?;
+            .map_err(|err| Error::io(format!("could not read the answer: {err}")))?;
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
@@ -554,15 +294,8 @@ fn event(theme: &Theme, kind: &str, message: &str) -> String {
     wrap(&format!("{prefix} {message}"), theme.width, kind.len() + 2)
 }
 
-/// The value at `key`, where a dot reaches into a nested object.
-fn pick<'a>(document: &'a Value, key: &str) -> Option<&'a Value> {
-    key.split('.')
-        .try_fold(document, |value, part| value.get(part))
-}
-
 /// One field as a person reads it, with its unit, its mark and its color.
 fn value(theme: &Theme, key: &str, value: &Value) -> String {
-    let key = key.rsplit('.').next().unwrap_or(key);
     match value {
         Value::Null => return theme.paint(Role::Muted, "-"),
         Value::Array(values) if values.is_empty() => return theme.paint(Role::Muted, "none"),
@@ -583,7 +316,7 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     {
         return bytes(count);
     }
-    let text = scalar(value);
+    let text = style::cell(&scalar(value));
     match key {
         // The day is what a reader scans for; the document keeps the instant.
         "expiry" if text.len() >= 10 => text[..10].to_owned(),
@@ -650,8 +383,9 @@ fn block(theme: &Theme, rows: &[(String, String)]) -> String {
         .join("\n")
 }
 
-/// One row per result, with muted uppercase headers. A table that does not fit
-/// becomes one block per row, so nothing is lost to the width.
+/// One row per result, with muted uppercase headers and numbers aligned on
+/// the right. A table that does not fit becomes one block per row, so nothing
+/// is lost to the width.
 fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
     if rows.is_empty() {
         return format!("  {}", theme.paint(Role::Muted, "none"));
@@ -663,6 +397,15 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
                 .iter()
                 .map(|(_, key)| value(theme, key, row.get(*key).unwrap_or(&Value::Null)))
                 .collect()
+        })
+        .collect();
+    let numeric: Vec<bool> = columns
+        .iter()
+        .map(|(_, key)| {
+            rows.iter().all(|row| {
+                row.get(*key)
+                    .is_none_or(|value| value.is_number() || value.is_null())
+            })
         })
         .collect();
     let mut widths: Vec<usize> = columns
@@ -705,13 +448,22 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
         for (index, cell) in cells.iter().enumerate() {
             let cell = theme.truncate(cell, widths[index]);
             let padding = " ".repeat(widths[index] - console::measure_text_width(&cell));
-            out.push_str(&if header {
+            let last = index + 1 == cells.len();
+            let cell = if header {
                 theme.paint(Role::Muted, cell)
             } else {
                 cell
-            });
-            if index + 1 < cells.len() {
+            };
+            if numeric[index] && !header {
                 out.push_str(&padding);
+                out.push_str(&cell);
+            } else {
+                out.push_str(&cell);
+                if !last {
+                    out.push_str(&padding);
+                }
+            }
+            if !last {
                 out.push_str("  ");
             }
         }
@@ -726,14 +478,17 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
     lines.join("\n")
 }
 
-/// One line per check, the name marked by its result, the detail muted, and
-/// the hint on a line of its own beneath a failure.
+/// One line per check, the name marked by its result, the detail muted and
+/// wrapped under its own column, and the hint on a line of its own beneath a
+/// failure.
 fn checklist(theme: &Theme, rows: &[Value]) -> String {
     let labels = rows
         .iter()
         .map(|row| console::measure_text_width(row["name"].as_str().unwrap_or("")))
         .max()
         .unwrap_or(0);
+    // The mark is two cells as a glyph and three as its ASCII twin.
+    let names = labels + if theme.unicode { 2 } else { 3 };
     rows.iter()
         .map(|row| {
             let name = row["name"].as_str().unwrap_or("-");
@@ -743,29 +498,27 @@ fn checklist(theme: &Theme, rows: &[Value]) -> String {
                 "fail" => Role::Failure,
                 _ => Role::Muted,
             };
-            let detail = row["detail"].as_str().unwrap_or("-");
+            let detail = style::cell(row["detail"].as_str().unwrap_or("-"));
             let detail = if result == "skip" {
                 format!("skipped: {detail}")
             } else {
-                detail.to_owned()
+                detail
             };
             let name = theme.mark(role, name);
-            // The mark is two cells as a glyph and three as its ASCII twin.
-            let width = labels + if theme.unicode { 2 } else { 3 };
             let line = format!(
                 "  {}{}  {}",
                 name,
-                " ".repeat(width.saturating_sub(console::measure_text_width(&name))),
+                " ".repeat(names.saturating_sub(console::measure_text_width(&name))),
                 theme.paint(Role::Muted, &detail)
             );
-            let mut line = wrap(&line, theme.width, 4);
+            let mut line = wrap(&line, theme.width, names + 4);
             if let Some(hint) = row["hint"].as_str() {
                 line.push('\n');
                 line.push_str(&wrap(
                     &format!(
                         "    {} {}",
                         theme.paint(Role::Accent, "hint:"),
-                        theme.inline(hint)
+                        theme.inline(&style::printable(hint))
                     ),
                     theme.width,
                     6,
@@ -777,120 +530,10 @@ fn checklist(theme: &Theme, rows: &[Value]) -> String {
         .join("\n")
 }
 
-/// Wrap styled text at `width` cells, indenting every line after the first by
-/// `indent`. Styling sequences take no width, and a word too long for a line
-/// of its own is broken rather than dropped.
-pub(crate) fn wrap(text: &str, width: usize, indent: usize) -> String {
-    let width = width.max(1);
-    let indent = indent.min(width - 1);
-    let mut out = String::new();
-    let mut column = 0;
-    let place = |out: &mut String, column: &mut usize, word: &str| {
-        // A word that would run past the margin starts the next line. One too
-        // long for a line of its own does not, and the loop below breaks it.
-        let size = console::measure_text_width(word.trim_end());
-        if *column > indent && *column + size > width && size <= width - indent {
-            out.push('\n');
-            out.push_str(&" ".repeat(indent));
-            *column = indent;
-        }
-        for (part, ansi) in console::AnsiCodeIterator::new(word) {
-            if ansi {
-                out.push_str(part);
-                continue;
-            }
-            for character in part.chars() {
-                // A message that carries several lines, such as a log tail,
-                // keeps them, each under the same hanging indent.
-                if character == '\n' {
-                    out.push('\n');
-                    out.push_str(&" ".repeat(indent));
-                    *column = indent;
-                    continue;
-                }
-                let cell = console::measure_text_width(character.encode_utf8(&mut [0; 4]));
-                if *column + cell > width {
-                    // A space at the margin is where the line ends anyway.
-                    if character.is_whitespace() {
-                        continue;
-                    }
-                    out.push('\n');
-                    out.push_str(&" ".repeat(indent));
-                    *column = indent;
-                }
-                out.push(character);
-                *column += cell;
-            }
-        }
-    };
-    let mut word = String::new();
-    for (part, ansi) in console::AnsiCodeIterator::new(text) {
-        if ansi {
-            word.push_str(part);
-            continue;
-        }
-        for character in part.chars() {
-            word.push(character);
-            if character.is_whitespace() {
-                place(&mut out, &mut column, &word);
-                word.clear();
-            }
-        }
-    }
-    place(&mut out, &mut column, &word);
-    // A line that broke after a space would otherwise end in one.
-    out.lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[cfg(test)]
-impl Theme {
-    /// A stream with the capabilities a test wants to render against.
-    pub(crate) fn fixed(width: usize, color: Color, unicode: bool) -> Self {
-        Self {
-            interactive: true,
-            unicode,
-            color,
-            width,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_a_role_degrades_from_color_to_bold_to_plain() {
-        let theme = Theme::fixed(80, Color::True, true);
-        assert_eq!(
-            theme.paint(Role::Success, "ready"),
-            "\x1b[1m\x1b[38;2;148;202;110mready\x1b[0m"
-        );
-        assert_eq!(
-            Theme::fixed(80, Color::Ansi256, true).paint(Role::Success, "ready"),
-            "\x1b[1m\x1b[38;5;150mready\x1b[0m"
-        );
-        assert_eq!(
-            Theme::fixed(80, Color::Basic, true).paint(Role::Success, "ready"),
-            "\x1b[1mready\x1b[0m"
-        );
-        assert_eq!(
-            Theme::fixed(80, Color::Off, true).paint(Role::Success, "ready"),
-            "ready"
-        );
-    }
-
-    #[test]
-    fn test_a_state_keeps_its_word_without_color_or_glyphs() {
-        let colored = Theme::fixed(80, Color::Off, true);
-        assert_eq!(colored.mark(Role::Success, "yes"), "\u{2713} yes");
-        let plain = Theme::fixed(80, Color::Off, false);
-        assert_eq!(plain.mark(Role::Success, "yes"), "ok yes");
-        assert_eq!(plain.mark(Role::Default, "no"), "- no");
-    }
+    use crate::style::Color;
 
     #[test]
     fn test_an_event_carries_its_prefix_and_paints_a_quoted_command() {
@@ -902,31 +545,6 @@ mod tests {
         assert_eq!(
             event(&theme, "step", "reserving a port"),
             "step: \u{203a} reserving a port"
-        );
-    }
-
-    #[test]
-    fn test_wrapping_keeps_the_lines_a_message_already_had() {
-        let wrapped = wrap("the emulator exited\n[qemu] it would not start", 80, 4);
-        assert_eq!(
-            wrapped,
-            "the emulator exited\n    [qemu] it would not start"
-        );
-    }
-
-    #[test]
-    fn test_wrapping_keeps_every_line_within_the_width() {
-        let theme = Theme::fixed(32, Color::True, true);
-        let path = "/Users/someone/Library/Application Support/bio.dark.emulator/logs/18181.log";
-        let wrapped = wrap(&theme.paint(Role::Accent, path), 32, 4);
-        for line in wrapped.lines() {
-            assert!(console::measure_text_width(line) <= 32, "{line}");
-        }
-        assert_eq!(
-            console::strip_ansi_codes(&wrapped)
-                .split_whitespace()
-                .collect::<String>(),
-            path.replace(' ', "")
         );
     }
 
@@ -952,12 +570,23 @@ mod tests {
     }
 
     #[test]
+    fn test_a_table_aligns_numbers_right_and_text_left() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        let rows = [
+            json!({"port": 18181, "disk": "a.ark"}),
+            json!({"port": 181, "disk": "longer.ark"}),
+        ];
+        let columns = [("PORT", "port"), ("DISK", "disk")];
+        assert_eq!(
+            table(&theme, &rows, &columns),
+            "  PORT   DISK\n  18181  a.ark\n    181  longer.ark"
+        );
+    }
+
+    #[test]
     fn test_a_table_falls_back_to_blocks_when_it_cannot_fit() {
         let rows = [json!({"port": 18181, "disk": "a-rather-long-name.ark"})];
         let columns = [("PORT", "port"), ("DISK", "disk")];
-
-        let wide = table(&Theme::fixed(80, Color::Off, true), &rows, &columns);
-        assert_eq!(wide, "  PORT   DISK\n  18181  a-rather-long-name.ark");
 
         let theme = Theme::fixed(24, Color::Off, true);
         let narrow = table(&theme, &rows, &columns);
@@ -987,18 +616,39 @@ mod tests {
         );
     }
 
+    /// A detail longer than the line continues under its own column, not
+    /// under the mark.
+    #[test]
+    fn test_a_long_detail_wraps_under_the_detail_column() {
+        let theme = Theme::fixed(40, Color::Off, false);
+        let rows = [json!({
+            "name": "data",
+            "result": "ok",
+            "detail": "/Users/someone/Library/Application Support/bio.dark.emulator",
+            "hint": null,
+        })];
+        let text = checklist(&theme, &rows);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() > 1);
+        for line in &lines[1..] {
+            assert!(line.starts_with(&" ".repeat(11)), "{line:?}");
+        }
+    }
+
+    /// A name from the registry is printed as text, however it is spelled.
+    #[test]
+    fn test_a_value_from_a_device_is_escaped() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        assert_eq!(
+            value(&theme, "name", &json!("ark\x1b[2J\nx")),
+            "ark\\u{1b}[2J\\nx"
+        );
+    }
+
     #[test]
     fn test_nothing_running_prints_as_none() {
         let theme = Theme::fixed(80, Color::Off, true);
         assert_eq!(table(&theme, &[], &[("PORT", "port")]), "  none");
-    }
-
-    #[test]
-    fn test_a_nested_field_is_reached_by_its_path() {
-        let document = json!({"firmware": {"version": "v0.11.5"}, "qemu": null});
-        assert_eq!(pick(&document, "firmware.version"), Some(&json!("v0.11.5")));
-        assert_eq!(pick(&document, "qemu.version"), None);
-        assert_eq!(pick(&document, "missing"), None);
     }
 
     #[test]

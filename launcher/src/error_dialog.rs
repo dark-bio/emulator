@@ -17,8 +17,9 @@
 //! which defeats the point. A second webview window renders the same everywhere
 //! and can carry a copy button.
 //!
-//! The report always reaches stderr first, so a developer at a terminal and CI
-//! both still see it when no window can be shown at all.
+//! The report always reaches the log and stderr first, so a developer at a
+//! terminal, CI, and the command that started this emulator all still see it
+//! when no window can be shown at all.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +28,8 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::MAIN_WINDOW;
 use crate::diagnostics::{self, log};
-use crate::output::{Error, Output};
+use crate::error::{Code, Error};
+use crate::output::Output;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
@@ -123,11 +125,12 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
 /// window: either something already reported one, or dialogs are switched off,
 /// in which case the process is exiting instead.
 fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
+    // Logged before the report is built, so the cause is in the log file a
+    // command that started this emulator reads back, and in the report too.
+    log!("[launcher] {title}: {err:#}");
     let report = diagnostics::report(title, &err);
     match EVENTS.lock().ok().and_then(|events| events.clone()) {
-        // The code is the title with its spaces hyphenated, so the two cannot
-        // drift apart.
-        Some(output) => output.error(&Error::new(1, code(title), report.clone())),
+        Some(output) => output.error(&Error::new(code(title), report.clone())),
         None => eprintln!("{report}"),
     }
 
@@ -144,10 +147,10 @@ fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
 }
 
 /// The stable code for a failure, taken from the words it is reported under.
-fn code(title: &str) -> &'static str {
+fn code(title: &str) -> Code {
     match title {
-        STOPPED => "stopped-unexpectedly",
-        _ => "could-not-start",
+        STOPPED => Code::StoppedUnexpectedly,
+        _ => Code::CouldNotStart,
     }
 }
 

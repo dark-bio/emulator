@@ -43,7 +43,8 @@ pub(crate) struct Paths {
 }
 
 impl Paths {
-    /// Work out both, creating the data directory if it is missing.
+    /// Work out both. Nothing is created: a command that only reads leaves no
+    /// directory behind, and the window makes the data directory itself.
     pub(crate) fn resolve(identifier: &str, package: &PackageInfo) -> Result<Self> {
         Ok(Self {
             data: app_data_dir(identifier)?,
@@ -85,18 +86,18 @@ pub(crate) fn resolve_firmware(
         _ => bail!("--kernel and --initrd must be passed together"),
     }
 
-    let dir = arch.firmware_dir();
     bundled_firmware(resources, arch).with_context(|| {
         format!(
-            "no bundled firmware for {dir}: pass --kernel and --initrd explicitly \
-             (a development build has no bundled firmware)"
+            "no bundled firmware for {}: pass --kernel and --initrd explicitly \
+             (a development build has no bundled firmware)",
+            arch.name()
         )
     })
 }
 
 /// The firmware this build ships for `arch`, if it ships one at all.
 pub(crate) fn bundled_firmware(resources: Option<&Path>, arch: GuestArch) -> Option<Firmware> {
-    let dir = resources?.join("firmware").join(arch.firmware_dir());
+    let dir = resources?.join("firmware").join(arch.name());
     let kernel = dir.join("kernel");
     let initrd = dir.join("initrd.gz");
     (kernel.exists() && initrd.exists()).then_some(Firmware {
@@ -111,23 +112,20 @@ pub(crate) fn bundled_firmware(resources: Option<&Path>, arch: GuestArch) -> Opt
 pub(crate) fn firmware_version(resources: Option<&Path>, arch: GuestArch) -> Option<String> {
     let path = resources?
         .join("firmware")
-        .join(arch.firmware_dir())
+        .join(arch.name())
         .join("version");
     let tag = std::fs::read_to_string(path).ok()?;
     let tag = tag.trim().to_owned();
     (!tag.is_empty()).then_some(tag)
 }
 
-/// Resolve this app's own data directory, creating it if missing. It is the
-/// platform's data directory joined with this app's bundle identifier, which
-/// is what the window side resolves to as well.
+/// Resolve this app's own data directory. It is the platform's data
+/// directory joined with this app's bundle identifier, which is what the
+/// window side resolves to as well.
 fn app_data_dir(identifier: &str) -> Result<PathBuf> {
-    let dir = dirs::data_dir()
+    Ok(dirs::data_dir()
         .context("could not locate this computer's data directory")?
-        .join(identifier);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("could not create the data directory {}", dir.display()))?;
-    Ok(dir)
+        .join(identifier))
 }
 
 /// Resolve where a packaged build's resources sit, which is beside or above

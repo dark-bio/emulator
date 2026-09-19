@@ -53,13 +53,21 @@ static STATE: Mutex<State> = Mutex::new(State {
     facts: Vec::new(),
     file: None,
     sink: Sink::Stderr,
+    trace: false,
 });
 
+/// The ring, the file, the facts and where lines go besides them.
 struct State {
+    /// The most recent lines, oldest first.
     log: VecDeque<String>,
+    /// What this run has found out about itself, in the order it did.
     facts: Vec<(&'static str, String)>,
+    /// This launcher's own log file, once it has one.
     file: Option<File>,
+    /// Where a line goes besides the ring and the file.
     sink: Sink,
+    /// Whether the chatty lines, one per registry request, are kept too.
+    trace: bool,
 }
 
 /// Where a log line goes besides the ring and the log file.
@@ -80,6 +88,29 @@ pub(crate) fn log_sink(sink: Sink) {
     if let Ok(mut state) = STATE.lock() {
         state.sink = sink;
     }
+}
+
+/// Choose how much this run logs. Trace adds one line per registry request,
+/// which is more than anybody wants unless they asked.
+pub(crate) fn level(level: Option<crate::args::Log>) {
+    if let Ok(mut state) = STATE.lock() {
+        state.trace = level == Some(crate::args::Log::Trace);
+    }
+}
+
+/// Record a line only under trace. Takes the same arguments as [`log!`].
+macro_rules! trace {
+    ($($arg:tt)*) => {{
+        if $crate::diagnostics::tracing() {
+            $crate::diagnostics::push(format!($($arg)*));
+        }
+    }};
+}
+pub(crate) use trace;
+
+/// Whether trace lines are wanted, read by [`trace!`] before it formats one.
+pub(crate) fn tracing() -> bool {
+    STATE.lock().is_ok_and(|state| state.trace)
 }
 
 /// The directory every launcher writes its log file into.

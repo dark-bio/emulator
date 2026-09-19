@@ -39,7 +39,6 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,7 +53,7 @@ pub(crate) const REGISTRY_PORT: u16 = 18180;
 
 /// Schema version of the registry's responses, so a consumer meeting an older
 /// registry can tell rather than guess. Bumped only for a breaking change.
-const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// How long an entry survives without being refreshed. Comfortably more than
 /// the heartbeat interval in [`crate::discovery`], so a launcher that is busy
@@ -241,13 +240,14 @@ pub(crate) fn host() -> bool {
 
     // Runs for the life of the process. This launcher exiting is what hands
     // the port to the next one.
-    thread::spawn(move || serve(&server, &Arc::new(Mutex::new(Registry::new()))));
+    thread::spawn(move || serve(&server, &mut Registry::new()));
     true
 }
 
 /// The serve loop, waking on [`TICK`] even with nothing to answer so that
-/// entries expire on time rather than only when somebody asks.
-fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
+/// entries expire on time rather than only when somebody asks. One thread
+/// owns the registry, so nothing here needs a lock.
+fn serve(server: &Server, registry: &mut Registry) {
     loop {
         match server.recv_timeout(TICK) {
             Ok(Some(request)) => handle(request, registry),
@@ -256,13 +256,13 @@ fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
             // serving.
             Err(e) => log!("[registry] could not accept a request: {e}"),
         }
-        registry.lock().unwrap().expire(Instant::now());
+        registry.expire(Instant::now());
     }
 }
 
 /// Route one request. Every answer carries the CORS headers, including the
 /// error ones, so a browser can read the reason rather than an opaque failure.
-fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
+fn handle(mut request: Request, registry: &mut Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -273,7 +273,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Options, _) => empty(StatusCode(204)),
 
         (Method::Get, "/v1/instances") => {
-            let listing = registry.lock().unwrap().listing();
+            let listing = registry.listing();
             match serde_json::to_vec(&listing) {
                 Ok(body) => json(body),
                 Err(e) => text(
@@ -285,14 +285,14 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
 
         (Method::Post, "/v1/instances") => match read_body(&mut request) {
             Ok(body) => match serde_json::from_slice::<Instance>(&body) {
-                Ok(instance) => beat(registry.lock().unwrap().upsert(instance)),
+                Ok(instance) => beat(registry.upsert(instance)),
                 Err(e) => text(StatusCode(400), &format!("malformed body: {e}")),
             },
             Err(response) => response,
         },
 
         (Method::Post, _) => match stop_route(&path) {
-            Some(Ok(port)) => match registry.lock().unwrap().request_stop(port) {
+            Some(Ok(port)) => match registry.request_stop(port) {
                 true => empty(StatusCode(204)),
                 false => text(StatusCode(404), "no emulator on that port"),
             },
@@ -303,7 +303,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Delete, _) => match path.strip_prefix("/v1/instances/") {
             Some(port) => match port.parse::<u16>() {
                 Ok(port) => {
-                    registry.lock().unwrap().remove(port);
+                    registry.remove(port);
                     empty(StatusCode(204))
                 }
                 Err(_) => text(StatusCode(400), "not a port number"),

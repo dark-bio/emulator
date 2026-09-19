@@ -83,12 +83,14 @@ fn test_the_manual_keeps_its_shape_and_its_links_in_a_pipe() {
     let manual = run(&["help", "--all"]);
     assert_eq!(manual.status.code(), Some(0));
     let text = stdout(&manual);
+    // Wrapped, so a phrase is looked for across line breaks.
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     for link in [
         "https://github.com/dark-bio/cli",
         "https://github.com/dark-bio/examples",
         "ark help agents",
     ] {
-        assert!(text.contains(link), "{link}");
+        assert!(flat.contains(link), "{link}");
     }
     assert_eq!(text.matches("\nRequires: ").count(), COMMANDS.len() + 1);
     assert!(!text.contains("\n  $ "), "examples carry no prompt");

@@ -16,18 +16,27 @@
 //!
 //! Several emulators can run at once, each on a host port and a disk image of
 //! its own. Finding them is what the registry is for: whichever launcher holds
-//! its port serves it, and the rest publish themselves into it.
+//! its port serves it, and the rest publish themselves into it. The same
+//! executable is also a command line that manages emulators without a window
+//! of its own; `args` is that surface and `verbs` is what it does.
 //!
 //! The backing disk image is an unencrypted qcow2 file that starts small and
 //! grows on demand. There is no encryption at the qemu layer. The emulator is
 //! a dev/test convenience, not a vault; see README.
 //!
+//!   - `args`:         the command line as typed.
+//!   - `verbs`:        what each command does with an emulator.
+//!   - `doctor`:       the checklist that says what to fix on this computer.
+//!   - `help`:         the manual, which is what an agent plans from.
+//!   - `output`:       what a command prints, for reading or as JSON.
+//!   - `style`:        what a terminal adds to that, and the escaping.
+//!   - `error`:        the codes a command can exit with.
 //!   - `qemu`:         the QEMU command line, the guest it builds, and its disk.
 //!   - `bundle`:       where a packaged build's firmware, sidecars and libs live.
 //!   - `settings`:     what the launcher remembers between runs.
 //!   - `disk`:         which disk image the guest boots from, asking if need be.
 //!   - `panel`:        the settings panel's state and the commands behind it.
-//!   - `platform`:     OS-specific quirks, so the other three stay cfg-free.
+//!   - `platform`:     OS-specific quirks, so the other modules stay cfg-free.
 //!   - `orphan`:       ties QEMU's lifetime to this process.
 //!   - `registry`:     the registry of running emulators, and who serves it.
 //!   - `discovery`:    keeping this emulator listed in that registry.
@@ -47,10 +56,13 @@
 // Windows console story, including the one QEMU would otherwise get.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod args;
 mod bundle;
 mod diagnostics;
 mod discovery;
 mod disk;
+mod doctor;
+mod error;
 mod error_dialog;
 mod help;
 mod orphan;
@@ -60,11 +72,11 @@ mod platform;
 mod qemu;
 mod registry;
 mod settings;
+mod style;
 mod verbs;
 
 use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -73,194 +85,14 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{FromArgMatches as _, Parser};
 use tauri::{Manager, WindowEvent};
 
+use args::{Boot, Cli};
 use bundle::{Paths, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
 use disk::Resolved;
+use error::{Code, Error};
 use panel::{Launcher, Pending};
 use qemu::{GuestArch, HostPort, ensure_disk, spawn_qemu};
 use settings::Settings;
-
-/// What the tool is, which opens every help page.
-const ABOUT: &str = "Ark Emulator: emulated Ark enclave for development and demos\n\n\
-     An emulated Ark is the real firmware running in QEMU behind a small window \
-     that stands in for the device's face. It exists for development and demos. \
-     It is not a vault: everything lives in one plain disk image on this \
-     computer, so real data belongs on hardware. Talk to it with `ark`, exactly \
-     as you would to hardware, where the owner approves on their phone.";
-
-/// The command line as parsed.
-#[derive(Parser)]
-#[command(
-    name = "ark-emulator",
-    about = ABOUT,
-    disable_help_flag = true,
-    disable_help_subcommand = true
-)]
-struct Cli {
-    /// Everything a guest needs to be booted.
-    #[command(flatten)]
-    boot: Boot,
-
-    /// The options that apply whatever is being run.
-    #[command(flatten)]
-    global: Global,
-
-    /// Short help; `help <command>` prints a full contract
-    #[arg(short = 'h', long)]
-    help: bool,
-
-    // The manual, also reachable as `ark-emulator help --all`.
-    #[arg(long, hide = true, requires = "help", conflicts_with = "version")]
-    all: bool,
-
-    /// Emulator, bundled firmware and QEMU versions
-    #[arg(short = 'V', long)]
-    version: bool,
-
-    /// What to do, or nothing at all, which opens the device window.
-    #[command(subcommand)]
-    command: Option<verbs::Command>,
-}
-
-impl Cli {
-    /// Reject the combinations clap cannot express. The boot options belong
-    /// to the bare run and to `start`, so naming one beside a command is a
-    /// mistake rather than something to guess at.
-    fn validate(&self) -> Result<(), output::Error> {
-        let message = if self.help {
-            return Ok(());
-        } else if self.global.quiet && self.global.verbose {
-            "--quiet cannot be combined with --verbose"
-        } else if self.version && self.command.is_some() {
-            "--version cannot be combined with a command"
-        } else if self.command.is_some() && self.boot.named() {
-            "the boot options belong to a bare run or to `ark-emulator start`"
-        } else {
-            return Ok(());
-        };
-        Err(output::Error::new(2, "usage", message))
-    }
-}
-
-/// The options every command carries, spelled the way the house tools spell
-/// them. They are accepted at any level, so `--no-input` before or after a
-/// command name means the same thing.
-#[derive(clap::Args)]
-pub(crate) struct Global {
-    /// Print results as JSON and events as JSON Lines
-    #[arg(long, global = true)]
-    pub(crate) json: bool,
-
-    /// Longest wait for a machine reply
-    #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
-    pub(crate) timeout: u64,
-
-    /// Never ask; take the default image and exit on failure
-    // A launch with nobody at the keyboard, such as a test run, takes the
-    // default image instead of asking where to keep one, and a failure prints
-    // its report and exits instead of opening a window.
-    #[arg(long, global = true)]
-    pub(crate) no_input: bool,
-
-    /// Diagnostics: debug, or trace with registry traffic
-    #[arg(
-        long,
-        global = true,
-        value_name = "LEVEL",
-        value_enum,
-        hide_possible_values = true
-    )]
-    pub(crate) log: Option<Log>,
-
-    /// Hide progress and notes; keep errors and hints
-    #[arg(short = 'q', long, global = true)]
-    pub(crate) quiet: bool,
-
-    /// Show steps
-    #[arg(short = 'v', long, global = true)]
-    pub(crate) verbose: bool,
-}
-
-/// How much diagnostic detail a run asks for, independent of step narration.
-#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
-pub(crate) enum Log {
-    /// The launcher's own lines.
-    Debug,
-    /// Those and every registry request.
-    Trace,
-}
-
-/// Longest wait for a machine, in seconds. One number for the whole tool, so
-/// there is one to remember, and it is generous enough to cover a boot with no
-/// hardware acceleration behind it.
-const DEFAULT_TIMEOUT: u64 = 120;
-
-/// Reject a wait that cannot be waited out.
-fn parse_timeout(value: &str) -> Result<u64, String> {
-    match value.parse::<u64>() {
-        Ok(seconds) if seconds > 0 => Ok(seconds),
-        _ => Err("the timeout is a positive number of seconds".to_owned()),
-    }
-}
-
-/// What an emulator boots from, shared by the bare run and by the command that
-/// boots one in the background.
-#[derive(clap::Args)]
-pub(crate) struct Boot {
-    /// Image to boot, created if missing
-    // Read for this run only. It neither consults nor updates the settings
-    // file, so a one-off boot from another image leaves the remembered choice
-    // alone.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) disk: Option<PathBuf>,
-
-    /// Cloud environment for a new image
-    // An existing image keeps the environment it was created with, since the
-    // firmware burns that binding in on its first boot.
-    #[arg(long, value_name = "ENV", value_parser = settings::ENVS, hide_possible_values = true)]
-    pub(crate) env: Option<String>,
-
-    /// Guest RAM in MiB
-    // Lower it on a machine with little memory to spare. The remembered
-    // amount answers when this does not.
-    #[arg(long, value_name = "MIB")]
-    pub(crate) memory: Option<u32>,
-
-    /// Firmware architecture: arm64 or amd64
-    // This computer's own by default. It is the only one that gets hardware
-    // acceleration, and the only one a packaged build carries a QEMU for.
-    #[arg(long, value_name = "ARCH", value_enum, hide_possible_values = true)]
-    pub(crate) arch: Option<GuestArch>,
-
-    /// Kernel image, with --initrd
-    // A source build bundles no firmware, so the two are its only way to boot.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) kernel: Option<PathBuf>,
-
-    /// Initramfs, with --kernel
-    #[arg(long, value_name = "PATH")]
-    pub(crate) initrd: Option<PathBuf>,
-
-    /// Loopback address forwarded into the guest
-    // The guest's own port is fixed, so this is the host side of the forward
-    // and the number an emulator is known by. The first free port from 18181
-    // up answers when this does not.
-    #[arg(long, value_name = "ADDR")]
-    pub(crate) host_addr: Option<SocketAddr>,
-}
-
-impl Boot {
-    /// Whether any of these was typed.
-    fn named(&self) -> bool {
-        self.disk.is_some()
-            || self.env.is_some()
-            || self.memory.is_some()
-            || self.arch.is_some()
-            || self.kernel.is_some()
-            || self.initrd.is_some()
-            || self.host_addr.is_some()
-    }
-}
 
 /// Label of the device face window, hidden until startup succeeds.
 pub(crate) const MAIN_WINDOW: &str = "main";
@@ -284,7 +116,7 @@ pub(crate) fn shut_down() -> ! {
 
 /// clap's complaint as the house error: its first paragraph without the
 /// prefix clap puts on it, under the usage code.
-fn usage(error: &clap::Error) -> output::Error {
+fn usage(error: &clap::Error) -> Error {
     let message = error.to_string();
     let message = message
         .split("\n\n")
@@ -292,14 +124,15 @@ fn usage(error: &clap::Error) -> output::Error {
         .unwrap_or(&message)
         .trim_start_matches("error: ")
         .trim();
-    output::Error::new(2, "usage", message)
-        .hint("`ark-emulator help` lists the commands and the topics")
+    Error::new(Code::Usage, message).hint("`ark-emulator help` lists the commands and the topics")
 }
 
 fn main() {
     // Parsed through the help tree, so that -h and --help after a command
     // print the page `help <command>` prints, and a mistake typed at the
-    // command line comes back in the house error shape, JSON included.
+    // command line comes back in the house error shape, JSON included. The
+    // console is attached before anything is printed, since a Windows release
+    // build has none of its own.
     let arguments: Vec<_> = std::env::args_os().collect();
     let json = arguments
         .iter()
@@ -325,35 +158,25 @@ fn main() {
         let _ = error.print();
         std::process::exit(2);
     });
+    if cli.version || cli.command.is_some() {
+        platform::attach_console();
+    }
     let output = output::Output::new(&cli.global);
     error_dialog::reporting(&output, cli.global.no_input);
+    diagnostics::level(cli.global.log);
 
     // Compiled in rather than read at run time, so a command line run never
     // opens a window or touches the display to find out where things are.
     let context = tauri::generate_context!();
     if let Err(err) = cli.validate() {
         output.error(&err);
-        std::process::exit(err.exit);
-    }
-    if cli.help || cli.version || cli.command.is_some() {
-        platform::attach_console();
-    }
-    if cli.help {
-        // clap folds -h and --help into one flag, and the two pages differ, so
-        // which was typed is read back from the arguments.
-        let long = std::env::args_os().any(|argument| argument == "--help");
-        std::process::exit(match help::run(&[], cli.all, long) {
-            Ok(()) => 0,
-            Err(err) => {
-                output.error(&err);
-                err.exit
-            }
-        });
+        std::process::exit(err.exit());
     }
     if cli.version || cli.command.is_some() {
         std::process::exit(verbs::run(
             cli.command,
             &cli.global,
+            &output,
             &context.config().identifier,
             context.package_info(),
         ));
@@ -473,21 +296,24 @@ fn prepare(
 ) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
     // acceleration, so it is the default.
-    let arch = match boot.arch {
+    let arch = match boot.arch.or_else(GuestArch::native) {
         Some(arch) => arch,
-        None => match std::env::consts::ARCH {
-            "aarch64" => GuestArch::Arm64,
-            "x86_64" => GuestArch::Amd64,
-            other => bail!("no firmware exists for {other} hosts; pass --arch explicitly"),
-        },
+        None => bail!(
+            "no firmware exists for {} hosts; pass --arch explicitly",
+            std::env::consts::ARCH
+        ),
     };
     diagnostics::record("Guest", arch.name());
 
     let host_port = host_port?;
     diagnostics::record("Host address", host_port.addr().to_string());
 
+    // The window writes here, so the directory is made now rather than by
+    // every command that only reads.
     let paths = Paths::resolve(&app.config().identifier, app.package_info())?;
     let data_dir = paths.data.clone();
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("could not create the data directory {}", data_dir.display()))?;
 
     // Best effort, and early, so that everything a failing startup says lands
     // in the file a second process can read.
@@ -500,12 +326,8 @@ fn prepare(
 
     // Discovery is a convenience, never a precondition: whatever it answers,
     // including nothing at all, this emulator still boots.
-    discovery::ensure_registry();
-    let booted: disk::Booted = discovery::list()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|instance| (instance.disk_id, instance.port))
-        .collect();
+    registry::host();
+    let booted = discovery::list().unwrap_or_default();
 
     let firmware = resolve_firmware(paths.resources.as_deref(), &boot, arch)?;
     diagnostics::record_path("Kernel", &firmware.kernel);

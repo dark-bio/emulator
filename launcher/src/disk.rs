@@ -4,7 +4,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Deciding which disk image the guest boots from.
+//! Which disk image the guest boots from, and what an image's path is.
 //!
 //! Three sources, in descending order of how deliberate they are:
 //!
@@ -33,8 +33,12 @@
 //! Open selects an existing image. New uses a save dialog and creates the
 //! image immediately, replacing existing contents only after the native
 //! dialog confirms that choice. Starting from the panel never creates an image.
+//!
+//! [`select`] is the same precedence for the command line, which never asks:
+//! the named image, then the remembered one, then the launcher's own. Both
+//! paths [`settle`] the path first, so the two of them and the emulator they
+//! start agree on which file is which.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -42,7 +46,9 @@ use anyhow::{Context as _, Result, bail};
 use serde::Serialize;
 
 use crate::diagnostics::log;
-use crate::discovery::disk_id;
+use crate::discovery;
+use crate::platform::strip_verbatim_prefix;
+use crate::registry::Instance;
 
 /// Name used when an unattended launch needs to allocate an image.
 pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
@@ -62,10 +68,6 @@ pub(crate) fn disk_path() -> Option<String> {
 pub(crate) fn mark_booted(disk: &Path) {
     let _ = BOOTED.set(disk.to_path_buf());
 }
-
-/// Images already booted by other emulators, keyed by [`disk_id`] and mapped to
-/// the port holding them so a refusal can say which emulator is in the way.
-pub(crate) type Booted = HashMap<String, u16>;
 
 /// Why the launcher cannot pick an image on its own and has to ask.
 pub(crate) enum Reason {
@@ -120,9 +122,9 @@ pub(crate) enum Resolved {
     },
 }
 
-/// Work out which image to boot. `dir` is the app's data directory, where an
-/// image the launcher allocates for itself lives, and `port` is the one this
-/// emulator holds.
+/// Work out which image the window boots. `dir` is the app's data directory,
+/// where an image the launcher allocates for itself lives, and `port` is the
+/// one this emulator holds.
 ///
 /// `no_input` stands for "there is nobody here to ask". A launch that cannot
 /// ask falls back to the image the launcher would have allocated for itself. A
@@ -132,19 +134,19 @@ pub(crate) fn decide(
     explicit: Option<&Path>,
     remembered: Option<&Path>,
     autostart: bool,
-    booted: &Booted,
+    booted: &[Instance],
     dir: &Path,
     port: u16,
     no_input: bool,
 ) -> Result<Resolved> {
     if let Some(disk) = explicit {
-        let disk = std::path::absolute(disk)
-            .with_context(|| format!("could not resolve --disk {}", disk.display()))?;
-        if let Some(port) = booted.get(&disk_id(&disk)) {
+        let disk = settle(disk)?;
+        if let Some(instance) = discovery::booted(booted, &disk) {
             bail!(
-                "the disk image {} is already booted by the emulator on port {port}; \
+                "the disk image {} is already booted by the emulator on port {}; \
                  two emulators cannot share one image",
-                disk.display()
+                disk.display(),
+                instance.port
             );
         }
         return Ok(Resolved::Boot(disk));
@@ -153,11 +155,12 @@ pub(crate) fn decide(
     let default = dir.join(DEFAULT_DISK);
 
     if let Some(disk) = remembered {
-        if let Some(port) = booted.get(&disk_id(disk)) {
+        if let Some(instance) = discovery::booted(booted, disk) {
             let reason = Reason::InUse(disk.to_path_buf());
             log!(
-                "[launcher] the remembered disk image {} is already booted on port {port}",
-                disk.display()
+                "[launcher] the remembered disk image {} is already booted on port {}",
+                disk.display(),
+                instance.port
             );
             if !no_input {
                 return Ok(Resolved::Ask {
@@ -189,7 +192,7 @@ pub(crate) fn decide(
     }
 
     if no_input {
-        if !booted.contains_key(&disk_id(&default)) {
+        if discovery::booted(booted, &default).is_none() {
             return Ok(Resolved::Boot(default));
         }
         return Ok(Resolved::Boot(dir.join(format!("emulator-{port}.ark"))));
@@ -198,6 +201,43 @@ pub(crate) fn decide(
     Ok(Resolved::Ask {
         suggestion: None,
         reason: Reason::FirstRun,
+    })
+}
+
+/// Which image a command boots. An image named on the command line wins, then
+/// the remembered one, which is the device the owner opens by double-click,
+/// and then the image the launcher allocates for itself. Whether the chosen
+/// image is already booted is the caller's question, since a start states a
+/// goal and reports a running emulator rather than refusing it.
+pub(crate) fn select(
+    named: Option<&Path>,
+    remembered: Option<&Path>,
+    dir: &Path,
+) -> Result<PathBuf> {
+    if let Some(image) = named {
+        return settle(image);
+    }
+    if let Some(image) = remembered
+        && image.is_file()
+    {
+        return settle(image);
+    }
+    settle(&dir.join(DEFAULT_DISK))
+}
+
+/// An image's path with the directories above it resolved, so that a command
+/// and the emulator it starts agree on which image is which. The file itself
+/// need not exist yet, and a symbolic link in the path would otherwise give
+/// the two of them different answers.
+pub(crate) fn settle(image: &Path) -> Result<PathBuf> {
+    let image = std::path::absolute(image)
+        .with_context(|| format!("could not resolve {}", image.display()))?;
+    let (Some(parent), Some(name)) = (image.parent(), image.file_name()) else {
+        return Ok(image);
+    };
+    Ok(match parent.canonicalize() {
+        Ok(parent) => strip_verbatim_prefix(&parent.join(name)),
+        Err(_) => image,
     })
 }
 
@@ -225,8 +265,7 @@ pub(crate) async fn pick_disk(
         return Ok(None);
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let path =
-            std::path::absolute(path).map_err(|e| format!("That location cannot be used: {e}"))?;
+        let path = settle(&path).map_err(|e| format!("That location cannot be used: {e}"))?;
         if create {
             require_available(&path).map_err(|e| format!("{e:#}"))?;
             crate::qemu::create_disk(&path, qemu_libs.as_deref())
@@ -302,24 +341,20 @@ pub(crate) fn require_existing(path: &Path) -> Result<()> {
 /// while another emulator started. The local image is checked even if the
 /// registry is unavailable.
 pub(crate) fn require_available(path: &Path) -> Result<()> {
-    let booted: Booted = crate::discovery::list()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|instance| (instance.disk_id, instance.port))
-        .collect();
+    let booted = discovery::list().unwrap_or_default();
     check_available(path, BOOTED.get().map(PathBuf::as_path), &booted)
 }
 
 /// Reject both this window's image and images reported by other launchers.
-fn check_available(path: &Path, running: Option<&Path>, booted: &Booted) -> Result<()> {
-    let id = disk_id(path);
-    if running.is_some_and(|running| disk_id(running) == id) {
+fn check_available(path: &Path, running: Option<&Path>, booted: &[Instance]) -> Result<()> {
+    let id = discovery::disk_id(path);
+    if running.is_some_and(|running| discovery::disk_id(running) == id) {
         bail!(
             "{} is running in this window. Stop this emulator before replacing its image.",
             name_of(path)
         );
     }
-    if booted.contains_key(&id) {
+    if discovery::booted(booted, path).is_some() {
         bail!(
             "{} is already running in another window. Close that emulator or choose a different image.",
             name_of(path)
@@ -350,6 +385,20 @@ mod tests {
         std::fs::write(path, b"").unwrap();
     }
 
+    /// A registry entry for an emulator holding `image` on `port`.
+    fn booted(port: u16, image: &Path) -> Instance {
+        Instance {
+            port,
+            disk: name_of(image),
+            disk_id: discovery::disk_id(image),
+            ready: true,
+            env: None,
+            name: None,
+            serial: None,
+            expiry: None,
+        }
+    }
+
     #[test]
     fn test_opening_a_missing_image_does_not_create_it() {
         let tmp = TempDir::new().unwrap();
@@ -366,17 +415,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let disk = tmp.path().join("running.ark");
         touch(&disk);
-        let booted = Booted::from([(disk_id(&disk), PORT)]);
-        let err = check_available(&disk, None, &booted)
+        let elsewhere = [booted(PORT, &disk)];
+        let err = check_available(&disk, None, &elsewhere)
             .unwrap_err()
             .to_string();
         assert!(err.contains("another window"), "{err}");
 
-        let err = check_available(&disk, Some(&disk), &Booted::new())
+        let err = check_available(&disk, Some(&disk), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("this window"), "{err}");
-        assert!(check_available(&tmp.path().join("new.ark"), Some(&disk), &booted).is_ok());
+        assert!(check_available(&tmp.path().join("new.ark"), Some(&disk), &elsewhere).is_ok());
     }
 
     #[cfg(unix)]
@@ -387,9 +436,8 @@ mod tests {
         let alias = tmp.path().join("alias.ark");
         touch(&disk);
         std::os::unix::fs::symlink(&disk, &alias).unwrap();
-        assert!(check_available(&alias, Some(&disk), &Booted::new()).is_err());
-        let booted = Booted::from([(disk_id(&disk), PORT)]);
-        assert!(check_available(&alias, None, &booted).is_err());
+        assert!(check_available(&alias, Some(&disk), &[]).is_err());
+        assert!(check_available(&alias, None, &[booted(PORT, &disk)]).is_err());
     }
 
     #[test]
@@ -403,16 +451,16 @@ mod tests {
             Some(&disk),
             Some(&remembered),
             false,
-            &Booted::new(),
+            &[],
             tmp.path(),
             PORT,
             false,
         )
         .unwrap();
-        let Resolved::Boot(booted) = resolved else {
+        let Resolved::Boot(chosen) = resolved else {
             panic!("an explicit --disk was not taken");
         };
-        assert_eq!(booted, disk);
+        assert_eq!(chosen, settle(&disk).unwrap());
     }
 
     #[test]
@@ -420,9 +468,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let disk = tmp.path().join("explicit.ark");
         touch(&disk);
-        let booted = Booted::from([(disk_id(&disk), 18181)]);
+        let elsewhere = [booted(18181, &disk)];
 
-        let Err(err) = decide(Some(&disk), None, false, &booted, tmp.path(), PORT, false) else {
+        let Err(err) = decide(
+            Some(&disk),
+            None,
+            false,
+            &elsewhere,
+            tmp.path(),
+            PORT,
+            false,
+        ) else {
             panic!("a booted image was accepted");
         };
         assert!(err.to_string().contains("already booted"), "{err}");
@@ -434,20 +490,11 @@ mod tests {
         let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
-        let resolved = decide(
-            None,
-            Some(&remembered),
-            true,
-            &Booted::new(),
-            tmp.path(),
-            PORT,
-            false,
-        )
-        .unwrap();
-        let Resolved::Boot(booted) = resolved else {
+        let resolved = decide(None, Some(&remembered), true, &[], tmp.path(), PORT, false).unwrap();
+        let Resolved::Boot(chosen) = resolved else {
             panic!("a usable remembered image was not taken");
         };
-        assert_eq!(booted, remembered);
+        assert_eq!(chosen, remembered);
     }
 
     #[test]
@@ -456,16 +503,8 @@ mod tests {
         let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
-        let resolved = decide(
-            None,
-            Some(&remembered),
-            false,
-            &Booted::new(),
-            tmp.path(),
-            PORT,
-            false,
-        )
-        .unwrap();
+        let resolved =
+            decide(None, Some(&remembered), false, &[], tmp.path(), PORT, false).unwrap();
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("autostart was disabled but the image booted");
         };
@@ -479,20 +518,11 @@ mod tests {
         let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
-        let resolved = decide(
-            None,
-            Some(&remembered),
-            false,
-            &Booted::new(),
-            tmp.path(),
-            PORT,
-            true,
-        )
-        .unwrap();
-        let Resolved::Boot(booted) = resolved else {
+        let resolved = decide(None, Some(&remembered), false, &[], tmp.path(), PORT, true).unwrap();
+        let Resolved::Boot(chosen) = resolved else {
             panic!("an unattended launch asked anyway");
         };
-        assert_eq!(booted, remembered);
+        assert_eq!(chosen, remembered);
     }
 
     #[test]
@@ -500,16 +530,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let remembered = tmp.path().join("remembered.ark");
 
-        let resolved = decide(
-            None,
-            Some(&remembered),
-            true,
-            &Booted::new(),
-            tmp.path(),
-            PORT,
-            false,
-        )
-        .unwrap();
+        let resolved = decide(None, Some(&remembered), true, &[], tmp.path(), PORT, false).unwrap();
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("a deleted remembered image was booted");
         };
@@ -522,13 +543,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
-        let booted = Booted::from([(disk_id(&remembered), 18181)]);
+        let elsewhere = [booted(18181, &remembered)];
 
         let resolved = decide(
             None,
             Some(&remembered),
             true,
-            &booted,
+            &elsewhere,
             tmp.path(),
             PORT,
             false,
@@ -544,7 +565,7 @@ mod tests {
     fn test_a_first_run_asks() {
         let tmp = TempDir::new().unwrap();
 
-        let resolved = decide(None, None, true, &Booted::new(), tmp.path(), PORT, false).unwrap();
+        let resolved = decide(None, None, true, &[], tmp.path(), PORT, false).unwrap();
         let Resolved::Ask { suggestion, reason } = resolved else {
             panic!("a first run booted something");
         };
@@ -556,23 +577,64 @@ mod tests {
     fn test_nobody_to_ask_allocates_an_image() {
         let tmp = TempDir::new().unwrap();
 
-        let resolved = decide(None, None, true, &Booted::new(), tmp.path(), PORT, true).unwrap();
-        let Resolved::Boot(booted) = resolved else {
+        let resolved = decide(None, None, true, &[], tmp.path(), PORT, true).unwrap();
+        let Resolved::Boot(chosen) = resolved else {
             panic!("an unattended launch asked anyway");
         };
-        assert_eq!(booted, tmp.path().join(DEFAULT_DISK));
+        assert_eq!(chosen, tmp.path().join(DEFAULT_DISK));
     }
 
     #[test]
     fn test_nobody_to_ask_avoids_an_image_in_use() {
         let tmp = TempDir::new().unwrap();
         let default = tmp.path().join(DEFAULT_DISK);
-        let booted = Booted::from([(disk_id(&default), 18181)]);
+        let elsewhere = [booted(18181, &default)];
 
-        let resolved = decide(None, None, true, &booted, tmp.path(), PORT, true).unwrap();
+        let resolved = decide(None, None, true, &elsewhere, tmp.path(), PORT, true).unwrap();
         let Resolved::Boot(disk) = resolved else {
             panic!("an unattended launch asked anyway");
         };
         assert_eq!(disk, tmp.path().join(format!("emulator-{PORT}.ark")));
+    }
+
+    #[test]
+    fn test_a_command_takes_the_named_image_over_the_remembered_one() {
+        let tmp = TempDir::new().unwrap();
+        let remembered = tmp.path().join("remembered.ark");
+        touch(&remembered);
+        let named = tmp.path().join("named.ark");
+        assert_eq!(
+            select(Some(&named), Some(&remembered), tmp.path()).unwrap(),
+            settle(&named).unwrap()
+        );
+        assert_eq!(
+            select(None, Some(&remembered), tmp.path()).unwrap(),
+            settle(&remembered).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_a_command_falls_back_to_the_default_image() {
+        let tmp = TempDir::new().unwrap();
+        let gone = tmp.path().join("deleted.ark");
+        let default = settle(&tmp.path().join(DEFAULT_DISK)).unwrap();
+        assert_eq!(select(None, Some(&gone), tmp.path()).unwrap(), default);
+        assert_eq!(select(None, None, tmp.path()).unwrap(), default);
+    }
+
+    /// The emulator resolves the path it is handed all over again, so a link
+    /// anywhere above the image has to be gone by then.
+    #[cfg(unix)]
+    #[test]
+    fn test_settling_resolves_a_link_above_the_image() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("images");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let settled = settle(&link.join("device.ark")).unwrap();
+        assert_eq!(settled, real.canonicalize().unwrap().join("device.ark"));
+        assert_eq!(settle(&settled).unwrap(), settled);
     }
 }

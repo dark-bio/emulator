@@ -26,6 +26,10 @@
 //! and has no way to be told otherwise. The host side is not, which is what
 //! lets several emulators run at once, each holding a port of its own out of
 //! the range starting at [`FIRST_HOST_PORT`].
+//!
+//! Everything that runs a QEMU binary, the guest, `qemu-img`, a version
+//! query, goes through the same command preparation, so a packaged build's
+//! libraries are found by every one of them.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
@@ -51,6 +55,17 @@ pub(crate) enum GuestArch {
 }
 
 impl GuestArch {
+    /// This computer's own architecture, which is the default guest because it
+    /// is the only one that gets hardware acceleration. `None` on a computer
+    /// no firmware exists for.
+    pub(crate) fn native() -> Option<Self> {
+        match std::env::consts::ARCH {
+            "aarch64" => Some(Self::Arm64),
+            "x86_64" => Some(Self::Amd64),
+            _ => None,
+        }
+    }
+
     /// Whether this architecture is the host's own, which decides if QEMU can
     /// use hardware acceleration instead of pure emulation.
     fn host(self) -> bool {
@@ -80,18 +95,13 @@ impl GuestArch {
     }
 
     /// Name of this architecture in the docker-style vocabulary the firmware
-    /// build uses, which is also the value `--arch` takes.
+    /// build uses, which is also the value `--arch` takes and the directory
+    /// the bundled firmware for it sits in.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Arm64 => "arm64",
             Self::Amd64 => "amd64",
         }
-    }
-
-    /// Subdirectory under the bundled `firmware` resource holding this
-    /// architecture's kernel/initrd, matching the CI layout.
-    pub(crate) fn firmware_dir(self) -> &'static str {
-        self.name()
     }
 }
 
@@ -132,6 +142,58 @@ pub(crate) struct Qemu {
 
     /// Whether this build ships it.
     pub(crate) bundled: bool,
+}
+
+impl Qemu {
+    /// A command running this QEMU, with a packaged build's libraries and
+    /// modules in reach and no console window of its own on Windows.
+    fn command(&self, libs: Option<&Path>) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        prepare(&mut cmd, libs);
+        cmd
+    }
+
+    /// The version this QEMU reports, which is the fourth word of its first
+    /// line, or nothing when it cannot be run.
+    pub(crate) fn version(&self, libs: Option<&Path>) -> Option<String> {
+        let output = self.command(libs).arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let line = text.lines().next()?;
+        line.split_whitespace().nth(3).map(str::to_owned)
+    }
+}
+
+/// Point a QEMU tool at a packaged build's shared libraries and modules, and
+/// keep it off a console window of its own on Windows.
+fn prepare(cmd: &mut Command, libs: Option<&Path>) {
+    suppress_child_console(cmd);
+    if let Some(libs) = libs {
+        cmd.env(library_path_var(), prepend_library_path(libs));
+        cmd.env(QEMU_MODULE_DIR, libs);
+    }
+}
+
+/// The `qemu-img` this build runs, bundled beside the launcher or on `PATH`.
+fn qemu_img(libs: Option<&Path>) -> Command {
+    let mut cmd = match resolve_sidecar("qemu-img") {
+        Some(bundled) => Command::new(bundled),
+        None => Command::new("qemu-img"),
+    };
+    prepare(&mut cmd, libs);
+    cmd
+}
+
+/// Whether a running QEMU holds `path`. QEMU locks the images it writes, and
+/// `qemu-img` refuses to open a locked one, which is a firmer answer than any
+/// registry. A `qemu-img` that cannot be run answers no, since it cannot tell.
+pub(crate) fn image_in_use(path: &Path, libs: Option<&Path>) -> bool {
+    let Ok(output) = qemu_img(libs).arg("info").arg(path).output() else {
+        return false;
+    };
+    !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("lock")
 }
 
 /// Work out which QEMU boots `arch`. Only the host's own architecture is ever
@@ -217,11 +279,16 @@ impl HostPort {
     }
 }
 
-/// Lazily creates the backing qcow2 disk image if missing. Idempotent; to
-/// reset device state with `--disk`, delete the file and re-launch.
+/// Lazily creates the backing qcow2 disk image if missing, and the directory
+/// it lives in. Idempotent; to reset device state with `--disk`, delete the
+/// file and re-launch.
 pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
     if path.exists() {
         return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("could not create {}", dir.display()))?;
     }
     create_disk(path, qemu_libs)
 }
@@ -234,16 +301,7 @@ pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
     // set_len would zero-fill the whole file. Delegated to qemu-img rather
     // than hand-writing the format. The bare byte count is read as bytes.
     // Keep an existing file in place so QEMU can check its image locks.
-    let mut cmd = match resolve_sidecar("qemu-img") {
-        Some(bundled) => Command::new(bundled),
-        None => Command::new("qemu-img"),
-    };
-    suppress_child_console(&mut cmd);
-    if let Some(libs) = qemu_libs {
-        cmd.env(library_path_var(), prepend_library_path(libs));
-        cmd.env(QEMU_MODULE_DIR, libs);
-    }
-    let output = cmd
+    let output = qemu_img(qemu_libs)
         .args(["create", "-f", "qcow2"])
         .arg(path)
         .arg(DISK_BYTES.to_string())
@@ -290,12 +348,9 @@ pub(crate) fn spawn_qemu(
         qemu.binary.display()
     );
     diagnostics::record("QEMU", format!("{} ({origin})", qemu.binary.display()));
-    let mut cmd = Command::new(&qemu.binary);
-    suppress_child_console(&mut cmd);
+    let mut cmd = qemu.command(qemu_libs);
     if let Some(libs) = qemu_libs {
         log!("[launcher] passing -L {} to QEMU", libs.display());
-        cmd.env(library_path_var(), prepend_library_path(libs));
-        cmd.env(QEMU_MODULE_DIR, libs);
         // -L points QEMU at its firmware/BIOS/keymap datadir, e.g.
         // bios-256k.bin, which the q35 machine model needs even for a direct
         // -kernel boot since SeaBIOS still runs first. QEMU looks up only the
