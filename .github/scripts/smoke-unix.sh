@@ -49,9 +49,10 @@ dump() {
 }
 
 # The emulator outlives this script, so a failure anywhere past the start has to
-# take it down on the way out.
+# take it down on the way out. Only one this run booted: a start that reported
+# an emulator already running leaves it to whoever started it.
 cleanup() {
-  if [ -n "$port" ]; then
+  if [ -n "$port" ] && [ "$started" = "true" ]; then
     "$exe" stop "$port" --no-input >/dev/null 2>&1 || true
   fi
 }
@@ -65,18 +66,20 @@ trap cleanup EXIT
 echo "starting $exe"
 status=0
 "$exe" start --no-input --json --timeout "$timeout" "$@" >"$log" 2>"$events" || status=$?
+
+# The document is ours and its shape is part of the contract, so reading it with
+# sed is enough and keeps this script free of a JSON parser. It is read before
+# the status is judged, since a start that timed out still names the emulator
+# it left booting, and that one has to be stopped on the way out.
+port="$(sed -n 's/.*"port": *\([0-9][0-9]*\).*/\1/p' "$log" | head -1)"
+ready="$(sed -n 's/.*"ready": *\([a-z][a-z]*\).*/\1/p' "$log" | head -1)"
+started="$(sed -n 's/.*"started": *\([a-z][a-z]*\).*/\1/p' "$log" | head -1)"
+
 if [ "$status" -ne 0 ]; then
   echo "start exited with status $status" >&2
   dump
   exit 1
 fi
-
-# The document is ours and its shape is part of the contract, so reading it with
-# sed is enough and keeps this script free of a JSON parser.
-port="$(sed -n 's/.*"port": *\([0-9][0-9]*\).*/\1/p' "$log" | head -1)"
-ready="$(sed -n 's/.*"ready": *\([a-z][a-z]*\).*/\1/p' "$log" | head -1)"
-started="$(sed -n 's/.*"started": *\([a-z][a-z]*\).*/\1/p' "$log" | head -1)"
-
 if [ "$ready" != "true" ] || [ "$started" != "true" ] || [ -z "$port" ]; then
   echo "start answered started=$started ready=$ready port=$port" >&2
   dump

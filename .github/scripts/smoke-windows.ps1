@@ -59,27 +59,32 @@ function Invoke-Emulator([string[]]$commandArgs, [switch]$Append) {
 }
 
 # The emulator outlives this script, so a failure past the start has to take it
-# down on the way out.
+# down on the way out. Only one this run booted: a start that reported an
+# emulator already running leaves it to whoever started it.
 $port = ""
+$started = ""
 try {
     New-Item -ItemType File -Force -Path $log, $events | Out-Null
 
     Write-Host "starting $Executable"
     $startArgs = @("start", "--no-input", "--json", "--timeout", "$timeout") + $Arguments
     $status = Invoke-Emulator $startArgs
+
+    # The document is read before the status is judged, since a start that
+    # timed out still names the emulator it left booting, and that one has to
+    # be stopped on the way out.
+    $document = $null
+    try { $document = Get-Content $log -Raw | ConvertFrom-Json } catch {}
+    if ($document) {
+        $port = "$($document.port)"
+        $ready = "$($document.ready)".ToLower()
+        $started = "$($document.started)".ToLower()
+    }
     if ($status -ne 0) {
         Write-Host "start exited with status $status"
         Write-Log
         exit 1
     }
-
-    # The document is ours and its shape is part of the contract, so matching it
-    # is enough and keeps this script free of a JSON parser.
-    $document = Get-Content $log -Raw
-    $port = ([regex]::Match($document, '"port":\s*(\d+)')).Groups[1].Value
-    $ready = ([regex]::Match($document, '"ready":\s*(\w+)')).Groups[1].Value
-    $started = ([regex]::Match($document, '"started":\s*(\w+)')).Groups[1].Value
-
     if ($ready -ne "true" -or $started -ne "true" -or -not $port) {
         Write-Host "start answered started=$started ready=$ready port=$port"
         Write-Log
@@ -101,7 +106,7 @@ try {
     Write-Host "the emulator booted and shut down"
 }
 finally {
-    if ($port) {
+    if ($port -and $started -eq "true") {
         Invoke-Emulator @("stop", $port, "--no-input") -Append | Out-Null
     }
 }

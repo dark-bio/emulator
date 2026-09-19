@@ -459,6 +459,9 @@ jobs:
       matrix:
         os: [macos-15, macos-15-intel, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    # A boot that hangs is what this job exists to catch, so it has a bound of
+    # its own beyond the start's --timeout.
+    timeout-minutes: 30
     env:
       SIGN_MACOS: ${{ inputs.signing-environment != '' }}
     steps:
