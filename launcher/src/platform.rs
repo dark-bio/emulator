@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Per-OS quirks, kept out of the rest of the launcher. Each entry below is
 //! one small `pub(crate)` function whose platform-specific bodies sit next to
 //! it, so callers invoke it unconditionally and never carry a `cfg` of their
@@ -13,6 +19,9 @@
 //!     QEMU. Suppressing it only stops a *new* console being allocated; a
 //!     release build started from an existing terminal still inherits its
 //!     stdio handles and still prints there.
+//!   - **Attaching a console**: a Windows release build links as a GUI app and
+//!     has nowhere to print, so a command run from a terminal borrows the one
+//!     that started it.
 //!   - **Acceleration**: KVM on Linux, Hypervisor.framework on macOS, WHPX on
 //!     Windows, each behind a runtime probe, falling back to TCG emulation.
 //!   - **Opening a URL**: `xdg-open`, `open` and `cmd /c start`, none of which
@@ -88,6 +97,65 @@ pub(crate) fn suppress_child_console(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 pub(crate) fn suppress_child_console(_cmd: &mut Command) {}
+
+/// Borrow the console that started this process, so that a command typed at a
+/// terminal can be answered there. A Windows release build links as a GUI app
+/// and is given no console of its own; output that was redirected already has
+/// somewhere to go and is left alone.
+///
+/// Only a command line run calls this. A window run has nothing to print, and
+/// an emulator started in the background must stay off the console entirely,
+/// since closing a console takes everything attached to it down.
+#[cfg(windows)]
+pub(crate) fn attach_console() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    // SAFETY: every call is a documented Win32 entry point called with the
+    // arguments it documents. The console device names are null-terminated
+    // wide strings owned for the length of the call, the two pointer arguments
+    // are the nulls CreateFileW documents as "no security attributes" and "no
+    // template", and a handle is only ever handed back to Win32.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for (stream, device) in [
+            (STD_INPUT_HANDLE, "CONIN$"),
+            (STD_OUTPUT_HANDLE, "CONOUT$"),
+            (STD_ERROR_HANDLE, "CONOUT$"),
+        ] {
+            // A stream that already has a handle was redirected, and pointing
+            // it at the console would send it somewhere it was not asked to go.
+            let held = GetStdHandle(stream);
+            if !held.is_null() && held != INVALID_HANDLE_VALUE {
+                continue;
+            }
+            let device: Vec<u16> = device.encode_utf16().chain(Some(0)).collect();
+            let handle = CreateFileW(
+                device.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            if handle != INVALID_HANDLE_VALUE {
+                SetStdHandle(stream, handle);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn attach_console() {}
 
 /// Hand a URL to whatever the desktop has set as its browser. Spawned and
 /// left alone: the launcher has no use for the browser's exit status, and

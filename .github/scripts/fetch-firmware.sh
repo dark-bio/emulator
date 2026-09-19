@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# fetch-firmware.sh: populate launcher/firmware/<arch>/{kernel,initrd.gz} from
-# the pinned firmware release, for the build host's own architecture only.
+# fetch-firmware.sh: populate launcher/firmware/<arch>/{kernel,initrd.gz,version}
+# from the pinned firmware release, for the build host's own architecture only.
+#
+# The version file is how the launcher reports which firmware it carries: the
+# pin lives in the workflow, and nothing else in the bundle names the release.
 #
 # dark-bio/emulator-images is public, so no token is needed to read its
 # releases. gh still works better authenticated, for the API rate limit.
@@ -71,6 +74,7 @@ verify_checksum "$initrd" "$initrd_sha256"
 
 cp "$kernel" "$out_dir/kernel"
 cp "$initrd" "$out_dir/initrd.gz"
+printf '%s\n' "$FIRMWARE_TAG" > "$out_dir/version"
 
 echo "populated $out_dir:"
 find "$out_dir" -type f

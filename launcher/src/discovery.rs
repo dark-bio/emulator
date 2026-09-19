@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The launcher's side of the registry: making sure it is being served, and
 //! keeping this emulator's entry in it up to date.
 //!
@@ -10,6 +16,12 @@
 //! publish themselves to whoever did (see [`crate::registry`]). Takeover rides
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
+//!
+//! The heartbeat is also how a shutdown arrives. The registry answers a beat
+//! with whatever has been left for this emulator, and a stop waiting there
+//! takes it down the way closing its window does. A launcher that hosts the
+//! registry beats to itself over the loopback like every other one, so it
+//! reads its own mailbox on the same path.
 
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -19,15 +31,16 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::log;
-use crate::registry::{self, Instance, Listing, REGISTRY_PORT};
+use crate::registry::{self, Beat, Instance, Listing, REGISTRY_PORT};
 
-/// How often this emulator re-registers itself, which is also the heartbeat
-/// keeping its entry alive, so it has to stay below the registry's expiry.
-const HEARTBEAT: Duration = Duration::from_secs(5);
+/// How often this emulator re-registers itself. It is the heartbeat keeping
+/// its entry alive, so it has to stay well below the registry's expiry, and it
+/// is also how long a stop takes to arrive.
+pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// How long any single request to the registry may take, bounded so a wedged
 /// one cannot hold up a boot.
@@ -42,22 +55,24 @@ fn registry_addr() -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT)
 }
 
-/// Ask the registry what is running. An empty list is also what a machine with
-/// nobody hosting one looks like, and a caller does not need to tell.
-pub(crate) fn list() -> Vec<Instance> {
-    match request("GET", "/v1/instances", None) {
-        Ok(body) => match serde_json::from_slice::<Listing>(&body) {
-            Ok(listing) => listing.instances,
-            Err(e) => {
-                log!("[discovery] could not read the registry's answer: {e}");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            log!("[discovery] could not read the registry: {e}");
-            Vec::new()
-        }
-    }
+/// Ask the registry what is running. Nothing serving one is a computer with no
+/// emulators on it, so it answers with an empty list rather than a failure. An
+/// answer that arrives and cannot be read is a failure, since something is
+/// there and it is not a registry this build understands.
+pub(crate) fn list() -> Result<Vec<Instance>> {
+    let Ok(body) = request("GET", "/v1/instances", None) else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_slice::<Listing>(&body)
+        .context("could not read the registry's answer")?
+        .instances)
+}
+
+/// Ask the emulator on `port` to shut down. The request waits in the registry
+/// until that emulator's next heartbeat collects it.
+pub(crate) fn request_stop(port: u16) -> Result<()> {
+    request("POST", &format!("/v1/instances/{port}/stop"), None)?;
+    Ok(())
 }
 
 /// Make sure the registry is being served, hosting it here if nobody else is.
@@ -87,9 +102,11 @@ pub(crate) fn register(port: u16, disk: &Path) {
     }
 
     publish();
-    thread::spawn(|| loop {
-        thread::sleep(HEARTBEAT);
-        publish();
+    thread::spawn(|| {
+        loop {
+            thread::sleep(HEARTBEAT);
+            publish();
+        }
     });
 }
 
@@ -130,7 +147,7 @@ pub(crate) fn nameplate(
     publish();
 }
 
-/// Send the current entry to the registry.
+/// Send the current entry to the registry, and act on whatever comes back.
 fn publish() {
     let Some(entry) = ENTRY.get() else {
         return;
@@ -144,7 +161,8 @@ fn publish() {
         }
     };
 
-    if request("POST", "/v1/instances", Some(&body)).is_ok() {
+    if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+        obey(&answer);
         return;
     }
 
@@ -153,8 +171,18 @@ fn publish() {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    if let Err(e) = request("POST", "/v1/instances", Some(&body)) {
-        log!("[discovery] could not register: {e}");
+    match request("POST", "/v1/instances", Some(&body)) {
+        Ok(answer) => obey(&answer),
+        Err(e) => log!("[discovery] could not register: {e}"),
+    }
+}
+
+/// Act on what the registry answered a heartbeat with. A stop waiting there is
+/// the only thing it can carry, and an answer with no body carries nothing.
+fn obey(answer: &[u8]) {
+    if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
+        log!("[discovery] asked to shut down");
+        crate::shut_down();
     }
 }
 
@@ -291,8 +319,8 @@ mod tests {
     #[test]
     fn test_disk_id_is_stable_and_distinguishes_images() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let a = tmp.path().join("a.img");
-        let b = tmp.path().join("b.img");
+        let a = tmp.path().join("a.ark");
+        let b = tmp.path().join("b.ark");
         assert_eq!(disk_id(&a), disk_id(&a));
         assert_ne!(disk_id(&a), disk_id(&b));
     }
@@ -302,8 +330,8 @@ mod tests {
     fn test_disk_id_distinguishes_paths_that_are_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt as _;
-        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.img"));
-        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.img"));
+        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.ark"));
+        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.ark"));
         assert_ne!(disk_id(a), disk_id(b));
     }
 
@@ -311,9 +339,9 @@ mod tests {
     fn test_disk_id_agrees_across_spellings_of_one_image() {
         // Canonicalization needs the file to exist.
         let tmp = tempfile::TempDir::new().unwrap();
-        let direct = tmp.path().join("ark.img");
+        let direct = tmp.path().join("ark.ark");
         std::fs::write(&direct, b"").unwrap();
-        let indirect = tmp.path().join("sub").join("..").join("ark.img");
+        let indirect = tmp.path().join("sub").join("..").join("ark.ark");
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         assert_eq!(disk_id(&direct), disk_id(&indirect));
     }

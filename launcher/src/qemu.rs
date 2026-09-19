@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The QEMU command line: which system emulator to run, how the guest is
 //! wired up, and the qcow2 disk it boots from.
 //!
@@ -6,9 +12,15 @@
 //! one a packaged build ships a QEMU for. A cross-architecture guest always
 //! runs under TCG emulation and always needs a QEMU on `PATH`.
 //!
-//! The guest is minimal on purpose: virtio net and block, a serial console on
-//! stdio, no monitor and no graphics. One host port forwarded through SLIRP is
-//! the entire interface the UI and any host-side client talk to.
+//! The guest is minimal on purpose: virtio net and block, no monitor and no
+//! graphics. One host port forwarded through SLIRP is the entire interface the
+//! UI and any host-side client talk to.
+//!
+//! A bundled firmware boots with its serial console attached to a null
+//! device, so the guest's output goes nowhere and stdout stays empty. A
+//! firmware named with `--kernel` and `--initrd` keeps its console on stdout,
+//! which is where a developer booting their own build wants it. The console
+//! device itself stays, since the firmware stops serving its bus without one.
 //!
 //! The guest side of that forward is fixed: the firmware listens on one port
 //! and has no way to be told otherwise. The host side is not, which is what
@@ -16,12 +28,12 @@
 //! the range starting at [`FIRST_HOST_PORT`].
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
-use crate::bundle::resolve_sidecar;
+use crate::bundle::{Firmware, resolve_sidecar};
 use crate::diagnostics::{self, log};
 use crate::orphan;
 use crate::platform::{
@@ -60,7 +72,7 @@ impl GuestArch {
 
     /// Serial console device of the guest: the arm virt machine exposes a
     /// PL011 at ttyAMA0, the x86 q35 machine a 16550 at ttyS0.
-    fn console(self) -> &'static str {
+    fn serial(self) -> &'static str {
         match self {
             Self::Arm64 => "ttyAMA0",
             Self::Amd64 => "ttyS0",
@@ -111,6 +123,39 @@ const QEMU_SIDECAR: &str = "qemu-system-guest";
 /// points at the same directory. Harmless on a build that has no modules, and
 /// on a source build there is nothing bundled to point at.
 const QEMU_MODULE_DIR: &str = "QEMU_MODULE_DIR";
+
+/// The QEMU system emulator a guest is booted with.
+pub(crate) struct Qemu {
+    /// The binary to run, either an absolute path to the bundled one or the
+    /// name that is looked up on `PATH`.
+    pub(crate) binary: PathBuf,
+
+    /// Whether this build ships it.
+    pub(crate) bundled: bool,
+}
+
+/// Work out which QEMU boots `arch`. Only the host's own architecture is ever
+/// bundled, so a cross-architecture guest always falls back to `PATH`, which a
+/// packaged build will not have.
+pub(crate) fn resolve_qemu(arch: GuestArch) -> Qemu {
+    match arch.host().then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
+        Some(binary) => Qemu {
+            binary,
+            bundled: true,
+        },
+        None => Qemu {
+            binary: PathBuf::from(arch.qemu_binary()),
+            bundled: false,
+        },
+    }
+}
+
+/// The accelerator a guest of this architecture gets on this computer, which
+/// is the difference between a boot in seconds and one in minutes. `tcg` is
+/// QEMU's own software emulation.
+pub(crate) fn accelerator(arch: GuestArch) -> &'static str {
+    accel_flags(arch.host()).get(1).copied().unwrap_or("tcg")
+}
 
 /// A host port reserved for an emulator, held until the moment QEMU takes it
 /// over. Keeping the listener bound is what stops two launchers starting at
@@ -228,11 +273,9 @@ pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// Resolves the binary itself rather than using `tauri-plugin-shell`'s
 /// sidecar API, which exposes no pre-exec hook, and the Linux orphan
 /// protection needs one to arm `PR_SET_PDEATHSIG`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_qemu(
     arch: GuestArch,
-    kernel: &Path,
-    initrd: &Path,
+    firmware: &Firmware,
     disk: &Path,
     memory: u32,
     env: &str,
@@ -240,27 +283,14 @@ pub(crate) fn spawn_qemu(
     host_port: &mut HostPort,
 ) -> Result<Child> {
     let native = arch.host();
-    // Only the host-native architecture is ever bundled, so a cross-arch
-    // request always falls through to a PATH-installed QEMU, which a packaged
-    // build will not have.
-    let mut cmd = match native.then(|| resolve_sidecar(QEMU_SIDECAR)).flatten() {
-        Some(bundled) => {
-            log!(
-                "[launcher] using bundled QEMU sidecar at {}",
-                bundled.display()
-            );
-            diagnostics::record("QEMU", format!("{} (bundled)", bundled.display()));
-            Command::new(bundled)
-        }
-        None => {
-            log!(
-                "[launcher] no bundled QEMU sidecar found, falling back to {} on PATH",
-                arch.qemu_binary()
-            );
-            diagnostics::record("QEMU", format!("{} (on PATH)", arch.qemu_binary()));
-            Command::new(arch.qemu_binary())
-        }
-    };
+    let qemu = resolve_qemu(arch);
+    let origin = if qemu.bundled { "bundled" } else { "on PATH" };
+    log!(
+        "[launcher] using the {origin} QEMU at {}",
+        qemu.binary.display()
+    );
+    diagnostics::record("QEMU", format!("{} ({origin})", qemu.binary.display()));
+    let mut cmd = Command::new(&qemu.binary);
     suppress_child_console(&mut cmd);
     if let Some(libs) = qemu_libs {
         log!("[launcher] passing -L {} to QEMU", libs.display());
@@ -285,21 +315,24 @@ pub(crate) fn spawn_qemu(
         GuestArch::Amd64 => cmd.args(["-M", "q35", "-cpu", "max"]),
     };
     cmd.args(accel_flags(native));
+    // The firmware's own logging is compiled out of a release, and what the
+    // kernel and the init system still print is discarded below. The console
+    // device stays on the command line either way, since the firmware stops
+    // serving its bus when it has none.
+    let console = arch.serial();
     cmd.arg("-m")
         .arg(memory.to_string())
         .args(["-nographic", "-kernel"])
-        .arg(kernel)
+        .arg(&firmware.kernel)
         .args(["-initrd"])
-        .arg(initrd)
+        .arg(&firmware.initrd)
         // rdinit=/sbin/init hands control to the firmware's init, which brings
         // up networking and the ArkOS services. arkos_env seeds the
         // environment binding the firmware burns into its OTP analog on first
         // boot.
         .args(["-append"])
         .arg(format!(
-            "console={} rdinit=/sbin/init arkos_env={}",
-            arch.console(),
-            env
+            "console={console} rdinit=/sbin/init arkos_env={env}"
         ))
         .args(["-netdev"])
         .arg(format!(
@@ -311,26 +344,24 @@ pub(crate) fn spawn_qemu(
             "file={},if=none,id=disk0,format=qcow2,discard=unmap,detect-zeroes=unmap",
             disk.display()
         ))
-        .args([
-            "-device",
-            "virtio-blk-pci,drive=disk0",
-            "-serial",
-            "stdio",
-            "-monitor",
-            "none",
-        ]);
+        .args(["-device", "virtio-blk-pci,drive=disk0", "-monitor", "none"]);
+
+    // -nographic would otherwise hand the serial device to stdio, so a build
+    // that wants nothing printed points it at a null device instead. The
+    // developer's build keeps it on stdout.
+    cmd.args(["-serial", if firmware.bundled { "null" } else { "stdio" }]);
 
     // Captured rather than inherited so a packaged build, which has no console
     // to print to, can still put QEMU's own complaint in a crash report. The
     // caller must drain it or QEMU blocks once the pipe fills. Only stderr is
-    // taken: `-serial stdio` above is the guest console and needs stdout.
+    // taken: a serial console on stdio needs stdout.
     cmd.stderr(Stdio::piped());
 
     // From here it is QEMU that owns the port.
     host_port.release();
     orphan::guard(cmd)
         .spawn()
-        .with_context(|| format!("could not start {}", arch.qemu_binary()))
+        .with_context(|| format!("could not start {}", qemu.binary.display()))
 }
 
 #[cfg(test)]
@@ -341,7 +372,7 @@ mod tests {
     #[ignore = "requires qemu-img"]
     fn test_create_disk_replaces_an_existing_image() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let disk = tmp.path().join("disk.img");
+        let disk = tmp.path().join("disk.ark");
         std::fs::write(&disk, b"old contents").unwrap();
         create_disk(&disk, None).unwrap();
         let first = std::fs::read(&disk).unwrap();
@@ -362,7 +393,7 @@ mod tests {
     #[ignore = "requires qemu-img"]
     fn test_create_disk_reports_an_invalid_destination() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let disk = tmp.path().join("missing-parent/disk.img");
+        let disk = tmp.path().join("missing-parent/disk.ark");
         let err = create_disk(&disk, None).unwrap_err().to_string();
         assert!(err.contains("qemu-img create failed"), "{err}");
         assert!(!disk.exists());

@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Spawns QEMU with the firmware image and hosts a Tauri window for the
 //! emulator UI. Window and QEMU are lifecycle-bound, so closing either tears
 //! down the other on every platform, even on a hard kill:
@@ -46,73 +52,214 @@ mod diagnostics;
 mod discovery;
 mod disk;
 mod error_dialog;
+mod help;
 mod orphan;
+mod output;
 mod panel;
 mod platform;
 mod qemu;
 mod registry;
 mod settings;
+mod verbs;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use anyhow::{anyhow, bail, Context as _, Result};
-use clap::Parser;
+use anyhow::{Context as _, Result, anyhow, bail};
+use clap::{FromArgMatches as _, Parser};
 use tauri::{Manager, WindowEvent};
 
-use bundle::{app_data_dir, resolve_firmware, resolve_qemu_libs};
+use bundle::{Paths, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
 use disk::Resolved;
 use panel::{Launcher, Pending};
-use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
+use qemu::{GuestArch, HostPort, ensure_disk, spawn_qemu};
 use settings::Settings;
 
-/// Launch configuration parsed from command-line arguments.
+/// What the tool is, which opens every help page.
+const ABOUT: &str = "Ark Emulator: emulated Ark enclave for development and demos\n\n\
+     An emulated Ark is the real firmware running in QEMU behind a small window \
+     that stands in for the device's face. It exists for development and demos. \
+     It is not a vault: everything lives in one plain disk image on this \
+     computer, so real data belongs on hardware. Talk to it with `ark`, exactly \
+     as you would to hardware, where the owner approves on their phone.";
+
+/// The command line as parsed.
 #[derive(Parser)]
-#[command(about = "Ark device emulator: boots ArkOS in QEMU behind a small UI.")]
-struct Config {
-    /// Path to the kernel image (vmlinuz). Defaults to the firmware bundled
-    /// with this build for --arch. Must be given together with --initrd.
-    #[arg(long)]
-    kernel: Option<PathBuf>,
+#[command(
+    name = "ark-emulator",
+    about = ABOUT,
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
+struct Cli {
+    /// Everything a guest needs to be booted.
+    #[command(flatten)]
+    boot: Boot,
 
-    /// Path to the initramfs (.gz). See --kernel.
-    #[arg(long)]
-    initrd: Option<PathBuf>,
+    /// The options that apply whatever is being run.
+    #[command(flatten)]
+    global: Global,
 
-    /// CPU architecture of the firmware artifacts; defaults to the host's
-    /// architecture.
-    #[arg(long, value_enum)]
-    arch: Option<GuestArch>,
+    /// Short help; `help <command>` prints a full contract
+    #[arg(short = 'h', long)]
+    help: bool,
 
-    /// Path to the backing disk image; auto-allocated if it does not exist.
-    /// Defaults to the image remembered in the settings file, which the
-    /// launcher asks for the first time it needs one.
-    #[arg(long)]
-    disk: Option<PathBuf>,
+    // The manual, also reachable as `ark-emulator help --all`.
+    #[arg(long, hide = true, requires = "help", conflicts_with = "version")]
+    all: bool,
 
-    /// Cloud environment the device gets bound to when its disk is first
-    /// created; ignored for existing disks (the binding is burnt in). Defaults
-    /// to the environment remembered in the settings file, then to release.
-    /// Overrides the settings file without changing it.
-    #[arg(long, value_parser = settings::ENVS)]
-    env: Option<String>,
+    /// Emulator, bundled firmware and QEMU versions
+    #[arg(short = 'V', long)]
+    version: bool,
 
-    /// Host address that SLIRP forwards into the guest's port. Defaults to the
-    /// first free loopback port from 18181 up, so that several emulators can
-    /// run at once without being told about each other.
-    #[arg(long)]
-    host_addr: Option<SocketAddr>,
+    /// What to do, or nothing at all, which opens the device window.
+    #[command(subcommand)]
+    command: Option<verbs::Command>,
+}
 
-    /// Guest RAM in MiB. Lower it on memory-constrained hosts. Defaults to the
-    /// amount remembered in the settings file, then to 8192. Overrides the
-    /// settings file without changing it.
-    #[arg(long)]
-    memory: Option<u32>,
+impl Cli {
+    /// Reject the combinations clap cannot express. The boot options belong
+    /// to the bare run and to `start`, so naming one beside a command is a
+    /// mistake rather than something to guess at.
+    fn validate(&self) -> Result<(), output::Error> {
+        let message = if self.help {
+            return Ok(());
+        } else if self.global.quiet && self.global.verbose {
+            "--quiet cannot be combined with --verbose"
+        } else if self.version && self.command.is_some() {
+            "--version cannot be combined with a command"
+        } else if self.command.is_some() && self.boot.named() {
+            "the boot options belong to a bare run or to `ark-emulator start`"
+        } else {
+            return Ok(());
+        };
+        Err(output::Error::new(2, "usage", message))
+    }
+}
+
+/// The options every command carries, spelled the way the house tools spell
+/// them. They are accepted at any level, so `--no-input` before or after a
+/// command name means the same thing.
+#[derive(clap::Args)]
+pub(crate) struct Global {
+    /// Print results as JSON and events as JSON Lines
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+
+    /// Longest wait for a machine reply
+    #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
+    pub(crate) timeout: u64,
+
+    /// Never ask; take the default image and exit on failure
+    // A launch with nobody at the keyboard, such as a test run, takes the
+    // default image instead of asking where to keep one, and a failure prints
+    // its report and exits instead of opening a window.
+    #[arg(long, global = true)]
+    pub(crate) no_input: bool,
+
+    /// Diagnostics: debug, or trace with registry traffic
+    #[arg(
+        long,
+        global = true,
+        value_name = "LEVEL",
+        value_enum,
+        hide_possible_values = true
+    )]
+    pub(crate) log: Option<Log>,
+
+    /// Hide progress and notes; keep errors and hints
+    #[arg(short = 'q', long, global = true)]
+    pub(crate) quiet: bool,
+
+    /// Show steps
+    #[arg(short = 'v', long, global = true)]
+    pub(crate) verbose: bool,
+}
+
+/// How much diagnostic detail a run asks for, independent of step narration.
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub(crate) enum Log {
+    /// The launcher's own lines.
+    Debug,
+    /// Those and every registry request.
+    Trace,
+}
+
+/// Longest wait for a machine, in seconds. One number for the whole tool, so
+/// there is one to remember, and it is generous enough to cover a boot with no
+/// hardware acceleration behind it.
+const DEFAULT_TIMEOUT: u64 = 120;
+
+/// Reject a wait that cannot be waited out.
+fn parse_timeout(value: &str) -> Result<u64, String> {
+    match value.parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Ok(seconds),
+        _ => Err("the timeout is a positive number of seconds".to_owned()),
+    }
+}
+
+/// What an emulator boots from, shared by the bare run and by the command that
+/// boots one in the background.
+#[derive(clap::Args)]
+pub(crate) struct Boot {
+    /// Image to boot, created if missing
+    // Read for this run only. It neither consults nor updates the settings
+    // file, so a one-off boot from another image leaves the remembered choice
+    // alone.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) disk: Option<PathBuf>,
+
+    /// Cloud environment for a new image
+    // An existing image keeps the environment it was created with, since the
+    // firmware burns that binding in on its first boot.
+    #[arg(long, value_name = "ENV", value_parser = settings::ENVS, hide_possible_values = true)]
+    pub(crate) env: Option<String>,
+
+    /// Guest RAM in MiB
+    // Lower it on a machine with little memory to spare. The remembered
+    // amount answers when this does not.
+    #[arg(long, value_name = "MIB")]
+    pub(crate) memory: Option<u32>,
+
+    /// Firmware architecture: arm64 or amd64
+    // This computer's own by default. It is the only one that gets hardware
+    // acceleration, and the only one a packaged build carries a QEMU for.
+    #[arg(long, value_name = "ARCH", value_enum, hide_possible_values = true)]
+    pub(crate) arch: Option<GuestArch>,
+
+    /// Kernel image, with --initrd
+    // A source build bundles no firmware, so the two are its only way to boot.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) kernel: Option<PathBuf>,
+
+    /// Initramfs, with --kernel
+    #[arg(long, value_name = "PATH")]
+    pub(crate) initrd: Option<PathBuf>,
+
+    /// Loopback address forwarded into the guest
+    // The guest's own port is fixed, so this is the host side of the forward
+    // and the number an emulator is known by. The first free port from 18181
+    // up answers when this does not.
+    #[arg(long, value_name = "ADDR")]
+    pub(crate) host_addr: Option<SocketAddr>,
+}
+
+impl Boot {
+    /// Whether any of these was typed.
+    fn named(&self) -> bool {
+        self.disk.is_some()
+            || self.env.is_some()
+            || self.memory.is_some()
+            || self.arch.is_some()
+            || self.kernel.is_some()
+            || self.initrd.is_some()
+            || self.host_addr.is_some()
+    }
 }
 
 /// Label of the device face window, hidden until startup succeeds.
@@ -126,13 +273,104 @@ const STAGGER_STEP: u32 = 32;
 /// both arrive as the same dead child process.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+/// Take this emulator down the way closing its window does. Withdraw it from
+/// the registry, then go, which lets go of QEMU: the orphan guard kills it
+/// with this process.
+pub(crate) fn shut_down() -> ! {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    discovery::deregister();
+    std::process::exit(0);
+}
+
+/// clap's complaint as the house error: its first paragraph without the
+/// prefix clap puts on it, under the usage code.
+fn usage(error: &clap::Error) -> output::Error {
+    let message = error.to_string();
+    let message = message
+        .split("\n\n")
+        .next()
+        .unwrap_or(&message)
+        .trim_start_matches("error: ")
+        .trim();
+    output::Error::new(2, "usage", message)
+        .hint("`ark-emulator help` lists the commands and the topics")
+}
+
 fn main() {
-    let cfg: Config = Config::parse();
+    // Parsed through the help tree, so that -h and --help after a command
+    // print the page `help <command>` prints, and a mistake typed at the
+    // command line comes back in the house error shape, JSON included.
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let json = arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "--json");
+    let matches = match help::parser().try_get_matches_from_mut(&arguments) {
+        Ok(matches) => matches,
+        Err(error) => {
+            platform::attach_console();
+            if error.exit_code() == 0 {
+                let _ = error.print();
+                std::process::exit(0);
+            }
+            let mut global = Cli::parse_from(["ark-emulator"]).global;
+            global.json = json;
+            output::Output::new(&global).error(&usage(&error));
+            std::process::exit(2);
+        }
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
+        platform::attach_console();
+        let _ = error.print();
+        std::process::exit(2);
+    });
+    let output = output::Output::new(&cli.global);
+    error_dialog::reporting(&output, cli.global.no_input);
+
+    // Compiled in rather than read at run time, so a command line run never
+    // opens a window or touches the display to find out where things are.
+    let context = tauri::generate_context!();
+    if let Err(err) = cli.validate() {
+        output.error(&err);
+        std::process::exit(err.exit);
+    }
+    if cli.help || cli.version || cli.command.is_some() {
+        platform::attach_console();
+    }
+    if cli.help {
+        // clap folds -h and --help into one flag, and the two pages differ, so
+        // which was typed is read back from the arguments.
+        let long = std::env::args_os().any(|argument| argument == "--help");
+        std::process::exit(match help::run(&[], cli.all, long) {
+            Ok(()) => 0,
+            Err(err) => {
+                output.error(&err);
+                err.exit
+            }
+        });
+    }
+    if cli.version || cli.command.is_some() {
+        std::process::exit(verbs::run(
+            cli.command,
+            &cli.global,
+            &context.config().identifier,
+            context.package_info(),
+        ));
+    }
+
+    // From here the window is the product. A source build's guest console has
+    // stdout, so nothing this layer would put there is written, and the
+    // launcher's own lines are the only thing on stderr.
+    output.release_stdout();
+    if output.json() {
+        diagnostics::log_sink(diagnostics::Sink::Events(output));
+    }
 
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
     // into `start` with every other one.
-    let host_port = match cfg.host_addr {
+    let host_port = match cli.boot.host_addr {
         Some(addr) => Ok(HostPort::fixed(addr)),
         None => HostPort::reserve(),
     };
@@ -162,20 +400,26 @@ fn main() {
             panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) = platform::install_menus(app).and_then(|()| start(app, cfg, host_port)) {
-                error_dialog::show(app.handle(), "could not start", err);
+            let no_input = cli.global.no_input;
+            if let Err(err) = platform::install_menus(app)
+                .and_then(|()| start(app, cli.boot, no_input, host_port))
+            {
+                error_dialog::show(app.handle(), error_dialog::COULD_NOT_START, err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
             // out of run(), and then there is no event loop left to show the
             // error in and nothing but a panic message nobody can read.
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .unwrap_or_else(|err| {
             // The webview runtime itself did not come up, so no window of ours
             // can either. Stderr is all that is left.
             let err = anyhow!(err).context("the window system could not be started");
-            eprintln!("{}", diagnostics::report("could not start", &err));
+            eprintln!(
+                "{}",
+                diagnostics::report(error_dialog::COULD_NOT_START, &err)
+            );
             std::process::exit(1);
         });
 }
@@ -187,8 +431,8 @@ fn main() {
 /// end up on the same reporting path. That includes resolving the guest
 /// architecture and reserving a host port, neither of which needs a Tauri app
 /// but both of which would otherwise be failures with nowhere to be displayed.
-fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<()> {
-    let (pending, settings, resolved) = prepare(app, cfg, host_port)?;
+fn start(app: &tauri::App, boot: Boot, no_input: bool, host_port: Result<HostPort>) -> Result<()> {
+    let (pending, settings, resolved) = prepare(app, boot, no_input, host_port)?;
     let mut launcher = Launcher::booting(pending, settings);
     let slot = launcher.slot();
 
@@ -197,7 +441,7 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            if pending.cfg.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
+            if pending.boot.disk.is_some() || no_input {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())
                 })?;
@@ -223,12 +467,13 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
 /// read out of, and that decision.
 fn prepare(
     app: &tauri::App,
-    cfg: Config,
+    boot: Boot,
+    no_input: bool,
     host_port: Result<HostPort>,
 ) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
     // acceleration, so it is the default.
-    let arch = match cfg.arch {
+    let arch = match boot.arch {
         Some(arch) => arch,
         None => match std::env::consts::ARCH {
             "aarch64" => GuestArch::Arm64,
@@ -241,7 +486,15 @@ fn prepare(
     let host_port = host_port?;
     diagnostics::record("Host address", host_port.addr().to_string());
 
-    let data_dir = app_data_dir(app)?;
+    let paths = Paths::resolve(&app.config().identifier, app.package_info())?;
+    let data_dir = paths.data.clone();
+
+    // Best effort, and early, so that everything a failing startup says lands
+    // in the file a second process can read.
+    if let Err(e) = diagnostics::log_to(&data_dir, host_port.port()) {
+        log!("[launcher] could not open a log file: {e:#}");
+    }
+
     let settings = Settings::load(&data_dir)?;
     diagnostics::record_path("Settings", settings.path());
 
@@ -249,32 +502,32 @@ fn prepare(
     // including nothing at all, this emulator still boots.
     discovery::ensure_registry();
     let booted: disk::Booted = discovery::list()
+        .unwrap_or_default()
         .into_iter()
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
 
-    let (kernel, initrd) = resolve_firmware(app, &cfg, arch)?;
-    diagnostics::record_path("Kernel", &kernel);
-    diagnostics::record_path("Initrd", &initrd);
+    let firmware = resolve_firmware(paths.resources.as_deref(), &boot, arch)?;
+    diagnostics::record_path("Kernel", &firmware.kernel);
+    diagnostics::record_path("Initrd", &firmware.initrd);
 
-    let qemu_libs = resolve_qemu_libs(app);
+    let qemu_libs = resolve_qemu_libs(paths.resources.as_deref());
 
     let resolved = disk::decide(
-        cfg.disk.as_deref(),
+        boot.disk.as_deref(),
         settings.disk(),
         settings.autostart(),
         &booted,
         &data_dir,
         host_port.port(),
-        std::env::var_os(error_dialog::NO_DIALOG).is_some(),
+        no_input,
     )?;
 
     let pending = Pending {
-        cfg,
+        boot,
         arch,
         host_port,
-        kernel,
-        initrd,
+        firmware,
         qemu_libs,
     };
     Ok((pending, settings, resolved))
@@ -292,8 +545,7 @@ fn launch(
     diagnostics::record_path("Disk", disk);
     let mut child = spawn_qemu(
         pending.arch,
-        &pending.kernel,
-        &pending.initrd,
+        &pending.firmware,
         disk,
         memory,
         env,
@@ -332,11 +584,11 @@ fn launch(
             }
             let err =
                 anyhow!("the emulated device stopped unexpectedly: QEMU exited with {status}");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
         Err(e) => {
             let err = anyhow!(e).context("lost track of the QEMU process");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
     });
 

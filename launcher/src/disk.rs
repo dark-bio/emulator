@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Deciding which disk image the guest boots from.
 //!
 //! Three sources, in descending order of how deliberate they are:
@@ -32,14 +38,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::Serialize;
 
 use crate::diagnostics::log;
 use crate::discovery::disk_id;
 
 /// Name used when an unattended launch needs to allocate an image.
-pub(crate) const DEFAULT_DISK: &str = "ark-disk.img";
+pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
 
 /// The image this run settled on, so that the device face can name it.
 static BOOTED: OnceLock<PathBuf> = OnceLock::new();
@@ -118,11 +124,10 @@ pub(crate) enum Resolved {
 /// image the launcher allocates for itself lives, and `port` is the one this
 /// emulator holds.
 ///
-/// `no_dialog` is [`crate::error_dialog::NO_DIALOG`], which stands for "there
-/// is nobody here to ask". CI launches a packaged build with no flags at all
-/// and expects it to boot unattended, so it falls back to the image the
-/// launcher would have allocated for itself. A second unattended emulator
-/// cannot share that one, so it gets an image named after the port it holds.
+/// `no_input` stands for "there is nobody here to ask". A launch that cannot
+/// ask falls back to the image the launcher would have allocated for itself. A
+/// second unattended emulator cannot share that one, so it gets an image named
+/// after the port it holds.
 pub(crate) fn decide(
     explicit: Option<&Path>,
     remembered: Option<&Path>,
@@ -130,7 +135,7 @@ pub(crate) fn decide(
     booted: &Booted,
     dir: &Path,
     port: u16,
-    no_dialog: bool,
+    no_input: bool,
 ) -> Result<Resolved> {
     if let Some(disk) = explicit {
         let disk = std::path::absolute(disk)
@@ -154,14 +159,14 @@ pub(crate) fn decide(
                 "[launcher] the remembered disk image {} is already booted on port {port}",
                 disk.display()
             );
-            if !no_dialog {
+            if !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: None,
                     reason,
                 });
             }
         } else if disk.is_file() {
-            if !autostart && !no_dialog {
+            if !autostart && !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: Some(disk.to_path_buf()),
                     reason: Reason::AutostartDisabled,
@@ -174,7 +179,7 @@ pub(crate) fn decide(
                 "[launcher] the remembered disk image {} is gone",
                 disk.display()
             );
-            if !no_dialog {
+            if !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: None,
                     reason,
@@ -183,11 +188,11 @@ pub(crate) fn decide(
         }
     }
 
-    if no_dialog {
+    if no_input {
         if !booted.contains_key(&disk_id(&default)) {
             return Ok(Resolved::Boot(default));
         }
-        return Ok(Resolved::Boot(dir.join(format!("ark-disk-{port}.img"))));
+        return Ok(Resolved::Boot(dir.join(format!("emulator-{port}.ark"))));
     }
 
     Ok(Resolved::Ask {
@@ -298,6 +303,7 @@ pub(crate) fn require_existing(path: &Path) -> Result<()> {
 /// registry is unavailable.
 pub(crate) fn require_available(path: &Path) -> Result<()> {
     let booted: Booted = crate::discovery::list()
+        .unwrap_or_default()
         .into_iter()
         .map(|instance| (instance.disk_id, instance.port))
         .collect();
@@ -347,7 +353,7 @@ mod tests {
     #[test]
     fn test_opening_a_missing_image_does_not_create_it() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("missing.img");
+        let disk = tmp.path().join("missing.ark");
         let err = require_existing(&disk).unwrap_err().to_string();
         assert!(err.contains("Open"), "{err}");
         assert!(err.contains("New"), "{err}");
@@ -358,7 +364,7 @@ mod tests {
     #[test]
     fn test_replacing_an_image_in_use_is_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("running.img");
+        let disk = tmp.path().join("running.ark");
         touch(&disk);
         let booted = Booted::from([(disk_id(&disk), PORT)]);
         let err = check_available(&disk, None, &booted)
@@ -370,15 +376,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("this window"), "{err}");
-        assert!(check_available(&tmp.path().join("new.img"), Some(&disk), &booted).is_ok());
+        assert!(check_available(&tmp.path().join("new.ark"), Some(&disk), &booted).is_ok());
     }
 
     #[cfg(unix)]
     #[test]
     fn test_an_alias_of_a_running_image_is_also_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("running.img");
-        let alias = tmp.path().join("alias.img");
+        let disk = tmp.path().join("running.ark");
+        let alias = tmp.path().join("alias.ark");
         touch(&disk);
         std::os::unix::fs::symlink(&disk, &alias).unwrap();
         assert!(check_available(&alias, Some(&disk), &Booted::new()).is_err());
@@ -389,8 +395,8 @@ mod tests {
     #[test]
     fn test_an_explicit_disk_wins() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("explicit.img");
-        let remembered = tmp.path().join("remembered.img");
+        let disk = tmp.path().join("explicit.ark");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -412,7 +418,7 @@ mod tests {
     #[test]
     fn test_an_explicit_disk_that_is_booted_is_refused() {
         let tmp = TempDir::new().unwrap();
-        let disk = tmp.path().join("explicit.img");
+        let disk = tmp.path().join("explicit.ark");
         touch(&disk);
         let booted = Booted::from([(disk_id(&disk), 18181)]);
 
@@ -425,7 +431,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_boots_without_asking() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -447,7 +453,7 @@ mod tests {
     #[test]
     fn test_autostart_disabled_offers_the_remembered_disk() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -470,7 +476,7 @@ mod tests {
     #[test]
     fn test_unattended_launch_boots_with_autostart_disabled() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
 
         let resolved = decide(
@@ -492,7 +498,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_that_is_gone_asks() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
 
         let resolved = decide(
             None,
@@ -514,7 +520,7 @@ mod tests {
     #[test]
     fn test_a_remembered_disk_that_is_booted_asks() {
         let tmp = TempDir::new().unwrap();
-        let remembered = tmp.path().join("remembered.img");
+        let remembered = tmp.path().join("remembered.ark");
         touch(&remembered);
         let booted = Booted::from([(disk_id(&remembered), 18181)]);
 
@@ -567,6 +573,6 @@ mod tests {
         let Resolved::Boot(disk) = resolved else {
             panic!("an unattended launch asked anyway");
         };
-        assert_eq!(disk, tmp.path().join(format!("ark-disk-{PORT}.img")));
+        assert_eq!(disk, tmp.path().join(format!("emulator-{PORT}.ark")));
     }
 }
