@@ -88,7 +88,10 @@ ark -d emulator:18181 status
 names the reference topics. Scripts and AI agents should read
 `ark-emulator help agents` first, then `ark help agents` before driving the Ark
 itself. Apps to run on an emulator, in Rust, Go, C and Python, are at
-[examples](https://github.com/dark-bio/examples).
+[examples](https://github.com/dark-bio/examples). Pairing and unlocking happen
+in Ark Companion, on
+[iOS](https://apps.apple.com/app/id6751324700) or
+[Android](https://play.google.com/store/apps/details?id=bio.dark.companion).
 
 ## Build from source
 

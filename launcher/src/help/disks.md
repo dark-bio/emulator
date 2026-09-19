@@ -3,8 +3,9 @@
 An emulated Ark is one `.ark` file. It holds everything the device knows: its
 identity, its pairing, its data. Copy the file and you have copied the device;
 delete it and the device is gone. Two emulators can never share one image,
-since two guests writing one file would destroy it, and both the window and
-`start` refuse it.
+since two guests writing one file would destroy it. The window refuses a
+second boot of an image, and `start` reports the emulator that already holds
+it instead of booting another.
 
 The file is a plain qcow2 image with no encryption of any kind. It starts at a
 few megabytes and grows as the guest writes, up to a virtual ceiling of about
@@ -42,10 +43,10 @@ after the port when that is already booted.
 ## Environments
 
 An image is bound to one cloud environment, release, staging or develop, when
-the firmware first boots on it. The binding is burnt in and --env has no
-effect on an image that already exists. Since it is read back from the
-firmware, a start can only warn about a mismatch once the device is up. To
-move to another environment, create a new image.
+the firmware first boots on it. The binding is burnt in, so --env has no
+effect on an image the firmware has booted before. Since it is read back from
+the firmware, a start can only warn about a mismatch once the device is up.
+To move to another environment, create a new image.
 
 ## Identity
 

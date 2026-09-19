@@ -65,5 +65,5 @@ at once.
 A stop rides on the same heartbeat. The request is recorded against the entry,
 the launcher's next heartbeat is answered with `{"stop": true}`, and it shuts
 down the way closing its window does. Nothing signals a process or looks up a
-pid. A launcher too old to read its mailbox never answers, which is why a stop
-gives up after --timeout and says to close the window instead.
+pid, so a stop that is never collected gives up after --timeout and says to
+close the window instead.

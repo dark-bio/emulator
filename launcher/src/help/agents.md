@@ -42,6 +42,13 @@ an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
 cannot keep the two streams apart, drop the lines that start with
 `{"event":` under --json; what remains is the document.
 
+A start without hardware acceleration takes minutes, so run it in the
+background and follow stderr, without starting another:
+
+    ark-emulator start --json > result.json 2> events.log &
+    tail -n 2 events.log
+    wait $!
+
 ## Checking state
 
 `ark-emulator list` shows every running emulator with its port, image, ready
