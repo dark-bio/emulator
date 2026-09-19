@@ -357,7 +357,7 @@ impl Output {
     /// Each row names the document key it shows, and a dot reaches into a
     /// nested object. The reading view may carry fewer fields than the
     /// document; the document always carries them all.
-    pub(crate) fn block(&self, document: &Value, rows: &[(&str, &str)]) {
+    pub(crate) fn block(&self, document: &Value, rows: &[(&str, &str)]) -> Result<(), Error> {
         self.result(document, |theme| {
             let rows: Vec<(String, String)> = rows
                 .iter()
@@ -369,27 +369,33 @@ impl Output {
                 })
                 .collect();
             block(theme, &rows)
-        });
+        })
     }
 
     /// Print several results as a table, one row each, or the whole document
     /// as JSON. A table too wide for the terminal falls back to one block per
     /// row, and no rows at all print as `none`.
-    pub(crate) fn table(&self, document: &Value, rows: &[Value], columns: &[(&str, &str)]) {
-        self.result(document, |theme| table(theme, rows, columns));
+    pub(crate) fn table(
+        &self,
+        document: &Value,
+        rows: &[Value],
+        columns: &[(&str, &str)],
+    ) -> Result<(), Error> {
+        self.result(document, |theme| table(theme, rows, columns))
     }
 
     /// Print a doctor's checks as a checklist, one row each with its mark,
     /// detail and hint, or the whole document as JSON.
-    pub(crate) fn checklist(&self, document: &Value, rows: &[Value]) {
-        self.result(document, |theme| checklist(theme, rows));
+    pub(crate) fn checklist(&self, document: &Value, rows: &[Value]) -> Result<(), Error> {
+        self.result(document, |theme| checklist(theme, rows))
     }
 
     /// Claim the one result and write it. A second claim is ignored, so an
-    /// error after a partial result cannot replace it.
-    fn result(&self, document: &Value, render: impl FnOnce(&Theme) -> String) {
+    /// error after a partial result cannot replace it. A write that fails is
+    /// the command's failure, since a result nobody received is no result.
+    fn result(&self, document: &Value, render: impl FnOnce(&Theme) -> String) -> Result<(), Error> {
         if self.0.printed.swap(true, Ordering::SeqCst) {
-            return;
+            return Ok(());
         }
         let text = if self.json() {
             serde_json::to_string_pretty(document).expect("a result serializes")
@@ -398,12 +404,15 @@ impl Output {
         };
         let mut spacing = self.0.spacing.lock().expect("output not poisoned");
         let mut stdout = io::stdout().lock();
-        if self.0.out.interactive && self.0.err.interactive && spacing.err_printed {
-            let _ = writeln!(stdout);
-        }
-        let _ = writeln!(stdout, "{text}");
-        let _ = stdout.flush();
+        let written = (|| {
+            if self.0.out.interactive && self.0.err.interactive && spacing.err_printed {
+                writeln!(stdout)?;
+            }
+            writeln!(stdout, "{text}")?;
+            stdout.flush()
+        })();
         spacing.out_block = self.0.out.interactive;
+        written.map_err(|err| Error::new(1, "io", format!("could not write the result: {err}")))
     }
 
     /// Whether a result has been claimed, which is what keeps a failure from
@@ -440,7 +449,8 @@ impl Output {
     }
 
     /// Report a failure and the steps out of it. Under JSON the error object
-    /// also lands on stdout when there is no result to replace.
+    /// also lands on stdout, as the one member of an `error` envelope, when
+    /// there is no result to replace.
     pub(crate) fn error(&self, error: &Error) {
         if self.json() {
             if !self.printed() {
@@ -449,7 +459,8 @@ impl Output {
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::to_string_pretty(&error.json()).expect("an error serializes")
+                    serde_json::to_string_pretty(&json!({"error": error.json()}))
+                        .expect("an error serializes")
                 );
                 let _ = stdout.flush();
             }

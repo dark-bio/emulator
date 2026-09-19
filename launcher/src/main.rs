@@ -70,7 +70,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use clap::Parser;
+use clap::{FromArgMatches as _, Parser};
 use tauri::{Manager, WindowEvent};
 
 use bundle::{resolve_firmware, resolve_qemu_libs, Paths};
@@ -81,8 +81,7 @@ use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
 use settings::Settings;
 
 /// What the tool is, which opens every help page.
-const ABOUT: &str =
-    "Ark Emulator: emulated Ark enclave for development and demos\n\n\
+const ABOUT: &str = "Ark Emulator: emulated Ark enclave for development and demos\n\n\
      An emulated Ark is the real firmware running in QEMU behind a small window \
      that stands in for the device's face. It exists for development and demos. \
      It is not a vault: everything lives in one plain disk image on this \
@@ -283,8 +282,49 @@ pub(crate) fn shut_down() -> ! {
     std::process::exit(0);
 }
 
+/// clap's complaint as the house error: its first paragraph without the
+/// prefix clap puts on it, under the usage code.
+fn usage(error: &clap::Error) -> output::Error {
+    let message = error.to_string();
+    let message = message
+        .split("\n\n")
+        .next()
+        .unwrap_or(&message)
+        .trim_start_matches("error: ")
+        .trim();
+    output::Error::new(2, "usage", message)
+        .hint("`ark-emulator help` lists the commands and the topics")
+}
+
 fn main() {
-    let cli = Cli::parse();
+    // Parsed through the help tree, so that -h and --help after a command
+    // print the page `help <command>` prints, and a mistake typed at the
+    // command line comes back in the house error shape, JSON included.
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let json = arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "--json");
+    let matches = match help::parser().try_get_matches_from_mut(&arguments) {
+        Ok(matches) => matches,
+        Err(error) => {
+            platform::attach_console();
+            if error.exit_code() == 0 {
+                let _ = error.print();
+                std::process::exit(0);
+            }
+            let mut global = Cli::parse_from(["ark-emulator"]).global;
+            global.json = json;
+            output::Output::new(&global).error(&usage(&error));
+            std::process::exit(2);
+        }
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
+        platform::attach_console();
+        let _ = error.print();
+        std::process::exit(2);
+    });
     let output = output::Output::new(&cli.global);
     error_dialog::reporting(&output, cli.global.no_input);
 

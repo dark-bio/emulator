@@ -16,7 +16,7 @@
 //! identity, pairing and data belongs to `ark`.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -89,6 +89,13 @@ pub(crate) enum Command {
     /// Check this computer and this build; suggest fixes
     Doctor,
 
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_name = "SHELL", value_enum)]
+        shell: clap_complete::Shell,
+    },
+
     /// Help for a command or a topic: agents, output, disks, registry
     Help {
         /// Command or topic to explain
@@ -138,6 +145,9 @@ fn dispatch(
     if let Some(Command::Help { name, all }) = &command {
         return crate::help::run(name.as_slice(), *all, true);
     }
+    if let Some(Command::Completions { shell }) = &command {
+        return completions(*shell, output);
+    }
     let paths = Paths::resolve(identifier, package)
         .map_err(|err| Error::new(1, "io", format!("{err:#}")))?;
     match command {
@@ -146,9 +156,30 @@ fn dispatch(
         Some(Command::Stop { port, all }) => stop(port, all, global, output),
         Some(Command::Wipe { path, yes }) => wipe(&path, yes, output),
         Some(Command::Doctor) => doctor(output, &paths),
-        Some(Command::Help { .. }) => unreachable!("answered before the paths"),
+        Some(Command::Completions { .. }) | Some(Command::Help { .. }) => {
+            unreachable!("answered before the paths")
+        }
         None => version(output, &paths),
     }
+}
+
+/// Write a shell's completion script to stdout. It is text whatever the run
+/// asked for, so stdout is released to it before anything else could claim
+/// the result.
+fn completions(shell: clap_complete::Shell, output: &Output) -> Result<(), Error> {
+    output.release_stdout();
+    let mut script = Vec::new();
+    clap_complete::generate(
+        shell,
+        &mut crate::help::parser(),
+        "ark-emulator",
+        &mut script,
+    );
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&script)
+        .and_then(|()| stdout.flush())
+        .map_err(|err| Error::new(1, "io", format!("could not write the completions: {err}")))
 }
 
 /// What this build is made of, which is what a bug report needs naming.
@@ -166,8 +197,7 @@ fn version(output: &Output, paths: &Paths) -> Result<(), Error> {
             ("Firmware", "firmware"),
             ("QEMU", "qemu"),
         ],
-    );
-    Ok(())
+    )
 }
 
 /// Boot an emulator on the image this run settles on, and answer once the
@@ -284,8 +314,7 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
             ("SERIAL", "serial"),
             ("EXPIRES", "expiry"),
         ],
-    );
-    Ok(())
+    )
 }
 
 /// Shut one emulator down, or every one of them.
@@ -309,8 +338,7 @@ fn stop(port: Option<u16>, all: bool, global: &Global, output: &Output) -> Resul
 
     if ports.is_empty() {
         output.event("note", "no emulators are running");
-        output.block(&json!({ "stopped": [] }), &[("Stopped", "stopped")]);
-        return Ok(());
+        return output.block(&json!({ "stopped": [] }), &[("Stopped", "stopped")]);
     }
     for port in &ports {
         output.event("step", format!("asking the emulator on {port} to stop"));
@@ -357,14 +385,13 @@ fn stop(port: Option<u16>, all: bool, global: &Global, output: &Output) -> Resul
     }
 
     if all {
-        output.block(&json!({ "stopped": ports }), &[("Stopped", "stopped")]);
+        output.block(&json!({ "stopped": ports }), &[("Stopped", "stopped")])
     } else {
         output.block(
             &json!({ "port": ports.first(), "stopped": true }),
             &[("Port", "port"), ("Stopped", "stopped")],
-        );
+        )
     }
-    Ok(())
 }
 
 /// Delete a stopped image, so that the next boot on it is a fresh device.
@@ -424,8 +451,7 @@ fn wipe(path: &Path, yes: bool, output: &Output) -> Result<(), Error> {
             ("Deleted", "deleted"),
             ("Freed", "freed_bytes"),
         ],
-    );
-    Ok(())
+    )
 }
 
 /// Check this computer and this build, and say what to fix. Every check runs
@@ -592,7 +618,7 @@ fn doctor(output: &Output, paths: &Paths) -> Result<(), Error> {
         },
         "checks": checks.rows,
     });
-    output.checklist(&document, &checks.rows);
+    output.checklist(&document, &checks.rows)?;
     match checks.failure {
         Some(error) => Err(error),
         None => Ok(()),
@@ -739,8 +765,7 @@ fn report(
             ("Ready", "ready"),
             ("Expires", "expiry"),
         ],
-    );
-    Ok(())
+    )
 }
 
 /// Say so when the device reports an environment other than the one asked for.

@@ -33,6 +33,10 @@ fn theme() -> Theme {
     Theme::new(false, false)
 }
 
+/// The column the contract's values start in, one past the widest label and
+/// its colon.
+const COLUMN: usize = 10;
+
 /// The command tree with the palette and every contract attached.
 fn command(theme: &Theme) -> clap::Command {
     let mut command = Cli::command();
@@ -40,6 +44,12 @@ fn command(theme: &Theme) -> clap::Command {
     command.build();
     compact(&mut command, theme, true);
     command
+}
+
+/// The tree a run is parsed with. It is the help tree, so that `-h` and
+/// `--help` after a command print the page `help <command>` prints.
+pub(crate) fn parser() -> clap::Command {
+    command(&theme())
 }
 
 /// Print a command's page, a topic, or the whole manual. `long` is the
@@ -223,6 +233,13 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "0 done; 1 a check failed on this computer; 3 the registry could not be read",
             "ark-emulator doctor\nark-emulator doctor --json",
         ),
+        "completions" => (
+            "nothing",
+            "immediate",
+            "the shell's completion script on stdout, even under --json",
+            "0 done; 2 usage",
+            "ark-emulator completions zsh\nark-emulator completions bash",
+        ),
         "help" => (
             "nothing",
             "immediate",
@@ -247,29 +264,31 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
     ]
 }
 
-/// The contract as it prints: four aligned lines, then the examples.
+/// The contract as it prints: four labeled lines aligned on one column, then
+/// the examples as bare commands, since a pasted prompt breaks in a shell.
 fn footer(theme: &Theme, contract: &[(&str, &str); 5]) -> String {
     let mut lines: Vec<String> = contract[..4]
         .iter()
         .map(|(label, text)| {
+            let label = format!("{label}:");
             output::wrap(
                 &format!(
                     "{}{}{}",
-                    theme.paint(Role::Muted, label),
-                    " ".repeat(11 - label.len()),
+                    theme.paint(Role::Muted, &label),
+                    " ".repeat(COLUMN - label.len()),
                     theme.inline(text)
                 ),
                 theme.width,
-                11,
+                COLUMN,
             )
         })
         .collect();
-    lines.push(format!("\n{}", theme.paint(Role::Heading, "Examples")));
+    lines.push(format!("\n{}", theme.paint(Role::Heading, "Examples:")));
     lines.extend(contract[4].1.lines().map(|line| {
         output::wrap(
-            &format!("  $ {}", theme.paint(Role::Accent, line)),
+            &format!("  {}", theme.paint(Role::Accent, line)),
             theme.width,
-            4,
+            2,
         )
     }));
     lines.join("\n")
@@ -364,20 +383,32 @@ mod tests {
         pages.join("\n\n")
     }
 
+    /// Every command the tool has, in the order the root lists them.
+    const COMMANDS: [&str; 7] = [
+        "start",
+        "list",
+        "stop",
+        "wipe",
+        "doctor",
+        "completions",
+        "help",
+    ];
+
     #[test]
     fn test_every_command_states_its_whole_contract() {
         let theme = Theme::fixed(80, Color::Off, false);
         let mut root = command(&theme);
-        for name in ["start", "list", "stop", "wipe", "doctor", "help"] {
+        for name in COMMANDS {
             let page = root
                 .find_subcommand_mut(name)
                 .unwrap()
                 .render_long_help()
                 .to_string();
-            for label in ["Requires", "Time", "Prints", "Exit", "Examples"] {
+            for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
                 assert!(page.contains(label), "{name}: {label}");
             }
-            assert_eq!(page.matches("  $ ark-emulator").count(), 2, "{name}");
+            assert_eq!(page.matches("\n  ark-emulator ").count(), 2, "{name}");
+            assert!(!page.contains("$ "), "{name}");
         }
     }
 
@@ -385,7 +416,7 @@ mod tests {
     fn test_the_bare_run_states_its_contract_on_the_root_page() {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_long_help().to_string();
-        for label in ["Requires", "Time", "Prints", "Exit", "Examples"] {
+        for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
             assert!(page.contains(label), "{label}");
         }
         assert!(page.contains("Topics: agents, output, disks, registry."));
@@ -396,8 +427,32 @@ mod tests {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_help().to_string();
         assert!(page.lines().count() <= 42, "{}", page.lines().count());
-        for command in ["start", "list", "stop", "wipe", "doctor", "help"] {
+        for command in COMMANDS {
             assert!(page.contains(command), "{command}");
+        }
+    }
+
+    /// The two help flags after a command are what an agent tries first, and
+    /// they print the same page `help <command>` does, the scan for `-h` and
+    /// the contract for `--help`.
+    #[test]
+    fn test_help_flags_after_a_command_print_its_page() {
+        for (arguments, contract) in [
+            (["ark-emulator", "wipe", "-h"], false),
+            (["ark-emulator", "wipe", "--help"], true),
+        ] {
+            let error = parser().try_get_matches_from(arguments).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "{arguments:?}"
+            );
+            let page = error.render().to_string();
+            assert!(
+                page.contains("Delete a stopped disk image"),
+                "{arguments:?}"
+            );
+            assert_eq!(page.contains("Requires:"), contract, "{arguments:?}");
         }
     }
 
