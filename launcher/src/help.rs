@@ -117,25 +117,27 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
         } else {
             clap::ColorChoice::Always
         });
+    // The help flag is defined here rather than left to clap, so that the
+    // root's line can say where the manual is; clap would add a second one
+    // beside it otherwise, so the tree disables its own.
+    let help = clap::Arg::new("help")
+        .short('h')
+        .long("help")
+        .action(clap::ArgAction::Help);
     if parent.is_empty() {
         // The boot options belong to the bare run and to `start`, and clap
-        // would otherwise offer them on one line together with a command. The
-        // help flag is defined here rather than left to clap so that its line
-        // can say where the manual is.
+        // would otherwise offer them on one line together with a command.
         *command = command
             .clone()
             .override_usage("ark-emulator [OPTIONS]\n       ark-emulator <COMMAND>")
-            .arg(
-                clap::Arg::new("help")
-                    .short('h')
-                    .long("help")
-                    .action(clap::ArgAction::Help)
-                    .help("Print help; `help --all` prints the manual"),
-            );
+            .arg(help.help("Print help; `help --all` prints the manual"));
     } else {
         for global in globals {
             *command = command.clone().arg(global.clone().hide(true));
         }
+        *command = command
+            .clone()
+            .arg(help.help("Print help (see more with '--help')"));
     }
     let path = if parent.is_empty() {
         command.get_name().to_owned()

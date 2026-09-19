@@ -34,7 +34,14 @@ pub(crate) const DEFAULT_TIMEOUT: u64 = 120;
 /// The command line as parsed. A bare run opens the device window; a command
 /// manages emulators without one.
 #[derive(Parser)]
-#[command(name = "ark-emulator", about = ABOUT, disable_help_subcommand = true)]
+// The help flag is added by the help renderer, on the root and on every
+// command, so that its line can say where the manual is.
+#[command(
+    name = "ark-emulator",
+    about = ABOUT,
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
 pub(crate) struct Cli {
     /// Everything a guest needs to be booted.
     #[command(flatten)]
@@ -80,7 +87,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Whole wait for a start or a stop, in seconds
+    /// Whole wait for a start or a stop
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
@@ -91,7 +98,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
 
-    /// Diagnostics: debug, or trace with every registry request
+    /// Diagnostics: debug, or trace with the registry too
     #[arg(
         long,
         global = true,
