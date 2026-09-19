@@ -28,7 +28,7 @@ port and 404 when it does not.
   "instances": [
     {
       "port": 18181,
-      "disk": "ark-disk.img",
+      "disk": "emulator.ark",
       "disk_id": "0b6f2f9c1d4e5a67",
       "ready": true,
       "env": "develop",

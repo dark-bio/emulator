@@ -19,9 +19,8 @@ Read `ark help agents` before driving the Ark itself.
   --json for exact values.
 - Expect seconds with hardware acceleration and minutes without;
   `ark-emulator doctor` says which this computer has and what to do about
-  it. --timeout bounds the wait. On timeout the
-  emulator keeps booting, the exit is 7, and `ark-emulator list` shows when
-  it is ready.
+  it. --timeout bounds the wait. On timeout the emulator keeps booting, the
+  exit is 7, and `ark-emulator list` shows when it is ready.
 - start is idempotent. An image that is already booted is reported with
   started false and exit 0. Several emulators run at once, each on its own
   image and its own port from 18181 up.
@@ -29,10 +28,10 @@ Read `ark help agents` before driving the Ark itself.
   `ark-emulator stop --all` stops every one.
 - `ark-emulator wipe PATH --yes` deletes a stopped image. The next start is a
   factory-fresh device that needs `ark enroll`, `ark pair` and `ark unlock`
-  again. Nothing else asks a question, and start, list, stop and doctor
-  never open a window. A bare `ark-emulator` opens the device window and may
-  ask
-  where to keep the image; do not use it from a script.
+  again. Nothing else asks a question, and no command opens a window of its
+  own; the emulator that `start` boots runs as its own process and shows the
+  device face, so it needs a display. A bare `ark-emulator` opens the device
+  window and may ask where to keep the image; do not use it from a script.
 
 ## Reading results
 
@@ -40,7 +39,8 @@ stdout carries the result, stderr carries events, and error[code]: lines are
 stable. `ark-emulator help output` lists the codes with next steps. Exit
 codes: 0 done, 1 local file or confirmation, 2 usage, 3 no such emulator or
 an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
-cannot keep the two streams apart, run with -q --json.
+cannot keep the two streams apart, drop the lines that start with
+`{"event":` under --json; what remains is the document.
 
 ## Checking state
 
@@ -50,9 +50,9 @@ state and what the firmware has reported about the device.
 firmware, hardware acceleration, the data directory, the settings, the
 remembered image, the registry and a free port, and says what to fix; its
 JSON also carries where everything lives. Every emulator writes its launcher
-log to a file under the
-data directory, named by port; start --json and list --json name it, and a
-failed start quotes its tail. The device itself prints nothing.
+log to a file under the data directory, named by port; start --json and
+list --json name it, and a failed start quotes its tail. The device itself
+prints nothing.
 
 ## After it boots
 
@@ -66,7 +66,6 @@ names the bundled build, and a newer emulator release carries newer firmware.
 An emulated Ark's attested identity expires 30 days after `ark enroll`, and
 the cloud refuses an expired one. `ark-emulator list` shows the day, and
 `ark genuine` says when it has passed. After it, wipe the image and start a
-fresh device, which is the point: nothing worth keeping should build up
-inside an emulator.
+fresh device; nothing worth keeping should build up inside an emulator.
 Worked apps to run on it, in Rust, Go, C and Python, are at
 https://github.com/dark-bio/examples.

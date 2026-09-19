@@ -22,10 +22,9 @@ The launcher keeps what it writes in one directory per platform:
 
 `ark-emulator doctor --json` prints the one this build uses, along with the
 settings file and the log directory inside it. The image the launcher
-allocates for
-itself, `emulator.ark`, lives there too; an image you name with --disk lives
-wherever you put it. Any name works, and the window's own picker uses the
-`.ark` extension so the files are easy to tell apart.
+allocates for itself, `emulator.ark`, lives there too; an image you name with
+--disk lives wherever you put it. Any name works, and the window's own picker
+uses the `.ark` extension so the files are easy to tell apart.
 
 ## What is remembered
 
@@ -53,15 +52,14 @@ move to another environment, create a new image.
 An emulated Ark starts with a self-signed identity. `ark enroll` gives it an
 attested one from the cloud, valid for 30 days, after which the cloud refuses
 the device. `ark-emulator list` shows the day it expires, and `ark genuine`
-says when it has passed. Copying the image copies the identity and its
-expiry with it.
-A device past its date is wiped and started again as a fresh one; an
+says when it has passed. Copying the image copies the identity and its expiry
+with it. A device past its date is wiped and started again as a fresh one; an
 emulator holds nothing worth keeping that long.
 
 ## Wiping
 
 `ark-emulator wipe PATH` deletes a stopped image, and the next start on that
 path is a factory-fresh device that needs `ark enroll`, `ark pair` and
-`ark unlock` again. It deletes the file and nothing else: the remembered path
-stays, so the window comes up saying its emulator is missing, and a start
+`ark unlock` again. It deletes the file and nothing else, so the remembered
+path stays, the window comes up saying its emulator is missing, and a start
 falls back to the default image unless --disk names the path to recreate.
