@@ -77,11 +77,17 @@ jobs:
             build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - name: Format
+        run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Docs
+        run: cargo doc --workspace --no-deps
 
   build:
     strategy:
