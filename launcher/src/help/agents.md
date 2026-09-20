@@ -14,10 +14,11 @@ Read `ark help agents` before driving the Ark itself.
 - `ark-emulator start` boots the remembered image, the same device the
   owner opens by double-click, and returns once the firmware accepts clients.
   It prints the locator to pass to `ark -d`. The emulator runs in a process
-  of its own and shows the device face in a window, so it needs a display.
-  Pass --image for a separate device, and --env for the cloud environment of
-  an image created on this run; an existing image keeps the environment it
-  was created with. Use --json for exact values.
+  of its own and shows the device face in a window, so it needs a window
+  system, though the window may stay covered, the screen locked or the
+  display dark. Pass --image for a separate device, and --env for the cloud
+  environment of an image created on this run; an existing image keeps the
+  environment it was created with. Use --json for exact values.
 - Expect seconds with hardware acceleration and minutes without;
   `ark-emulator doctor` says which this computer has and what to do about
   it. --timeout bounds the wait. On timeout the emulator keeps booting, the

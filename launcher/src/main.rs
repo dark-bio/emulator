@@ -81,10 +81,11 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{FromArgMatches as _, Parser};
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 use args::{Boot, Cli};
 use bundle::{Paths, resolve_firmware, resolve_qemu_libs};
@@ -105,6 +106,15 @@ const STAGGER_STEP: u32 = 32;
 /// The wait thread reads it to tell an expected teardown from a crash, since
 /// both arrive as the same dead child process.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// The event that asks the device face to dial the guest's bus.
+const DIAL_EVENT: &str = "hw-dial";
+
+/// How often it is asked, for as long as the window is up.
+const DIAL_TICK: Duration = Duration::from_secs(1);
+
+/// Whether the ticking has started, so a second reveal does not double it.
+static TICKING: AtomicBool = AtomicBool::new(false);
 
 /// Take this emulator down the way closing its window does. Withdraw it from
 /// the registry, then go, which lets go of QEMU: the orphan guard kills it
@@ -440,7 +450,30 @@ fn reveal(app: &tauri::AppHandle, slot: u32) -> Result<()> {
         }
     });
     stagger(&window, slot);
-    window.show().context("could not show the main window")
+    window.show().context("could not show the main window")?;
+    keep_time(&window);
+    Ok(())
+}
+
+/// Keep time for the device face. Its page dials the guest's bus and redials
+/// when the socket drops, but WebKit stops the timers of a page it considers
+/// hidden, and the face counts as hidden whenever the screen is locked, the
+/// display is off or the window is covered. A page stuck there never dials
+/// again, and a guest whose bus nobody dials never comes up. So the launcher
+/// ticks instead, and the page dials on every tick it has no socket.
+fn keep_time(window: &tauri::WebviewWindow) {
+    if TICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let window = window.clone();
+    thread::spawn(move || {
+        while !SHUTTING_DOWN.load(Ordering::SeqCst) {
+            thread::sleep(DIAL_TICK);
+            if window.emit(DIAL_EVENT, ()).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// Offset the window by its place in the port range, so emulators started one
