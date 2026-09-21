@@ -870,6 +870,7 @@
 
       let ws = null;
       function connect() {
+        if (ws) return;
         ws = new WebSocket(`ws://${HW_ADDR}/v1/hw`);
         ws.onmessage = ev => {
           try {
@@ -931,6 +932,15 @@
         ws.onerror = () => { try { ws.close(); } catch { } };
       }
       connect();
+
+      // The launcher keeps time for this page as well. WebKit stops the timers
+      // of a page it considers hidden, and the face is hidden whenever the
+      // screen is locked, the display is off or the window is covered, so the
+      // retry above never fires there. Each tick dials if there is no socket.
+      // A dial that is pending is left alone: QEMU's user networking holds it
+      // and delivers it once the guest listens, and abandoning it would hand
+      // the firmware a socket nobody is behind.
+      window.__TAURI__?.event.listen('hw-dial', connect);
 
       function sendButton(edge) {
         if (ws && ws.readyState === 1) {

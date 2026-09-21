@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The settings panel: what it is shown, and what it is allowed to do.
 //!
 //! The panel is the same tray that hangs off the device's bottom edge, grown to
@@ -21,20 +27,20 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+use crate::Boot;
+use crate::bundle::Firmware;
 use crate::disk::{self, Reason};
 use crate::qemu::{GuestArch, HostPort};
-use crate::settings::{Settings, DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY};
-use crate::Config;
+use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY, Settings};
 
 /// Everything the guest needs to be started, held until it is. Taken by the
 /// start, so a second press of the button has nothing to work with and no
 /// second QEMU can be spawned.
 pub(crate) struct Pending {
-    pub(crate) cfg: Config,
+    pub(crate) boot: Boot,
     pub(crate) arch: GuestArch,
     pub(crate) host_port: HostPort,
-    pub(crate) kernel: PathBuf,
-    pub(crate) initrd: PathBuf,
+    pub(crate) firmware: Firmware,
     pub(crate) qemu_libs: Option<PathBuf>,
 }
 
@@ -128,13 +134,13 @@ impl Launcher {
     /// form rather than locking it, and only survives untouched on a launch
     /// that never puts the form up.
     pub(crate) fn effective(&self) -> (u32, String) {
-        let cfg = self.pending.as_ref().map(|pending| &pending.cfg);
-        let memory = cfg
-            .and_then(|cfg| cfg.memory)
+        let boot = self.pending.as_ref().map(|pending| &pending.boot);
+        let memory = boot
+            .and_then(|boot| boot.memory)
             .or_else(|| self.settings.memory())
             .unwrap_or(DEFAULT_MEMORY);
-        let env = cfg
-            .and_then(|cfg| cfg.env.clone())
+        let env = boot
+            .and_then(|boot| boot.env.clone())
             .or_else(|| self.settings.env().map(str::to_owned))
             .unwrap_or_else(|| DEFAULT_ENV.to_owned());
         (memory, env)
@@ -251,7 +257,7 @@ pub(crate) fn start_emulator(
     // error window replaces the device face rather than the panel offering a
     // retry that has nothing left to retry with.
     if let Err(err) = crate::launch(&app, pending, &disk, memory, &env) {
-        crate::error_dialog::show_from_thread(&app, "could not start", err);
+        crate::error_dialog::show_from_thread(&app, crate::error_dialog::COULD_NOT_START, err);
     }
     Ok(())
 }
@@ -281,19 +287,22 @@ mod tests {
     /// A launcher that has not started its guest, carrying the flags given.
     fn waiting(dir: &Path, memory: Option<u32>, env: Option<&str>) -> Launcher {
         let pending = Pending {
-            cfg: Config {
+            boot: Boot {
+                image: None,
+                env: env.map(str::to_owned),
+                memory,
+                arch: None,
                 kernel: None,
                 initrd: None,
-                arch: None,
-                disk: None,
-                env: env.map(str::to_owned),
-                host_addr: None,
-                memory,
+                port: None,
             },
             arch: GuestArch::Amd64,
             host_port: HostPort::fixed("127.0.0.1:18181".parse::<SocketAddr>().unwrap()),
-            kernel: PathBuf::new(),
-            initrd: PathBuf::new(),
+            firmware: Firmware {
+                kernel: PathBuf::new(),
+                initrd: PathBuf::new(),
+                bundled: false,
+            },
             qemu_libs: None,
         };
         Launcher::booting(pending, Settings::load(dir).unwrap())
@@ -341,11 +350,11 @@ mod tests {
 
         let mut external = Settings::load(tmp.path()).unwrap();
         external
-            .apply(Some(Path::new("saved.img")), false, 2048, "staging")
+            .apply(Some(Path::new("saved.ark")), false, 2048, "staging")
             .unwrap();
         let state = launcher.state().unwrap();
         assert_eq!(state.mode, "running");
-        assert_eq!(state.path, "saved.img");
+        assert_eq!(state.path, "saved.ark");
         assert!(!state.autostart);
         assert_eq!(state.memory, 2048);
         assert_eq!(state.env, "staging");
@@ -381,7 +390,7 @@ mod tests {
         launcher.ask(None, Reason::FirstRun);
         Settings::load(tmp.path())
             .unwrap()
-            .apply(Some(Path::new("other.img")), false, 2048, "staging")
+            .apply(Some(Path::new("other.ark")), false, 2048, "staging")
             .unwrap();
         let state = launcher.state().unwrap();
         assert_eq!(state.mode, "startup");
@@ -397,8 +406,8 @@ mod tests {
         let state = State {
             mode: "startup",
             note: "why".to_owned(),
-            path: "/tmp/a.img".to_owned(),
-            name: "a.img".to_owned(),
+            path: "/tmp/a.ark".to_owned(),
+            name: "a.ark".to_owned(),
             autostart: true,
             memory: 4096,
             env: "develop".to_owned(),

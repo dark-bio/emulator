@@ -77,11 +77,17 @@ jobs:
             build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - name: Format
+        run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Docs
+        run: cargo doc --workspace --no-deps
 
   build:
     strategy:
@@ -383,7 +389,7 @@ jobs:
         run: |
           $portableDir = "target/release/portable/Ark Emulator"
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-          Copy-Item "target/release/launcher.exe" (Join-Path $portableDir "Ark Emulator.exe")
+          Copy-Item "target/release/ark-emulator.exe" (Join-Path $portableDir "Ark Emulator.exe")
           Copy-Item "target/release/qemu-system-guest.exe" $portableDir
           Copy-Item "target/release/qemu-img.exe" $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
@@ -453,6 +459,9 @@ jobs:
       matrix:
         os: [macos-15, macos-15-intel, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    # A boot that hangs is what this job exists to catch, so it has a bound of
+    # its own beyond the start's --timeout.
+    timeout-minutes: 30
     env:
       SIGN_MACOS: ${{ inputs.signing-environment != '' }}
     steps:

@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! The registry of emulators running on this machine, served over HTTP on a
 //! fixed loopback port so that anything wanting to talk to an emulator can find
 //! one without guessing ports.
@@ -24,11 +30,15 @@
 //! Any page in any browser can read a loopback port, and the allowed origin
 //! here has to be `*`, so the registry publishes a disk image's file name but
 //! never its path.
+//!
+//! The registry is also the mailbox a shutdown travels through. A request to
+//! stop an emulator is recorded against its entry, and the next heartbeat from
+//! that launcher is answered with it. Nothing here signals, reaches for a pid
+//! or opens a second channel, so no launcher has to be special.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,11 +53,11 @@ pub(crate) const REGISTRY_PORT: u16 = 18180;
 
 /// Schema version of the registry's responses, so a consumer meeting an older
 /// registry can tell rather than guess. Bumped only for a breaking change.
-const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
-/// How long an entry survives without being refreshed. Three times the
-/// heartbeat interval in [`crate::discovery`], so one missed beat does not
-/// evict a live emulator.
+/// How long an entry survives without being refreshed. Comfortably more than
+/// the heartbeat interval in [`crate::discovery`], so a launcher that is busy
+/// or beating slowly is not dropped between two of its beats.
 const ENTRY_TTL: Duration = Duration::from_secs(15);
 
 /// How often the serve loop wakes up with no request to handle, which is what
@@ -106,11 +116,21 @@ pub(crate) struct Listing {
     pub(crate) instances: Vec<Instance>,
 }
 
+/// The registry's answer to a heartbeat, sent when it has something waiting
+/// for that launcher. A heartbeat with nothing waiting is answered with no
+/// body at all.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Beat {
+    /// Whether this emulator has been asked to shut down.
+    pub(crate) stop: bool,
+}
+
 /// An entry together with when it was last refreshed, which is the only thing
-/// keeping it alive.
+/// keeping it alive, and whatever is waiting to be handed to its launcher.
 struct Entry {
     instance: Instance,
     seen: Instant,
+    stop: bool,
 }
 
 /// The registry itself: every emulator that has been heard from, keyed by the
@@ -126,17 +146,37 @@ impl Registry {
         }
     }
 
-    /// Add or refresh an entry. A re-registration replaces the whole record
-    /// rather than merging into it, so a cleared claim (a device renamed to
-    /// nothing, say) does not linger.
-    fn upsert(&mut self, instance: Instance) {
+    /// Add or refresh an entry, and answer with whatever is waiting for that
+    /// launcher. A re-registration replaces the whole record rather than
+    /// merging into it, so a cleared claim (a device renamed to nothing, say)
+    /// does not linger. A stop that has been asked for is not part of the
+    /// record and outlives the refresh, until the launcher acts on it.
+    fn upsert(&mut self, instance: Instance) -> Beat {
+        let stop = self
+            .entries
+            .get(&instance.port)
+            .is_some_and(|entry| entry.stop);
         self.entries.insert(
             instance.port,
             Entry {
                 instance,
                 seen: Instant::now(),
+                stop,
             },
         );
+        Beat { stop }
+    }
+
+    /// Ask the emulator on `port` to shut down, which its next heartbeat picks
+    /// up. Answers whether there is an emulator there to ask.
+    fn request_stop(&mut self, port: u16) -> bool {
+        match self.entries.get_mut(&port) {
+            Some(entry) => {
+                entry.stop = true;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Drop an entry, if it is there. Idempotent: a launcher that deregisters
@@ -200,13 +240,14 @@ pub(crate) fn host() -> bool {
 
     // Runs for the life of the process. This launcher exiting is what hands
     // the port to the next one.
-    thread::spawn(move || serve(&server, &Arc::new(Mutex::new(Registry::new()))));
+    thread::spawn(move || serve(&server, &mut Registry::new()));
     true
 }
 
 /// The serve loop, waking on [`TICK`] even with nothing to answer so that
-/// entries expire on time rather than only when somebody asks.
-fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
+/// entries expire on time rather than only when somebody asks. One thread
+/// owns the registry, so nothing here needs a lock.
+fn serve(server: &Server, registry: &mut Registry) {
     loop {
         match server.recv_timeout(TICK) {
             Ok(Some(request)) => handle(request, registry),
@@ -215,13 +256,13 @@ fn serve(server: &Server, registry: &Arc<Mutex<Registry>>) {
             // serving.
             Err(e) => log!("[registry] could not accept a request: {e}"),
         }
-        registry.lock().unwrap().expire(Instant::now());
+        registry.expire(Instant::now());
     }
 }
 
 /// Route one request. Every answer carries the CORS headers, including the
 /// error ones, so a browser can read the reason rather than an opaque failure.
-fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
+fn handle(mut request: Request, registry: &mut Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -232,7 +273,7 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
         (Method::Options, _) => empty(StatusCode(204)),
 
         (Method::Get, "/v1/instances") => {
-            let listing = registry.lock().unwrap().listing();
+            let listing = registry.listing();
             match serde_json::to_vec(&listing) {
                 Ok(body) => json(body),
                 Err(e) => text(
@@ -244,19 +285,25 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
 
         (Method::Post, "/v1/instances") => match read_body(&mut request) {
             Ok(body) => match serde_json::from_slice::<Instance>(&body) {
-                Ok(instance) => {
-                    registry.lock().unwrap().upsert(instance);
-                    empty(StatusCode(204))
-                }
+                Ok(instance) => beat(registry.upsert(instance)),
                 Err(e) => text(StatusCode(400), &format!("malformed body: {e}")),
             },
             Err(response) => response,
         },
 
+        (Method::Post, _) => match stop_route(&path) {
+            Some(Ok(port)) => match registry.request_stop(port) {
+                true => empty(StatusCode(204)),
+                false => text(StatusCode(404), "no emulator on that port"),
+            },
+            Some(Err(())) => text(StatusCode(400), "not a port number"),
+            None => text(StatusCode(404), "no such route"),
+        },
+
         (Method::Delete, _) => match path.strip_prefix("/v1/instances/") {
             Some(port) => match port.parse::<u16>() {
                 Ok(port) => {
-                    registry.lock().unwrap().remove(port);
+                    registry.remove(port);
                     empty(StatusCode(204))
                 }
                 Err(_) => text(StatusCode(400), "not a port number"),
@@ -268,6 +315,13 @@ fn handle(mut request: Request, registry: &Arc<Mutex<Registry>>) {
     };
 
     respond(request, response);
+}
+
+/// The port a stop request names, if this path is one. `Err` is a path in the
+/// right shape whose port is not a number.
+fn stop_route(path: &str) -> Option<Result<u16, ()>> {
+    let port = path.strip_prefix("/v1/instances/")?.strip_suffix("/stop")?;
+    Some(port.parse::<u16>().map_err(|_| ()))
 }
 
 /// Read a request's body, capped at [`MAX_BODY`]. Borrows rather than consumes
@@ -321,6 +375,21 @@ fn json(body: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
     response
 }
 
+/// The answer to a heartbeat, which carries a body only when the registry has
+/// something for that launcher.
+fn beat(beat: Beat) -> Response<Cursor<Vec<u8>>> {
+    if !beat.stop {
+        return empty(StatusCode(204));
+    }
+    match serde_json::to_vec(&beat) {
+        Ok(body) => json(body),
+        Err(e) => text(
+            StatusCode(500),
+            &format!("could not encode the answer: {e}"),
+        ),
+    }
+}
+
 /// A plain-text response, for the cases a consumer can only log.
 fn text(status: StatusCode, message: &str) -> Response<Cursor<Vec<u8>>> {
     Response::from_data(message.as_bytes().to_vec()).with_status_code(status)
@@ -347,7 +416,7 @@ mod tests {
     fn instance(port: u16) -> Instance {
         Instance {
             port,
-            disk: "ark-disk.img".into(),
+            disk: "emulator.ark".into(),
             disk_id: "0123abcd".into(),
             ready: false,
             env: None,
@@ -378,6 +447,56 @@ mod tests {
         registry.upsert(instance(18181));
         registry.expire(Instant::now());
         assert_eq!(registry.listing().instances.len(), 1);
+    }
+
+    #[test]
+    fn test_a_stop_reaches_the_target_on_its_next_beat() {
+        let mut registry = Registry::new();
+        registry.upsert(instance(18181));
+
+        assert!(registry.request_stop(18181));
+        assert!(registry.upsert(instance(18181)).stop);
+    }
+
+    #[test]
+    fn test_a_beat_carries_nothing_until_a_stop_is_asked_for() {
+        let mut registry = Registry::new();
+        assert!(!registry.upsert(instance(18181)).stop);
+        assert!(!registry.upsert(instance(18181)).stop);
+    }
+
+    #[test]
+    fn test_a_stop_for_an_unlisted_port_is_refused() {
+        let mut registry = Registry::new();
+        registry.upsert(instance(18181));
+        assert!(!registry.request_stop(18182));
+    }
+
+    #[test]
+    fn test_a_stop_survives_until_the_target_reads_it() {
+        // Several beats can pass before the launcher acts on one, and each of
+        // them replaces the record.
+        let mut registry = Registry::new();
+        registry.upsert(instance(18181));
+        registry.request_stop(18181);
+
+        for _ in 0..3 {
+            assert!(registry.upsert(instance(18181)).stop);
+        }
+    }
+
+    #[test]
+    fn test_only_a_stop_route_names_a_port() {
+        assert_eq!(stop_route("/v1/instances/18181/stop"), Some(Ok(18181)));
+        assert_eq!(stop_route("/v1/instances/nope/stop"), Some(Err(())));
+        for path in [
+            "/v1/instances",
+            "/v1/instances/18181",
+            "/stop",
+            "/v1/x/1/stop",
+        ] {
+            assert_eq!(stop_route(path), None, "{path}");
+        }
     }
 
     #[test]

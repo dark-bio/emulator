@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Spawns QEMU with the firmware image and hosts a Tauri window for the
 //! emulator UI. Window and QEMU are lifecycle-bound, so closing either tears
 //! down the other on every platform, even on a hard kill:
@@ -10,18 +16,27 @@
 //!
 //! Several emulators can run at once, each on a host port and a disk image of
 //! its own. Finding them is what the registry is for: whichever launcher holds
-//! its port serves it, and the rest publish themselves into it.
+//! its port serves it, and the rest publish themselves into it. The same
+//! executable is also a command line that manages emulators without a window
+//! of its own; `args` is that surface and `verbs` is what it does.
 //!
 //! The backing disk image is an unencrypted qcow2 file that starts small and
 //! grows on demand. There is no encryption at the qemu layer. The emulator is
 //! a dev/test convenience, not a vault; see README.
 //!
+//!   - `args`:         the command line as typed.
+//!   - `verbs`:        what each command does with an emulator.
+//!   - `doctor`:       the checklist that says what to fix on this computer.
+//!   - `help`:         the manual, which is what an agent plans from.
+//!   - `output`:       what a command prints, for reading or as JSON.
+//!   - `style`:        what a terminal adds to that, and the escaping.
+//!   - `error`:        the codes a command can exit with.
 //!   - `qemu`:         the QEMU command line, the guest it builds, and its disk.
 //!   - `bundle`:       where a packaged build's firmware, sidecars and libs live.
 //!   - `settings`:     what the launcher remembers between runs.
 //!   - `disk`:         which disk image the guest boots from, asking if need be.
 //!   - `panel`:        the settings panel's state and the commands behind it.
-//!   - `platform`:     OS-specific quirks, so the other three stay cfg-free.
+//!   - `platform`:     OS-specific quirks, so the other modules stay cfg-free.
 //!   - `orphan`:       ties QEMU's lifetime to this process.
 //!   - `registry`:     the registry of running emulators, and who serves it.
 //!   - `discovery`:    keeping this emulator listed in that registry.
@@ -41,79 +56,45 @@
 // Windows console story, including the one QEMU would otherwise get.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod args;
 mod bundle;
 mod diagnostics;
 mod discovery;
 mod disk;
+mod doctor;
+mod error;
 mod error_dialog;
+mod help;
 mod orphan;
+mod output;
 mod panel;
 mod platform;
 mod qemu;
 mod registry;
 mod settings;
+mod style;
+mod verbs;
 
 use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context as _, Result};
-use clap::Parser;
-use tauri::{Manager, WindowEvent};
+use anyhow::{Context as _, Result, anyhow, bail};
+use clap::{FromArgMatches as _, Parser};
+use tauri::{Emitter, Manager, WindowEvent};
 
-use bundle::{app_data_dir, resolve_firmware, resolve_qemu_libs};
+use args::{Boot, Cli};
+use bundle::{Paths, resolve_firmware, resolve_qemu_libs};
 use diagnostics::log;
 use disk::Resolved;
+use error::{Code, Error};
 use panel::{Launcher, Pending};
-use qemu::{ensure_disk, spawn_qemu, GuestArch, HostPort};
+use qemu::{GuestArch, HostPort, ensure_disk, spawn_qemu};
 use settings::Settings;
-
-/// Launch configuration parsed from command-line arguments.
-#[derive(Parser)]
-#[command(about = "Ark device emulator: boots ArkOS in QEMU behind a small UI.")]
-struct Config {
-    /// Path to the kernel image (vmlinuz). Defaults to the firmware bundled
-    /// with this build for --arch. Must be given together with --initrd.
-    #[arg(long)]
-    kernel: Option<PathBuf>,
-
-    /// Path to the initramfs (.gz). See --kernel.
-    #[arg(long)]
-    initrd: Option<PathBuf>,
-
-    /// CPU architecture of the firmware artifacts; defaults to the host's
-    /// architecture.
-    #[arg(long, value_enum)]
-    arch: Option<GuestArch>,
-
-    /// Path to the backing disk image; auto-allocated if it does not exist.
-    /// Defaults to the image remembered in the settings file, which the
-    /// launcher asks for the first time it needs one.
-    #[arg(long)]
-    disk: Option<PathBuf>,
-
-    /// Cloud environment the device gets bound to when its disk is first
-    /// created; ignored for existing disks (the binding is burnt in). Defaults
-    /// to the environment remembered in the settings file, then to release.
-    /// Overrides the settings file without changing it.
-    #[arg(long, value_parser = settings::ENVS)]
-    env: Option<String>,
-
-    /// Host address that SLIRP forwards into the guest's port. Defaults to the
-    /// first free loopback port from 18181 up, so that several emulators can
-    /// run at once without being told about each other.
-    #[arg(long)]
-    host_addr: Option<SocketAddr>,
-
-    /// Guest RAM in MiB. Lower it on memory-constrained hosts. Defaults to the
-    /// amount remembered in the settings file, then to 8192. Overrides the
-    /// settings file without changing it.
-    #[arg(long)]
-    memory: Option<u32>,
-}
 
 /// Label of the device face window, hidden until startup succeeds.
 pub(crate) const MAIN_WINDOW: &str = "main";
@@ -126,14 +107,108 @@ const STAGGER_STEP: u32 = 32;
 /// both arrive as the same dead child process.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+/// The event that asks the device face to dial the guest's bus.
+const DIAL_EVENT: &str = "hw-dial";
+
+/// How often it is asked, for as long as the window is up.
+const DIAL_TICK: Duration = Duration::from_secs(1);
+
+/// Whether the ticking has started, so a second reveal does not double it.
+static TICKING: AtomicBool = AtomicBool::new(false);
+
+/// Take this emulator down the way closing its window does. Withdraw it from
+/// the registry, then go, which lets go of QEMU: the orphan guard kills it
+/// with this process.
+pub(crate) fn shut_down() -> ! {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    discovery::deregister();
+    std::process::exit(0);
+}
+
+/// clap's complaint as the house error: its first paragraph without the
+/// prefix clap puts on it, under the usage code.
+fn usage(error: &clap::Error) -> Error {
+    let message = error.to_string();
+    let message = message
+        .split("\n\n")
+        .next()
+        .unwrap_or(&message)
+        .trim_start_matches("error: ")
+        .trim();
+    Error::new(Code::Usage, message).hint("`ark-emulator help` lists the commands and the topics")
+}
+
 fn main() {
-    let cfg: Config = Config::parse();
+    // Parsed through the help tree, so that -h and --help after a command
+    // print the page `help <command>` prints, and a mistake typed at the
+    // command line comes back in the house error shape, JSON included. The
+    // console is attached before anything is printed, since a Windows release
+    // build has none of its own.
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let json = arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "--json");
+    let matches = match help::parser().try_get_matches_from_mut(&arguments) {
+        Ok(matches) => matches,
+        Err(error) => {
+            platform::attach_console();
+            if error.exit_code() == 0 {
+                let _ = error.print();
+                std::process::exit(0);
+            }
+            let mut global = Cli::parse_from(["ark-emulator"]).global;
+            global.json = json;
+            output::Output::new(&global).error(&usage(&error));
+            std::process::exit(2);
+        }
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
+        platform::attach_console();
+        let _ = error.print();
+        std::process::exit(2);
+    });
+    if cli.version || cli.command.is_some() {
+        platform::attach_console();
+    }
+    let output = output::Output::new(&cli.global);
+    error_dialog::reporting(&output, cli.global.no_input);
+    diagnostics::level(cli.global.log);
+
+    // Compiled in rather than read at run time, so a command line run never
+    // opens a window or touches the display to find out where things are.
+    let context = tauri::generate_context!();
+    if let Err(err) = cli.validate() {
+        output.error(&err);
+        std::process::exit(err.exit());
+    }
+    if cli.version || cli.command.is_some() {
+        std::process::exit(verbs::run(
+            cli.command,
+            &cli.global,
+            &output,
+            &context.config().identifier,
+            context.package_info(),
+        ));
+    }
+
+    // From here the window is the product. A source build's guest console has
+    // stdout, so nothing this layer would put there is written, and the
+    // launcher's own lines are the only thing on stderr.
+    output.release_stdout();
+    if output.json() {
+        diagnostics::log_sink(diagnostics::Sink::Events(output));
+    }
 
     // The UI dials the hardware bus at startup, so the port has to be settled
     // before the builder runs. Reserving it can fail, and that failure travels
     // into `start` with every other one.
-    let host_port = match cfg.host_addr {
-        Some(addr) => Ok(HostPort::fixed(addr)),
+    let host_port = match cli.boot.port {
+        Some(port) => Ok(HostPort::fixed(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            port,
+        )))),
         None => HostPort::reserve(),
     };
 
@@ -162,20 +237,26 @@ fn main() {
             panel::start_emulator
         ])
         .setup(move |app| {
-            if let Err(err) = platform::install_menus(app).and_then(|()| start(app, cfg, host_port)) {
-                error_dialog::show(app.handle(), "could not start", err);
+            let no_input = cli.global.no_input;
+            if let Err(err) = platform::install_menus(app)
+                .and_then(|()| start(app, cli.boot, no_input, host_port))
+            {
+                error_dialog::show(app.handle(), error_dialog::COULD_NOT_START, err);
             }
             // Deliberately Ok even when startup failed. An Err here propagates
             // out of run(), and then there is no event loop left to show the
             // error in and nothing but a panic message nobody can read.
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .unwrap_or_else(|err| {
             // The webview runtime itself did not come up, so no window of ours
             // can either. Stderr is all that is left.
             let err = anyhow!(err).context("the window system could not be started");
-            eprintln!("{}", diagnostics::report("could not start", &err));
+            eprintln!(
+                "{}",
+                diagnostics::report(error_dialog::COULD_NOT_START, &err)
+            );
             std::process::exit(1);
         });
 }
@@ -187,8 +268,8 @@ fn main() {
 /// end up on the same reporting path. That includes resolving the guest
 /// architecture and reserving a host port, neither of which needs a Tauri app
 /// but both of which would otherwise be failures with nowhere to be displayed.
-fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<()> {
-    let (pending, settings, resolved) = prepare(app, cfg, host_port)?;
+fn start(app: &tauri::App, boot: Boot, no_input: bool, host_port: Result<HostPort>) -> Result<()> {
+    let (pending, settings, resolved) = prepare(app, boot, no_input, host_port)?;
     let mut launcher = Launcher::booting(pending, settings);
     let slot = launcher.slot();
 
@@ -197,7 +278,7 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
-            if pending.cfg.disk.is_some() || std::env::var_os(error_dialog::NO_DIALOG).is_some() {
+            if pending.boot.image.is_some() || no_input {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())
                 })?;
@@ -223,58 +304,66 @@ fn start(app: &tauri::App, cfg: Config, host_port: Result<HostPort>) -> Result<(
 /// read out of, and that decision.
 fn prepare(
     app: &tauri::App,
-    cfg: Config,
+    boot: Boot,
+    no_input: bool,
     host_port: Result<HostPort>,
 ) -> Result<(Pending, Settings, Resolved)> {
     // The host's architecture is also the only one that gets hardware
     // acceleration, so it is the default.
-    let arch = match cfg.arch {
+    let arch = match boot.arch.or_else(GuestArch::native) {
         Some(arch) => arch,
-        None => match std::env::consts::ARCH {
-            "aarch64" => GuestArch::Arm64,
-            "x86_64" => GuestArch::Amd64,
-            other => bail!("no firmware exists for {other} hosts; pass --arch explicitly"),
-        },
+        None => bail!(
+            "no firmware exists for {} hosts; pass --arch explicitly",
+            std::env::consts::ARCH
+        ),
     };
     diagnostics::record("Guest", arch.name());
 
     let host_port = host_port?;
     diagnostics::record("Host address", host_port.addr().to_string());
 
-    let data_dir = app_data_dir(app)?;
+    // The window writes here, so the directory is made now rather than by
+    // every command that only reads.
+    let paths = Paths::resolve(&app.config().identifier, app.package_info())?;
+    let data_dir = paths.data.clone();
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("could not create the data directory {}", data_dir.display()))?;
+
+    // Best effort, and early, so that everything a failing startup says lands
+    // in the file a second process can read.
+    if let Err(e) = diagnostics::log_to(&data_dir, host_port.port()) {
+        log!("[launcher] could not open a log file: {e:#}");
+    }
+
     let settings = Settings::load(&data_dir)?;
     diagnostics::record_path("Settings", settings.path());
 
     // Discovery is a convenience, never a precondition: whatever it answers,
     // including nothing at all, this emulator still boots.
-    discovery::ensure_registry();
-    let booted: disk::Booted = discovery::list()
-        .into_iter()
-        .map(|instance| (instance.disk_id, instance.port))
-        .collect();
+    registry::host();
+    let booted = discovery::list().unwrap_or_default();
 
-    let (kernel, initrd) = resolve_firmware(app, &cfg, arch)?;
-    diagnostics::record_path("Kernel", &kernel);
-    diagnostics::record_path("Initrd", &initrd);
+    let firmware = resolve_firmware(paths.resources.as_deref(), &boot, arch)?;
+    diagnostics::record_path("Kernel", &firmware.kernel);
+    diagnostics::record_path("Initrd", &firmware.initrd);
 
-    let qemu_libs = resolve_qemu_libs(app);
+    let qemu_libs = resolve_qemu_libs(paths.resources.as_deref());
 
     let resolved = disk::decide(
-        cfg.disk.as_deref(),
+        boot.image.as_deref(),
         settings.disk(),
         settings.autostart(),
         &booted,
         &data_dir,
         host_port.port(),
-        std::env::var_os(error_dialog::NO_DIALOG).is_some(),
+        no_input,
     )?;
 
     let pending = Pending {
-        cfg,
+        boot,
         arch,
         host_port,
-        kernel,
-        initrd,
+        firmware,
         qemu_libs,
     };
     Ok((pending, settings, resolved))
@@ -292,8 +381,7 @@ fn launch(
     diagnostics::record_path("Disk", disk);
     let mut child = spawn_qemu(
         pending.arch,
-        &pending.kernel,
-        &pending.initrd,
+        &pending.firmware,
         disk,
         memory,
         env,
@@ -332,11 +420,11 @@ fn launch(
             }
             let err =
                 anyhow!("the emulated device stopped unexpectedly: QEMU exited with {status}");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
         Err(e) => {
             let err = anyhow!(e).context("lost track of the QEMU process");
-            error_dialog::show_from_thread(&handle, "stopped unexpectedly", err);
+            error_dialog::show_from_thread(&handle, error_dialog::STOPPED, err);
         }
     });
 
@@ -362,7 +450,30 @@ fn reveal(app: &tauri::AppHandle, slot: u32) -> Result<()> {
         }
     });
     stagger(&window, slot);
-    window.show().context("could not show the main window")
+    window.show().context("could not show the main window")?;
+    keep_time(&window);
+    Ok(())
+}
+
+/// Keep time for the device face. Its page dials the guest's bus and redials
+/// when the socket drops, but WebKit stops the timers of a page it considers
+/// hidden, and the face counts as hidden whenever the screen is locked, the
+/// display is off or the window is covered. A page stuck there never dials
+/// again, and a guest whose bus nobody dials never comes up. So the launcher
+/// ticks instead, and the page dials on every tick it has no socket.
+fn keep_time(window: &tauri::WebviewWindow) {
+    if TICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let window = window.clone();
+    thread::spawn(move || {
+        while !SHUTTING_DOWN.load(Ordering::SeqCst) {
+            thread::sleep(DIAL_TICK);
+            if window.emit(DIAL_EVENT, ()).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// Offset the window by its place in the port range, so emulators started one

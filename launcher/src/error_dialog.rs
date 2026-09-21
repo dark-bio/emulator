@@ -1,3 +1,9 @@
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 //! Telling the user the emulator is not going to work.
 //!
 //! This is a GUI-first app that people are meant to download and double-click,
@@ -11,15 +17,19 @@
 //! which defeats the point. A second webview window renders the same everywhere
 //! and can carry a copy button.
 //!
-//! The report always reaches stderr first, so a developer at a terminal and CI
-//! both still see it when no window can be shown at all.
+//! The report always reaches the log and stderr first, so a developer at a
+//! terminal, CI, and the command that started this emulator all still see it
+//! when no window can be shown at all.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-use crate::diagnostics::{self, log};
 use crate::MAIN_WINDOW;
+use crate::diagnostics::{self, log};
+use crate::error::{Code, Error};
+use crate::output::Output;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
@@ -33,12 +43,34 @@ const ISSUES_URL: &str = "https://github.com/dark-bio/emulator/issues";
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 750.0;
 
-/// Suppresses the window and exits immediately instead, and stands for the
-/// same thing wherever else the launcher would put a dialog in front of
-/// somebody (see [`crate::disk`]). Set by the CI smoke scripts, which run the
-/// app under a virtual display where a window nobody can dismiss would just
-/// stall until the job times out.
-pub(crate) const NO_DIALOG: &str = "ARK_EMULATOR_NO_DIALOG";
+/// What a failure before the guest is up is reported under. Dying during
+/// startup and dying an hour in read very differently to somebody who had a
+/// working emulator a moment ago.
+pub(crate) const COULD_NOT_START: &str = "could not start";
+
+/// What a failure after the guest is up is reported under.
+pub(crate) const STOPPED: &str = "stopped unexpectedly";
+
+/// Whether a failure exits after printing its report instead of opening a
+/// window. Also what stands for "nobody is here to ask" wherever else the
+/// launcher would put a dialog in front of somebody (see [`crate::disk`]).
+static NO_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// The output layer a failure goes through when this run answers in JSON.
+/// Absent for a run that reports in plain words.
+static EVENTS: Mutex<Option<Output>> = Mutex::new(None);
+
+/// Record how this run reports a failure. The reporting paths below are
+/// reached from threads that have no command line in hand, so they read it
+/// from here.
+pub(crate) fn reporting(output: &Output, no_input: bool) {
+    NO_INPUT.store(no_input, Ordering::SeqCst);
+    if output.json()
+        && let Ok(mut events) = EVENTS.lock()
+    {
+        *events = Some(output.clone());
+    }
+}
 
 /// Whether a failure has already been reported. Startup failing and QEMU dying
 /// are not mutually exclusive, and the second one to arrive must not stack a
@@ -61,9 +93,7 @@ pub(crate) fn report_issue() {
 }
 
 /// Report a fatal error from the main thread, which is where Tauri's `setup`
-/// hook runs. `title` distinguishes failing to start from failing later, since
-/// the two read very differently to someone who had a working emulator a
-/// moment ago.
+/// hook runs. `title` is [`COULD_NOT_START`] or [`STOPPED`].
 pub(crate) fn show(app: &AppHandle, title: &str, err: anyhow::Error) {
     let Some(report) = prepare(title, err) else {
         return;
@@ -95,19 +125,33 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
 /// window: either something already reported one, or dialogs are switched off,
 /// in which case the process is exiting instead.
 fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
+    // Logged before the report is built, so the cause is in the log file a
+    // command that started this emulator reads back, and in the report too.
+    log!("[launcher] {title}: {err:#}");
     let report = diagnostics::report(title, &err);
-    eprintln!("{report}");
+    match EVENTS.lock().ok().and_then(|events| events.clone()) {
+        Some(output) => output.error(&Error::new(code(title), report.clone())),
+        None => eprintln!("{report}"),
+    }
 
     if REPORTED.swap(true, Ordering::SeqCst) {
         return None;
     }
-    if std::env::var_os(NO_DIALOG).is_some() {
+    if NO_INPUT.load(Ordering::SeqCst) {
         // Not app.exit: there is no UI state worth unwinding here, and the
         // caller may still be inside `setup` with no event loop yet to carry
         // the request. QEMU dies with us either way, via `orphan`.
         std::process::exit(1);
     }
     Some(report)
+}
+
+/// The stable code for a failure, taken from the words it is reported under.
+fn code(title: &str) -> Code {
+    match title {
+        STOPPED => Code::StoppedUnexpectedly,
+        _ => Code::CouldNotStart,
+    }
 }
 
 /// Build the error window, falling back to exiting if even that fails.

@@ -1,15 +1,29 @@
-//! The launcher's side of the registry: making sure it is being served, and
-//! keeping this emulator's entry in it up to date.
+// ark-emulator: emulated Ark enclave for development and demos
+// Copyright 2026 Dark Bio AG. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//! The launcher's side of the registry: reading it, keeping this emulator's
+//! entry in it up to date, and the small HTTP transport both need.
 //!
-//! Nothing here is allowed to stop an emulator from booting. Every call is
+//! Nothing here is allowed to stop an emulator from booting. Publishing is
 //! best-effort and logs rather than fails. CI launches a packaged build with no
 //! flags and expects it to boot unattended, with no registry, a wedged one, or
-//! a machine where binding a port is not allowed at all.
+//! a machine where binding a port is not allowed at all. Reading is strict
+//! where a command needs it to be: no registry is an empty list, while one
+//! that answers and cannot be read is an error.
 //!
 //! Every launcher tries to host the registry, one wins the port, and the rest
 //! publish themselves to whoever did (see [`crate::registry`]). Takeover rides
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
+//!
+//! The heartbeat is also how a shutdown arrives. The registry answers a beat
+//! with whatever has been left for this emulator, and a stop waiting there
+//! takes it down the way closing its window does. A launcher that hosts the
+//! registry beats to itself over the loopback like every other one, so it
+//! reads its own mailbox on the same path.
 
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -19,19 +33,24 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
-use crate::diagnostics::log;
-use crate::registry::{self, Instance, Listing, REGISTRY_PORT};
+use crate::diagnostics::{log, trace};
+use crate::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 
-/// How often this emulator re-registers itself, which is also the heartbeat
-/// keeping its entry alive, so it has to stay below the registry's expiry.
-const HEARTBEAT: Duration = Duration::from_secs(5);
+/// How often this emulator re-registers itself. It is the heartbeat keeping
+/// its entry alive, so it has to stay well below the registry's expiry, and it
+/// is also how long a stop takes to arrive.
+pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// How long any single request to the registry may take, bounded so a wedged
 /// one cannot hold up a boot.
 const TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The most a registry answer may be. A hundred entries are a few kilobytes;
+/// anything near this is not a registry.
+const MAX_RESPONSE: u64 = 1 << 20;
 
 /// This emulator's entry, as last published. Held here so the heartbeat thread
 /// and the nameplate command can both reach it.
@@ -42,28 +61,68 @@ fn registry_addr() -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT)
 }
 
-/// Ask the registry what is running. An empty list is also what a machine with
-/// nobody hosting one looks like, and a caller does not need to tell.
-pub(crate) fn list() -> Vec<Instance> {
-    match request("GET", "/v1/instances", None) {
-        Ok(body) => match serde_json::from_slice::<Listing>(&body) {
-            Ok(listing) => listing.instances,
-            Err(e) => {
-                log!("[discovery] could not read the registry's answer: {e}");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            log!("[discovery] could not read the registry: {e}");
-            Vec::new()
-        }
-    }
+/// Ask the registry what is running. Nothing serving one is a computer with no
+/// emulators on it, so a connection that cannot be made answers with an empty
+/// list. Any failure after that, an answer that cannot be read, a version
+/// this build does not know, a host that stops answering, is reported, since
+/// something is there and it is not a registry this build can trust.
+pub(crate) fn list() -> Result<Vec<Instance>> {
+    let body = match request("GET", "/v1/instances", None) {
+        Ok(body) => body,
+        Err(Refused) => return Ok(Vec::new()),
+        Err(Failed(err)) => return Err(err),
+    };
+    parse_listing(&body)
 }
 
-/// Make sure the registry is being served, hosting it here if nobody else is.
-/// Called once at startup, before anything asks what is running.
-pub(crate) fn ensure_registry() {
-    registry::host();
+/// The instances in a listing. Each entry is read on its own, so one this
+/// build cannot make sense of is logged and skipped rather than hiding the
+/// rest, and a listing of another version is refused whole.
+fn parse_listing(body: &[u8]) -> Result<Vec<Instance>> {
+    let listing: serde_json::Value =
+        serde_json::from_slice(body).context("could not read the registry's answer")?;
+    let version = listing["version"].as_u64();
+    if version != Some(u64::from(SCHEMA_VERSION)) {
+        bail!(
+            "the registry speaks version {}, and this build knows version {SCHEMA_VERSION}",
+            version.map_or("none".to_owned(), |version| version.to_string())
+        );
+    }
+    let entries = listing["instances"]
+        .as_array()
+        .context("the registry's answer holds no instances")?;
+    Ok(entries
+        .iter()
+        .filter_map(
+            |entry| match serde_json::from_value::<Instance>(entry.clone()) {
+                Ok(instance) => Some(instance),
+                Err(err) => {
+                    log!("[discovery] skipping an entry the registry holds: {err}");
+                    None
+                }
+            },
+        )
+        .collect())
+}
+
+/// The emulator among `instances` that holds `image`, if one does. The image
+/// is what tells two emulators apart before either has been given a name.
+pub(crate) fn booted<'a>(instances: &'a [Instance], image: &Path) -> Option<&'a Instance> {
+    let id = disk_id(image);
+    instances.iter().find(|instance| instance.disk_id == id)
+}
+
+/// Whether something accepts connections on a loopback port.
+pub(crate) fn answering(port: u16) -> bool {
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    TcpStream::connect_timeout(&address.into(), TIMEOUT).is_ok()
+}
+
+/// Ask the emulator on `port` to shut down. The request waits in the registry
+/// until that emulator's next heartbeat collects it.
+pub(crate) fn request_stop(port: u16) -> Result<()> {
+    request("POST", &format!("/v1/instances/{port}/stop"), None)?;
+    Ok(())
 }
 
 /// Publish this emulator, and start the heartbeat that keeps it published.
@@ -87,9 +146,11 @@ pub(crate) fn register(port: u16, disk: &Path) {
     }
 
     publish();
-    thread::spawn(|| loop {
-        thread::sleep(HEARTBEAT);
-        publish();
+    thread::spawn(|| {
+        loop {
+            thread::sleep(HEARTBEAT);
+            publish();
+        }
     });
 }
 
@@ -130,7 +191,7 @@ pub(crate) fn nameplate(
     publish();
 }
 
-/// Send the current entry to the registry.
+/// Send the current entry to the registry, and act on whatever comes back.
 fn publish() {
     let Some(entry) = ENTRY.get() else {
         return;
@@ -144,7 +205,8 @@ fn publish() {
         }
     };
 
-    if request("POST", "/v1/instances", Some(&body)).is_ok() {
+    if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+        obey(&answer);
         return;
     }
 
@@ -153,8 +215,18 @@ fn publish() {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    if let Err(e) = request("POST", "/v1/instances", Some(&body)) {
-        log!("[discovery] could not register: {e}");
+    match request("POST", "/v1/instances", Some(&body)) {
+        Ok(answer) => obey(&answer),
+        Err(e) => log!("[discovery] could not register: {e}"),
+    }
+}
+
+/// Act on what the registry answered a heartbeat with. A stop waiting there is
+/// the only thing it can carry, and an answer with no body carries nothing.
+fn obey(answer: &[u8]) {
+    if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
+        log!("[discovery] asked to shut down");
+        crate::shut_down();
     }
 }
 
@@ -207,36 +279,80 @@ pub(crate) fn disk_id(disk: &Path) -> String {
     })
 }
 
+/// Why a request got no answer: nobody is serving the registry, or something
+/// is and the exchange failed.
+enum Unanswered {
+    /// No connection could be made, which is a computer with no registry. A
+    /// closed loopback port is refused on Unix and left to time out on
+    /// Windows, so the kind of the error does not matter, only that nothing
+    /// ever answered.
+    Refused,
+    /// Anything after a connection was made, which is a registry that could
+    /// not be used.
+    Failed(anyhow::Error),
+}
+
+use Unanswered::{Failed, Refused};
+
+impl std::fmt::Display for Unanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused => write!(f, "nothing is serving the registry"),
+            Failed(err) => write!(f, "{err:#}"),
+        }
+    }
+}
+
+impl From<Unanswered> for anyhow::Error {
+    fn from(unanswered: Unanswered) -> Self {
+        match unanswered {
+            Refused => anyhow::anyhow!("nothing is serving the registry"),
+            Failed(err) => err,
+        }
+    }
+}
+
 /// One request to the registry, spoken directly over TCP. Four fixed routes
-/// against a loopback server is well short of what an HTTP client crate is for.
-fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>> {
+/// against a loopback server is well short of what an HTTP client crate is
+/// for. Spoken as HTTP/1.0, so the answer ends at end of file and carries no
+/// chunked framing, and bounded, so a server that is not a registry cannot
+/// feed this forever.
+fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Unanswered> {
     let addr = registry_addr();
-    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT)
-        .with_context(|| format!("could not connect to the registry at {addr}"))?;
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    stream.set_write_timeout(Some(TIMEOUT))?;
+    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT).map_err(|_| Refused)?;
+    let mut exchange = || -> Result<Vec<u8>> {
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        stream.set_write_timeout(Some(TIMEOUT))?;
 
-    let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
-         Content-Length: {}\r\n",
-        body.map_or(0, <[u8]>::len)
-    );
-    if body.is_some() {
-        head.push_str("Content-Type: application/json\r\n");
-    }
-    head.push_str("\r\n");
+        let mut head = format!(
+            "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\
+             Content-Length: {}\r\n",
+            body.map_or(0, <[u8]>::len)
+        );
+        if body.is_some() {
+            head.push_str("Content-Type: application/json\r\n");
+        }
+        head.push_str("\r\n");
 
-    stream.write_all(head.as_bytes())?;
-    if let Some(body) = body {
-        stream.write_all(body)?;
-    }
-    stream.flush()?;
+        stream.write_all(head.as_bytes())?;
+        if let Some(body) = body {
+            stream.write_all(body)?;
+        }
+        stream.flush()?;
 
-    // `Connection: close` means the response ends at EOF, so there is no
-    // chunked or keep-alive framing to interpret.
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    split_response(&raw)
+        let mut raw = Vec::new();
+        (&mut stream).take(MAX_RESPONSE).read_to_end(&mut raw)?;
+        let answer = split_response(&raw);
+        trace!(
+            "[discovery] {method} {path}: {}",
+            match &answer {
+                Ok(body) => format!("{} bytes", body.len()),
+                Err(err) => err.to_string(),
+            }
+        );
+        answer
+    };
+    exchange().map_err(Failed)
 }
 
 /// Pull the body out of a response, failing on any status the registry uses to
@@ -288,13 +404,36 @@ mod tests {
         assert!(split_response(b"HTTP/1.1 200 OK\r\nContent-Type: x").is_err());
     }
 
+    /// A listing of another version is refused whole, since nothing in it can
+    /// be trusted to mean what this build thinks.
     #[test]
-    fn test_disk_id_is_stable_and_distinguishes_images() {
+    fn test_a_listing_of_another_version_is_refused() {
+        let err = parse_listing(br#"{"version": 999, "instances": []}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("999"), "{err}");
+        assert!(parse_listing(br#"{"instances": []}"#).is_err());
+    }
+
+    /// One entry this build cannot read hides no other.
+    #[test]
+    fn test_a_malformed_entry_does_not_hide_the_rest() {
+        let body = br#"{"version": 1, "instances": [
+            {"port": "not a port"},
+            {"port": 18182, "disk": "b.ark", "disk_id": "02", "ready": true}
+        ]}"#;
+        let instances = parse_listing(body).unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].port, 18182);
+    }
+
+    #[test]
+    fn test_disk_id_distinguishes_images() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let a = tmp.path().join("a.img");
-        let b = tmp.path().join("b.img");
-        assert_eq!(disk_id(&a), disk_id(&a));
-        assert_ne!(disk_id(&a), disk_id(&b));
+        assert_ne!(
+            disk_id(&tmp.path().join("a.ark")),
+            disk_id(&tmp.path().join("b.ark"))
+        );
     }
 
     #[test]
@@ -302,8 +441,8 @@ mod tests {
     fn test_disk_id_distinguishes_paths_that_are_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt as _;
-        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.img"));
-        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.img"));
+        let a = Path::new(OsStr::from_bytes(b"/tmp/\xff.ark"));
+        let b = Path::new(OsStr::from_bytes(b"/tmp/\xfe.ark"));
         assert_ne!(disk_id(a), disk_id(b));
     }
 
@@ -311,17 +450,28 @@ mod tests {
     fn test_disk_id_agrees_across_spellings_of_one_image() {
         // Canonicalization needs the file to exist.
         let tmp = tempfile::TempDir::new().unwrap();
-        let direct = tmp.path().join("ark.img");
+        let direct = tmp.path().join("ark.ark");
         std::fs::write(&direct, b"").unwrap();
-        let indirect = tmp.path().join("sub").join("..").join("ark.img");
+        let indirect = tmp.path().join("sub").join("..").join("ark.ark");
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         assert_eq!(disk_id(&direct), disk_id(&indirect));
     }
 
     #[test]
-    fn test_a_missing_registry_lists_nothing_rather_than_failing() {
-        // Listing answers with a list whatever is running, which is what keeps
-        // a boot independent of discovery.
-        let _ = list();
+    fn test_the_emulator_holding_an_image_is_found_by_its_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let image = tmp.path().join("a.ark");
+        let instances = [Instance {
+            port: 18181,
+            disk: "a.ark".into(),
+            disk_id: disk_id(&image),
+            ready: true,
+            env: None,
+            name: None,
+            serial: None,
+            expiry: None,
+        }];
+        assert_eq!(booted(&instances, &image).map(|i| i.port), Some(18181));
+        assert!(booted(&instances, &tmp.path().join("b.ark")).is_none());
     }
 }
