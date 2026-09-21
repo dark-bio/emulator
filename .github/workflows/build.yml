@@ -31,11 +31,11 @@ on:
 env:
   # Bumping the bundled firmware is updating these values: the release tag, and
   # the digest of each asset that release publishes.
-  FIRMWARE_TAG: "v0.11.5"
+  FIRMWARE_TAG: "v0.11.6"
   FIRMWARE_ARM64_KERNEL_SHA256: "e45e1f6083d1ed45db6647b422e32b6ae6dc54de7b8190b7b97744fb293412e3"
-  FIRMWARE_ARM64_INITRD_SHA256: "619a24dcbb5e53c3659ff176785d71d1b8a3f02b0ebf5a417e0952bb83b796dd"
+  FIRMWARE_ARM64_INITRD_SHA256: "7f3dfb81c3980dbfc0dafce4c5400a31c2878410e7b0f9aff3e7eda28d0ba865"
   FIRMWARE_AMD64_KERNEL_SHA256: "40f620bc8c93d952e57dd8dfc0f94fca1759d192a4fc4a260705d50ca378559c"
-  FIRMWARE_AMD64_INITRD_SHA256: "2dc0159f1ee6f63474d0066285a5de5c20adea1cd808f90e6c4bf2035cc3cf78"
+  FIRMWARE_AMD64_INITRD_SHA256: "f18faeff4ac545417d3353feeedc2d2edefe42518234cdb85aa02e749ff138df"
 
 permissions:
   contents: read
