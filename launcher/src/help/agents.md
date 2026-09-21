@@ -71,7 +71,7 @@ prints nothing.
 Use `ark`. `ark devices` lists the emulator with its locator, and
 `ark -d emulator:PORT status` shows its state. A fresh emulator has a
 self-signed identity; `ark enroll` gives it an attested one through a browser
-login at the Ark Hub, then `ark pair` and `ark unlock` need the owner's phone.
+login at Ark Hub, then `ark pair` and `ark unlock` need the owner's phone.
 The firmware inside the emulator is the build bundled with this app.
 `ark firmware update` is unsupported on an emulator; `ark-emulator --version`
 names the bundled build, and a newer emulator release carries newer firmware.

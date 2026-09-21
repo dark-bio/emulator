@@ -23,8 +23,9 @@ pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos\n
      An emulated Ark is the real firmware running in QEMU behind a small window \
      that stands in for the device's face. It is not a vault, since everything \
      lives in one plain disk image on this computer, so real data belongs on \
-     hardware. Talk to it with `ark`, exactly as you would to hardware, where \
-     the owner approves on their phone.";
+     hardware. Talk to it with `ark` from https://github.com/dark-bio/cli, \
+     exactly as you would to hardware, where the owner approves on their phone \
+     in Ark Companion.";
 
 /// Longest wait for a machine, in seconds. One number for the whole tool, so
 /// there is one to remember, and it is generous enough to cover a boot with no
