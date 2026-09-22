@@ -84,10 +84,16 @@ emulated Ark exactly as it talks to hardware:
 ark -d emulator:18181 status
 ```
 
+A fresh emulator has a self-signed identity. `ark enroll` prints the Ark Hub
+address that gives it an attested one, valid for 30 days; after that,
+`ark-emulator stop`, `wipe` and `start` give a fresh device to enroll again.
+
 `ark-emulator --help` lists every command and option, and `ark-emulator help`
-names the reference topics. Scripts and AI agents should read
-`ark-emulator help agents` first, then `ark help agents` before driving the Ark
-itself. Apps to run on an emulator, in Rust, Go, C and Python, are at
+names the reference topics, whose sources in
+[`launcher/src/help`](launcher/src/help) read the same on GitHub. AI agents
+should read [`ark-emulator help agents`](launcher/src/help/agents.md) first,
+then `ark help agents` before driving the Ark itself. Apps to run on an
+emulator, in Rust, Go, C and Python, are at
 [examples](https://github.com/dark-bio/examples). Pairing and unlocking happen
 in Ark Companion, on
 [iOS](https://apps.apple.com/app/id6751324700) or

@@ -147,7 +147,7 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
     let contract = contract(path.strip_prefix("ark-emulator").unwrap_or(&path).trim());
     let footer = footer(theme, &contract);
     let closing = "Output is formatted for reading; --json keeps complete, exact values.
-Scripts and AI agents: read `ark-emulator help agents` first.
+AI agents: read `ark-emulator help agents` first.
 Topics: agents, output, images, registry.";
     let closing = closing
         .lines()
