@@ -115,7 +115,8 @@ pub(crate) fn suppress_child_console(_cmd: &mut Command) {}
 pub(crate) fn attach_console() {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_UNKNOWN, GetFileType,
+        OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
         ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
@@ -128,16 +129,29 @@ pub(crate) fn attach_console() {
     // are the nulls CreateFileW documents as "no security attributes" and "no
     // template", and a handle is only ever handed back to Win32.
     unsafe {
-        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
-            return;
-        }
-        for (stream, device) in [
+        // AttachConsole can overwrite inherited pipes and files unless the
+        // parent used STARTF_USESTDHANDLES, so save them before attaching
+        let streams = [
             (STD_INPUT_HANDLE, "CONIN$"),
             (STD_OUTPUT_HANDLE, "CONOUT$"),
             (STD_ERROR_HANDLE, "CONOUT$"),
-        ] {
-            // A stream that already has a handle was redirected, and pointing
-            // it at the console would send it somewhere it was not asked to go.
+        ]
+        .map(|(stream, device)| {
+            let handle = GetStdHandle(stream);
+            let inherited = (!handle.is_null()
+                && handle != INVALID_HANDLE_VALUE
+                && GetFileType(handle) != FILE_TYPE_UNKNOWN)
+                .then_some(handle);
+            (stream, device, inherited)
+        });
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for (stream, device, inherited) in streams {
+            if let Some(handle) = inherited {
+                SetStdHandle(stream, handle);
+                continue;
+            }
             let held = GetStdHandle(stream);
             if !held.is_null() && held != INVALID_HANDLE_VALUE {
                 continue;

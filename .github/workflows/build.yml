@@ -271,7 +271,7 @@ jobs:
 
       - name: Test Windows command entry point
         if: runner.os == 'Windows'
-        run: cargo test --release --locked -p launcher --test windows_cli
+        run: cargo test --release --locked -p launcher --test cli --test windows_cli
 
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
