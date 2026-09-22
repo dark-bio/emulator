@@ -68,16 +68,26 @@ use **Open** or **New** in that window to choose one.
 ## Command line
 
 The app's executable is `ark-emulator`, and it manages emulators without
-opening a window. The Homebrew cask and the `.deb` put it on your `PATH`; from
-a portable build, run the executable inside the app.
+opening a window. The Homebrew cask, Windows installer and `.deb` put the
+command on your `PATH`. Open a new terminal after installing on Windows.
 
-On Windows, use `./ark-emulator.ps1 list` in PowerShell. The script waits for
-the command, preserves terminal colors, and returns its exit code. Keep it
-beside the executable (`Ark Emulator.exe` in the portable ZIP,
-`ark-emulator.exe` in an installation). Windows may require a downloaded
-script to be unblocked or permitted by your PowerShell execution policy.
-For pipelines, call the executable directly, such as
-`& './Ark Emulator.exe' --json list | ConvertFrom-Json` in the portable ZIP.
+On Windows, `ark-emulator` runs the bundled `bin\ark-emulator.cmd` in
+PowerShell or Command Prompt. It waits for the command, preserves terminal
+colors, and returns its exit code. Installation adds the `bin` directory to
+your user PATH; uninstalling removes that entry. No administrator rights or
+PowerShell execution policy changes are needed.
+
+For a portable Windows ZIP, keep the `bin` folder beside `Ark Emulator.exe`
+and run this from the extracted emulator folder:
+
+```powershell
+.\bin\ark-emulator.cmd list
+```
+
+You can add that `bin` directory to your user PATH manually for the shorter
+`ark-emulator` command. The launcher also works in PowerShell pipelines,
+such as `ark-emulator --json list | ConvertFrom-Json`. On macOS and Linux,
+run the executable inside a portable build directly.
 
 ```sh
 ark-emulator start        # boot one, and print its locator once it is ready

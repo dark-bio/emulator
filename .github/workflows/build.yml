@@ -269,9 +269,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/fetch-firmware.sh
 
-      - name: Test Windows PowerShell entry point
+      - name: Test Windows command entry point
         if: runner.os == 'Windows'
-        run: cargo test --release --locked -p launcher --test powershell
+        run: cargo test --release --locked -p launcher --test windows_cli
 
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
@@ -398,9 +398,9 @@ jobs:
         shell: pwsh
         run: |
           $portableDir = "target/release/portable/Ark Emulator"
-          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $portableDir "bin") | Out-Null
           Copy-Item "target/release/ark-emulator.exe" (Join-Path $portableDir "Ark Emulator.exe")
-          Copy-Item ".github/packaging/windows/ark-emulator.ps1" $portableDir
+          Copy-Item ".github/packaging/windows/ark-emulator.cmd" (Join-Path $portableDir "bin")
           Copy-Item "target/release/qemu-system-guest.exe" $portableDir
           Copy-Item "target/release/qemu-img.exe" $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
@@ -554,6 +554,11 @@ jobs:
               throw "no Ark Emulator.exe inside the portable zip"
           }
           .github/scripts/smoke-windows.ps1 -Executable $exe.FullName
+
+      - name: Test Windows installer PATH setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/smoke-windows-installer.ps1 -Installer (Get-Item dist/*.exe).FullName
 
       - name: Upload the smoke test log
         if: failure()

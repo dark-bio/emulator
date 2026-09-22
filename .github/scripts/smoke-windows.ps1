@@ -1,8 +1,7 @@
 # smoke-windows.ps1: the Windows half of smoke-unix.sh; see that script's header.
 #
-# Calls the packaged PowerShell entry point in a child shell, so its inherited
-# stdout and stderr can be captured separately. The command waits for readiness
-# while the emulator it starts keeps running.
+# Calls the packaged command entry point and captures stdout and stderr separately.
+# The command waits for readiness while the emulator it starts keeps running.
 #
 #   pwsh .github/scripts/smoke-windows.ps1 -Executable <path> [-Arguments ...]
 #
@@ -23,11 +22,10 @@ $events  = [IO.Path]::ChangeExtension($log, ".events.log")
 if (-not (Test-Path $Executable)) {
     throw "$Executable does not exist"
 }
-$wrapper = Join-Path (Split-Path $Executable) "ark-emulator.ps1"
+$wrapper = Join-Path (Split-Path $Executable) "bin/ark-emulator.cmd"
 if (-not (Test-Path $wrapper)) {
     throw "$wrapper does not exist"
 }
-$powershell = (Get-Process -Id $PID).Path
 
 function Write-Log {
     foreach ($file in @($log, $events)) {
@@ -39,7 +37,7 @@ function Write-Log {
 
 # Runs one command and records its streams before inspecting the exit code.
 function Invoke-Emulator([string[]]$commandArgs, [switch]$Append) {
-    & $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper @commandArgs 1> "$log.part" 2> "$events.part"
+    & $wrapper @commandArgs 1> "$log.part" 2> "$events.part"
     $status = $LASTEXITCODE
     foreach ($pair in @(@($log, "$log.part"), @($events, "$events.part"))) {
         if (Test-Path $pair[1]) {
@@ -70,7 +68,7 @@ try {
     $document = Get-Content $log -Raw | ConvertFrom-Json
     if ($document.error.code -ne "usage") { throw "a usage error lost its JSON result" }
 
-    $helpText = & $Executable help start | Out-String
+    $helpText = & $wrapper help start | Out-String
     if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'Requires:') {
         throw "help could not be read through a PowerShell pipeline"
     }

@@ -4,7 +4,13 @@
     "resources": {
       "firmware/": "firmware/",
       "qemu-libs/": "qemu-libs/",
-      "../.github/packaging/windows/ark-emulator.ps1": "ark-emulator.ps1"
+      "../.github/packaging/windows/ark-emulator.cmd": "bin/ark-emulator.cmd"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../.github/packaging/windows/hooks.nsh"
+      }
     }
   }
 }
