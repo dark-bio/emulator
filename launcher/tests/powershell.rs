@@ -15,13 +15,20 @@ use std::process::Command;
 /// The script preserves arguments, waits for output, and returns the application's exit code.
 #[test]
 fn test_powershell_waits_and_preserves_arguments_and_exit_codes() {
+    for executable in ["ark-emulator.exe", "Ark Emulator.exe"] {
+        check_layout(executable);
+    }
+}
+
+/// Run the forwarding checks with the executable name used by one Windows package.
+fn check_layout(executable: &str) {
     let install = tempfile::Builder::new()
         .prefix("Ark Emulator café ")
         .tempdir()
         .unwrap();
     fs::copy(
         env!("CARGO_BIN_EXE_ark-emulator"),
-        install.path().join("ark-emulator.exe"),
+        install.path().join(executable),
     )
     .unwrap();
     let script = install.path().join("ark-emulator.ps1");
@@ -42,8 +49,15 @@ fn test_powershell_waits_and_preserves_arguments_and_exit_codes() {
                 .unwrap()
         };
         let help = invoke(&["help", "start"]);
-        assert_eq!(help.status.code(), Some(0), "{shell}");
-        assert!(String::from_utf8_lossy(&help.stdout).contains("Requires:"));
+        assert_eq!(
+            help.status.code(),
+            Some(0),
+            "{shell}: {executable}: {help:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&help.stdout).contains("Requires:"),
+            "{shell}: {executable}: {help:?}"
+        );
 
         for argument in [
             "",
@@ -54,7 +68,11 @@ fn test_powershell_waits_and_preserves_arguments_and_exit_codes() {
             "space and slash\\",
         ] {
             let output = invoke(&["--json", "list", argument]);
-            assert_eq!(output.status.code(), Some(2), "{shell}: {argument}");
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{shell}: {executable}: {argument:?}: {output:?}"
+            );
             let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(document["error"]["code"], "usage");
             assert!(

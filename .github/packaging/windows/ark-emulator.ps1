@@ -2,21 +2,31 @@
 # returns its exit code. Compatible with Windows PowerShell 5.1 and PowerShell 7.
 # PowerShell pipelines should invoke the executable directly to capture output.
 
-$start = New-Object System.Diagnostics.ProcessStartInfo
-$start.FileName = Join-Path $PSScriptRoot 'ark-emulator.exe'
-$start.UseShellExecute = $false
-$start.WorkingDirectory = $PWD.ProviderPath
+$start = @{
+    FilePath = Join-Path $PSScriptRoot 'ark-emulator.exe'
+    WorkingDirectory = $PWD.ProviderPath
+    NoNewWindow = $true
+    PassThru = $true
+    ErrorAction = 'Stop'
+}
+if (-not (Test-Path -LiteralPath $start.FilePath -PathType Leaf)) {
+    $start.FilePath = Join-Path $PSScriptRoot 'Ark Emulator.exe'
+}
 
 # Windows splits a command line string. Double backslashes before quotes and
 # the closing quote so empty arguments, embedded quotes and trailing slashes survive.
-$start.Arguments = ($args | ForEach-Object {
-    '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
-}) -join ' '
+if ($args.Count) {
+    $start.ArgumentList = ($args | ForEach-Object {
+        '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+    }) -join ' '
+}
 
-$process = New-Object System.Diagnostics.Process
-$process.StartInfo = $start
+$process = $null
 try {
-    [void]$process.Start()
+    # -NoNewWindow explicitly inherits standard handles, including on Windows PowerShell 5.1
+    $process = Start-Process @start
+    # Cache the handle before waiting so Windows PowerShell 5.1 retains the exit code
+    $null = $process.Handle
     # Start-Process -Wait also waits for the emulator that a start leaves running
     $process.WaitForExit()
     exit $process.ExitCode
@@ -33,5 +43,5 @@ catch {
     exit 1
 }
 finally {
-    $process.Dispose()
+    if ($null -ne $process) { $process.Dispose() }
 }
