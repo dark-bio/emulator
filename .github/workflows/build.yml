@@ -269,6 +269,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/fetch-firmware.sh
 
+      - name: Test Windows PowerShell entry point
+        if: runner.os == 'Windows'
+        run: cargo test --release --locked -p launcher --test powershell
+
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
         # clone works: tauri-build validates externalBin paths and resource globs
@@ -279,7 +283,13 @@ jobs:
         # it into the .dmg, which is the only moment the copy inside the image
         # can be given a ticket. It stops there and never notarizes the .dmg,
         # which is the next step's job.
-        run: cargo tauri build --config launcher/tauri.release.conf.json --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          configs=(--config launcher/tauri.release.conf.json)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            configs+=(--config .github/packaging/windows/tauri.conf.json)
+          fi
+          cargo tauri build "${configs[@]}" --bundles ${{ matrix.bundles }} -- --locked
 
       - name: Notarize and staple the disk image
         # The .app is already done, by the build. A .dmg is assessed on its own
@@ -389,7 +399,8 @@ jobs:
         run: |
           $portableDir = "target/release/portable/Ark Emulator"
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-          Copy-Item "target/release/ark-emulator.exe" (Join-Path $portableDir "Ark Emulator.exe")
+          Copy-Item "target/release/ark-emulator.exe" $portableDir
+          Copy-Item ".github/packaging/windows/ark-emulator.ps1" $portableDir
           Copy-Item "target/release/qemu-system-guest.exe" $portableDir
           Copy-Item "target/release/qemu-img.exe" $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
@@ -538,9 +549,9 @@ jobs:
         shell: pwsh
         run: |
           Expand-Archive -Path (Get-Item dist/*.zip).FullName -DestinationPath unpacked
-          $exe = Get-ChildItem unpacked -Recurse -Filter "Ark Emulator.exe" | Select-Object -First 1
+          $exe = Get-ChildItem unpacked -Recurse -Filter "ark-emulator.exe" | Select-Object -First 1
           if (-not $exe) {
-              throw "no Ark Emulator.exe inside the portable zip"
+              throw "no ark-emulator.exe inside the portable zip"
           }
           .github/scripts/smoke-windows.ps1 -Executable $exe.FullName
 
