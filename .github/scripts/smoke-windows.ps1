@@ -1,9 +1,7 @@
 # smoke-windows.ps1: the Windows half of smoke-unix.sh; see that script's header.
 #
-# Start-Process rather than calling the executable, because a release build is
-# linked as a GUI app and the shell does not wait for one of those. It also
-# refuses to redirect stdout and stderr to the same path, which is why the
-# result document and the events land in two files.
+# Calls the packaged command entry point and captures stdout and stderr separately.
+# The command waits for readiness while the emulator it starts keeps running.
 #
 #   pwsh .github/scripts/smoke-windows.ps1 -Executable <path> [-Arguments ...]
 #
@@ -24,6 +22,10 @@ $events  = [IO.Path]::ChangeExtension($log, ".events.log")
 if (-not (Test-Path $Executable)) {
     throw "$Executable does not exist"
 }
+$wrapper = Join-Path (Split-Path $Executable) "bin/ark-emulator.cmd"
+if (-not (Test-Path $wrapper)) {
+    throw "$wrapper does not exist"
+}
 
 function Write-Log {
     foreach ($file in @($log, $events)) {
@@ -33,21 +35,10 @@ function Write-Log {
     Write-Host "----- end of logs -----"
 }
 
-# Runs one command of the emulator's own and answers with its exit code, having
-# written its result and its events where Write-Log can find them. The wait is
-# on that one process: -Wait would also wait for its descendants, and `start`
-# leaves the emulator it booted running on purpose.
+# Runs one command and records its streams before inspecting the exit code.
 function Invoke-Emulator([string[]]$commandArgs, [switch]$Append) {
-    $startArgs = @{
-        FilePath               = $Executable
-        ArgumentList           = $commandArgs
-        PassThru               = $true
-        NoNewWindow            = $true
-        RedirectStandardOutput = "$log.part"
-        RedirectStandardError  = "$events.part"
-    }
-    $proc = Start-Process @startArgs
-    $proc.WaitForExit()
+    & $wrapper @commandArgs 1> "$log.part" 2> "$events.part"
+    $status = $LASTEXITCODE
     foreach ($pair in @(@($log, "$log.part"), @($events, "$events.part"))) {
         if (Test-Path $pair[1]) {
             if ($Append) { Get-Content $pair[1] | Add-Content $pair[0] }
@@ -55,7 +46,7 @@ function Invoke-Emulator([string[]]$commandArgs, [switch]$Append) {
             Remove-Item $pair[1] -ErrorAction SilentlyContinue
         }
     }
-    return $proc.ExitCode
+    return $status
 }
 
 # The emulator outlives this script, so a failure past the start has to take it
@@ -65,6 +56,22 @@ $port = ""
 $started = ""
 try {
     New-Item -ItemType File -Force -Path $log, $events | Out-Null
+
+    # Desktop launches must still open without a console window
+    $bytes = [IO.File]::ReadAllBytes((Resolve-Path $Executable))
+    $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+    $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+    if ($subsystem -ne 2) { throw "the desktop executable is not a GUI application" }
+
+    $status = Invoke-Emulator @("--json", "list", "--bogus")
+    if ($status -ne 2) { throw "a usage error did not return exit code 2" }
+    $document = Get-Content $log -Raw | ConvertFrom-Json
+    if ($document.error.code -ne "usage") { throw "a usage error lost its JSON result" }
+
+    $helpText = & $wrapper help start | Out-String
+    if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'Requires:') {
+        throw "help could not be read through a PowerShell pipeline"
+    }
 
     Write-Host "starting $Executable"
     $startArgs = @("start", "--no-input", "--json", "--timeout", "$timeout") + $Arguments

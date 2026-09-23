@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "bundle": {
+    "resources": {
+      "firmware/": "firmware/",
+      "qemu-libs/": "qemu-libs/",
+      "../.github/packaging/windows/ark-emulator.cmd": "bin/ark-emulator.cmd"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../.github/packaging/windows/hooks.nsh"
+      }
+    }
+  }
+}

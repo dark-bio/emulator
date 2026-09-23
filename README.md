@@ -24,7 +24,7 @@ include QEMU and ArkOS, so you can launch the app without configuring either.
 | Platform | Installer | Portable version |
 |---|---|---|
 | macOS | `.dmg` | Unzip the `.zip` and open the app |
-| Windows | `.exe` | Unzip the `.zip` and run `Ark Emulator.exe` |
+| Windows | `.exe` | Unzip the `.zip` and run `ark-emulator.exe` |
 | Linux | `.deb` | Make the `.AppImage` executable and run it |
 
 On macOS, you can also install with Homebrew:
@@ -67,15 +67,20 @@ use **Open** or **New** in that window to choose one.
 
 ## Command line
 
-The app's executable is `ark-emulator`, and it manages emulators without
-opening a window. The Homebrew cask and the `.deb` put it on your `PATH`; from
-a portable build, run the executable inside the app.
+Use `ark-emulator` to manage emulators without opening a window. Installing
+with Homebrew, the Windows installer or the `.deb` makes the command
+available in your terminal. On Windows, open a new PowerShell or Command
+Prompt window after installing.
 
 ```sh
 ark-emulator start        # boot one, and print its locator once it is ready
 ark-emulator list         # show what is running on this computer
 ark-emulator stop         # shut it down, the way closing its window does
 ```
+
+For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
+`ark-emulator` from the extracted folder. On macOS and Linux, run the
+executable inside the portable build directly.
 
 Hand the locator to [`ark`](https://github.com/dark-bio/cli), which talks to an
 emulated Ark exactly as it talks to hardware:
