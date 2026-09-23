@@ -74,6 +74,7 @@ mod registry;
 mod settings;
 mod style;
 mod verbs;
+mod webview;
 
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -222,6 +223,7 @@ fn main() {
         .unwrap_or_default();
     let hw_addr = format!("window.__HW_ADDR__ = {hw_addr:?};");
     tauri::Builder::default()
+        .plugin(webview::plugin())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("hw-addr")
                 .js_init_script(hw_addr)

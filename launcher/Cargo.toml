@@ -14,7 +14,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+# Native webview bindings track Tauri's minor release. Revisit together by 2026-12-01.
+tauri = { version = "~2.11", features = ["macos-private-api"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 anyhow = "1"
@@ -41,6 +42,9 @@ tempfile = "3"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+# These bindings match Tauri's webview handle. Revisit with Tauri by 2026-12-01.
+webview2-com = "0.38"
+windows-core = "0.61"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

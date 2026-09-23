@@ -184,6 +184,8 @@ fn open(app: &AppHandle, report: &str) -> tauri::Result<()> {
         .title("Ark Emulator")
         .inner_size(WIDTH, HEIGHT)
         .resizable(false)
+        .zoom_hotkeys_enabled(false)
+        .devtools(cfg!(debug_assertions))
         .maximizable(false)
         .decorations(false)
         .transparent(true)
