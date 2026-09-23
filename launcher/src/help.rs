@@ -214,10 +214,10 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
     let (requires, time, prints, exits, examples) = match path {
         "start" => (
             "a free loopback port from 18181 up, or --port; a source build needs --kernel and --initrd",
-            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; the device window opens in a process of its own",
+            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; a separate process opens the device window unless --headless is set; an already running image keeps its current mode",
             "locator, image, created, started, environment, ready, expires; JSON adds port, path, name, serial and log",
             "0 ready; 1 image, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
-            "ark-emulator start\nark-emulator start --env develop --image ~/arks/dev.ark --json",
+            "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
         ),
         "list" => (
             "nothing; no registry means no emulators",
@@ -263,10 +263,10 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
         ),
         _ => (
             "nothing on a packaged build; a source build needs --kernel and --initrd and a QEMU on PATH",
-            "the window opens at once; the device accepts clients about 10 s later with hardware acceleration, minutes without",
+            "runs in the foreground; --headless opens no window and never prompts; the device accepts clients after about 10 s with hardware acceleration, minutes without; --timeout does not limit this run",
             "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
-            "0 window closed; 1 could not start; 2 usage",
-            "ark-emulator\nark-emulator --env develop --image ~/arks/dev.ark",
+            "0 stopped; 1 startup or QEMU failure; 2 usage; 130/143 interrupted, device stopped",
+            "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
         ),
     };
     [

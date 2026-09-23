@@ -240,3 +240,56 @@ fn test_completions_are_shell_text_even_under_json() {
     assert!(text.contains("ark-emulator"), "{text}");
     assert!(!text.trim_start().starts_with('{'), "{text}");
 }
+
+/// Headless is a boot option in both modes, never a management option.
+#[test]
+fn test_headless_option_placement_and_help() {
+    for arguments in [vec!["--help"], vec!["start", "--help"]] {
+        let output = run(&arguments);
+        assert!(output.status.success());
+        assert!(stdout(&output).contains("--headless"));
+    }
+    for arguments in [
+        vec!["--headless", "list"],
+        vec!["list", "--headless"],
+        vec!["start", "--headless", "--kernel", "kernel"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(stderr(&output).starts_with("error[usage]:"));
+    }
+}
+
+/// Startup failures in headless mode use CLI errors without touching a display.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_headless_startup_error_without_a_display_or_no_input_flag() {
+    let directory = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        directory.path().join("bio.dark.emulator"),
+        "not a directory",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
+        .args(["--headless", "--json"])
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_DATA_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let events: Vec<serde_json::Value> = stderr(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let error = events
+        .iter()
+        .find(|event| event["event"] == "error")
+        .unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not create the data directory")
+    );
+}

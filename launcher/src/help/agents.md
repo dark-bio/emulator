@@ -14,9 +14,9 @@ Read `ark help agents` before driving the Ark itself.
 - `ark-emulator start` boots the remembered image, the same device the
   owner opens by double-click, and returns once the firmware accepts clients.
   It prints the locator to pass to `ark -d`. The emulator runs in a process
-  of its own and shows the device face in a window, so it needs a window
-  system, though the window may stay covered, the screen locked or the
-  display dark. Pass --image for a separate device, and --env for the cloud
+  of its own. Pass --headless to run without a window or display server;
+  otherwise it shows the device face. A covered window or locked screen
+  does not interrupt the device. Pass --image for a separate device, and --env for the cloud
   environment of an image created on this run; an existing image keeps the
   environment it was created with. Use --json for exact values.
 - Expect seconds with hardware acceleration and minutes without;
@@ -24,7 +24,8 @@ Read `ark help agents` before driving the Ark itself.
   it. --timeout bounds the wait. On timeout the emulator keeps booting, the
   exit is 7, and `ark-emulator list` shows when it is ready.
 - start is idempotent. An image that is already booted is waited for and
-  reported with started false and exit 0. A second device is asked for by
+  reported with started false and exit 0, keeping its current window mode.
+  A second device is asked for by
   naming a second image; each runs on its own port from 18181 up.
 - `ark-emulator stop` shuts the only running emulator down the way closing
   its window does. With several running, name one as `ark -d` would, by its
@@ -33,9 +34,12 @@ Read `ark help agents` before driving the Ark itself.
   device, and `wipe PATH --yes` another one. The file stays, so the next
   start boots a factory-fresh device that needs `ark enroll`, `ark pair` and
   `ark unlock` again. The reset loop is stop, wipe, start.
-- Nothing else asks a question, and no command opens a window of its own. A
-  bare `ark-emulator` opens the device window and may ask where to keep the
-  image; do not use it from a script.
+- No management command opens a window of its own. A bare `ark-emulator`
+  opens the device window and may ask where to keep the image.
+  `ark-emulator --headless` runs in the foreground without questions. It
+  uses the same image defaults as start, ignores the saved autostart toggle,
+  and exits on failure. Ctrl-C or SIGTERM stops that device and exits 130
+  or 143. Interrupting a start command only ends its readiness wait.
 
 ## Reading results
 
@@ -54,7 +58,7 @@ and a nonempty CI turns the note off.
 A start without hardware acceleration takes minutes, so run it in the
 background and follow stderr, without starting another:
 
-    ark-emulator start --json > result.json 2> events.log &
+    ark-emulator start --headless --json > result.json 2> events.log &
     tail -n 2 events.log
     wait $!
 
@@ -70,7 +74,9 @@ and says what to fix; its
 JSON also carries where everything lives. Every emulator writes its launcher
 log to a file under the data directory, named by port; start --json and
 list --json name it, and a failed start quotes its tail. The device itself
-prints nothing.
+prints nothing in a packaged build. A foreground source build gives stdout
+to the guest console, including under --json; its stderr still carries
+JSON events. Use start --json when a result document is needed.
 
 ## After it boots
 

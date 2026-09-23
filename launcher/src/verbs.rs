@@ -381,7 +381,7 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
                     pending[0], global.timeout
                 ),
             )
-            .hint("close its window to shut it down"));
+            .hint("close its window, or interrupt its foreground headless process"));
         }
         std::thread::sleep(POLL);
     }
@@ -637,6 +637,9 @@ fn spawn(boot: &Boot, arch: GuestArch, image: &Path, address: SocketAddr) -> any
         .arg(address.port().to_string())
         .arg("--arch")
         .arg(arch.name());
+    if boot.headless {
+        command.arg("--headless");
+    }
     if let Some(env) = &boot.env {
         command.arg("--env").arg(env);
     }

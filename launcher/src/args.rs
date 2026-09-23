@@ -20,8 +20,8 @@ use crate::settings;
 
 /// What the tool is, which opens every help page.
 pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos\n\n\
-     An emulated Ark is the real firmware running in QEMU behind a small window \
-     that stands in for the device's face. It is not a vault, since everything \
+     An emulated Ark runs the real firmware in QEMU, with an optional window \
+     for the device's face. It is not a vault, since everything \
      lives in one plain disk image on this computer, so real data belongs on \
      hardware. Talk to it with `ark` from https://github.com/dark-bio/cli, \
      exactly as you would to hardware, where the owner approves on their phone \
@@ -153,6 +153,10 @@ fn parse_port(value: &str) -> Result<u16, String> {
 /// boots one in the background.
 #[derive(clap::Args)]
 pub(crate) struct Boot {
+    /// Run without a window or prompts
+    #[arg(long)]
+    pub(crate) headless: bool,
+
     /// Image to boot, created if missing
     // Read for this run only. It neither consults nor updates the settings
     // file, so a one-off boot from another image leaves the remembered choice
@@ -197,7 +201,8 @@ pub(crate) struct Boot {
 impl Boot {
     /// Whether any of these was typed.
     pub(crate) fn named(&self) -> bool {
-        self.image.is_some()
+        self.headless
+            || self.image.is_some()
             || self.env.is_some()
             || self.memory.is_some()
             || self.arch.is_some()

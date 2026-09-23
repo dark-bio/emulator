@@ -50,7 +50,10 @@ it lives, which lets two launchers agree on an image without anybody
 publishing a path. No path is ever published, since any page in any browser
 can read a loopback port.
 
-`ready` says the firmware has accepted a client. `env`, `name`, `serial` and
+The Rust launcher owns the hardware connection in both window modes.
+
+`ready` becomes true on the first nameplate and false when the hardware
+connection drops. `env`, `name`, `serial` and
 `expiry` are absent until the device has reported them, and they are what the
 launcher heard rather than anything it verified. Discovery is not identity; a
 handshake with the device is. The tool prints these under the names `ark
@@ -67,5 +70,6 @@ at once.
 A stop rides on the same heartbeat. The request is recorded against the entry,
 the launcher's next heartbeat is answered with `{"stop": true}`, and it shuts
 down the way closing its window does. Nothing signals a process or looks up a
-pid, so a stop that is never collected gives up after --timeout and says to
-close the window instead.
+pid, so a stop that is never collected gives up after --timeout. Close the
+device window or interrupt a foreground headless process when it cannot
+collect the request.

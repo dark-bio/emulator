@@ -37,6 +37,7 @@ use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::{log, trace};
+use crate::hardware::State;
 use crate::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 
 /// How often this emulator re-registers itself. It is the heartbeat keeping
@@ -52,9 +53,11 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// anything near this is not a registry.
 const MAX_RESPONSE: u64 = 1 << 20;
 
-/// This emulator's entry, as last published. Held here so the heartbeat thread
-/// and the nameplate command can both reach it.
+/// This emulator's entry, shared by the heartbeat and hardware controller.
 static ENTRY: OnceLock<Mutex<Instance>> = OnceLock::new();
+
+/// Serializes publication with withdrawal and prevents a stopped guest returning.
+static PUBLISHING: Mutex<bool> = Mutex::new(true);
 
 /// Address the registry is served on.
 fn registry_addr() -> SocketAddrV4 {
@@ -154,45 +157,25 @@ pub(crate) fn register(port: u16, disk: &Path) {
     });
 }
 
-/// Fold what the firmware has reported about itself into this emulator's entry
-/// and publish it. A claim left out is one that has not changed, matching the
-/// partial frames the firmware sends, so this merges rather than replaces.
-///
-/// The first of these also marks the entry ready: the guest accepts a client
-/// only once its hardware bus has a peer, and this arriving proves it does.
-#[tauri::command]
-pub(crate) fn nameplate(
-    env: Option<String>,
-    name: Option<String>,
-    serial: Option<String>,
-    expiry: Option<u64>,
-) {
+/// Copy the hardware state for the next heartbeat without doing network I/O.
+pub(crate) fn state(state: &State) {
     let Some(entry) = ENTRY.get() else {
         return;
     };
-    {
-        let mut entry = entry.lock().unwrap();
-        entry.ready = true;
-        // An empty name is a device whose name was cleared, which is a value
-        // rather than an absence, so it is stored as one.
-        if env.is_some() {
-            entry.env = env;
-        }
-        if name.is_some() {
-            entry.name = name.filter(|name| !name.is_empty());
-        }
-        if serial.is_some() {
-            entry.serial = serial;
-        }
-        if expiry.is_some() {
-            entry.expiry = expiry;
-        }
-    }
-    publish();
+    let mut entry = entry.lock().unwrap();
+    entry.ready = state.connected && state.nameplate.known;
+    entry.env = state.nameplate.env.clone();
+    entry.name = state.nameplate.name.clone();
+    entry.serial = state.nameplate.serial.clone();
+    entry.expiry = state.nameplate.expiry;
 }
 
 /// Send the current entry to the registry, and act on whatever comes back.
 fn publish() {
+    let publishing = PUBLISHING.lock().unwrap();
+    if !*publishing || crate::runtime::stopping() {
+        return;
+    }
     let Some(entry) = ENTRY.get() else {
         return;
     };
@@ -206,6 +189,7 @@ fn publish() {
     };
 
     if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+        drop(publishing);
         obey(&answer);
         return;
     }
@@ -215,9 +199,11 @@ fn publish() {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    match request("POST", "/v1/instances", Some(&body)) {
+    let answer = request("POST", "/v1/instances", Some(&body));
+    drop(publishing);
+    match answer {
         Ok(answer) => obey(&answer),
-        Err(e) => log!("[discovery] could not register: {e}"),
+        Err(err) => log!("[discovery] could not register: {err}"),
     }
 }
 
@@ -226,13 +212,18 @@ fn publish() {
 fn obey(answer: &[u8]) {
     if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
         log!("[discovery] asked to shut down");
-        crate::shut_down();
+        crate::runtime::shut_down(0);
     }
 }
 
 /// Withdraw this emulator from the registry. Best effort and quick: it runs
 /// while the window is closing, and the entry would expire on its own anyway.
 pub(crate) fn deregister() {
+    let mut publishing = PUBLISHING.lock().unwrap();
+    if !*publishing {
+        return;
+    }
+    *publishing = false;
     let Some(entry) = ENTRY.get() else {
         return;
     };

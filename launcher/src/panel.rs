@@ -27,22 +27,9 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::Boot;
-use crate::bundle::Firmware;
 use crate::disk::{self, Reason};
-use crate::qemu::{GuestArch, HostPort};
-use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY, ENVS, MIN_MEMORY, Settings};
-
-/// Everything the guest needs to be started, held until it is. Taken by the
-/// start, so a second press of the button has nothing to work with and no
-/// second QEMU can be spawned.
-pub(crate) struct Pending {
-    pub(crate) boot: Boot,
-    pub(crate) arch: GuestArch,
-    pub(crate) host_port: HostPort,
-    pub(crate) firmware: Firmware,
-    pub(crate) qemu_libs: Option<PathBuf>,
-}
+use crate::runtime::Pending;
+use crate::settings::{ENVS, MIN_MEMORY, Settings};
 
 /// What the panel reads and writes, behind one lock.
 pub(crate) struct Launcher {
@@ -135,15 +122,7 @@ impl Launcher {
     /// that never puts the form up.
     pub(crate) fn effective(&self) -> (u32, String) {
         let boot = self.pending.as_ref().map(|pending| &pending.boot);
-        let memory = boot
-            .and_then(|boot| boot.memory)
-            .or_else(|| self.settings.memory())
-            .unwrap_or(DEFAULT_MEMORY);
-        let env = boot
-            .and_then(|boot| boot.env.clone())
-            .or_else(|| self.settings.env().map(str::to_owned))
-            .unwrap_or_else(|| DEFAULT_ENV.to_owned());
-        (memory, env)
+        crate::runtime::effective(boot, &self.settings)
     }
 }
 
@@ -280,6 +259,10 @@ fn check(memory: u32, env: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Boot;
+    use crate::bundle::Firmware;
+    use crate::qemu::{GuestArch, HostPort};
+    use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY};
     use std::net::SocketAddr;
     use std::path::Path;
     use tempfile::TempDir;
@@ -288,6 +271,7 @@ mod tests {
     fn waiting(dir: &Path, memory: Option<u32>, env: Option<&str>) -> Launcher {
         let pending = Pending {
             boot: Boot {
+                headless: false,
                 image: None,
                 env: env.map(str::to_owned),
                 memory,

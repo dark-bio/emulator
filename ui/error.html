@@ -254,9 +254,7 @@
   </div>
 
   <script>
-    // Injected by the launcher before this script runs, the same way the device
-    // face receives __HW_ADDR__. Nothing is fetched and nothing is sent
-    // anywhere; copying is the user's decision.
+    // The launcher supplies this report before page scripts run
     const report = window.__REPORT__ || 'An unknown error occurred.';
 
     document.getElementById('report').textContent = report;

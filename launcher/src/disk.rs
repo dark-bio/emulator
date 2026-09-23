@@ -347,13 +347,13 @@ fn check_available(path: &Path, running: Option<&Path>, booted: &[Instance]) -> 
     let id = discovery::disk_id(path);
     if running.is_some_and(|running| discovery::disk_id(running) == id) {
         bail!(
-            "{} is running in this window. Stop this emulator before replacing its image.",
+            "{} is running in this process. Stop this emulator before replacing its image.",
             name_of(path)
         );
     }
     if discovery::booted(booted, path).is_some() {
         bail!(
-            "{} is already running in another window. Close that emulator or choose a different image.",
+            "{} is already running. Stop that emulator or choose a different image.",
             name_of(path)
         );
     }
@@ -416,12 +416,12 @@ mod tests {
         let err = check_available(&disk, None, &elsewhere)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("another window"), "{err}");
+        assert!(err.contains("already running"), "{err}");
 
         let err = check_available(&disk, Some(&disk), &[])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("this window"), "{err}");
+        assert!(err.contains("this process"), "{err}");
         assert!(check_available(&tmp.path().join("new.ark"), Some(&disk), &elsewhere).is_ok());
     }
 

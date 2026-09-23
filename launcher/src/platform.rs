@@ -44,6 +44,97 @@ use crate::diagnostics::{self, log};
 #[path = "macos_menu.rs"]
 mod macos_menu;
 
+/// Recognize a terminal interrupt also delivered directly to QEMU.
+#[cfg(unix)]
+pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    use tokio::signal::unix::SignalKind;
+    let signal = status.signal()?;
+    if signal == SignalKind::interrupt().as_raw_value() {
+        Some(130)
+    } else if signal == SignalKind::terminate().as_raw_value() {
+        Some(143)
+    } else {
+        None
+    }
+}
+
+/// Recognize Windows' exit status for an interrupted console process.
+#[cfg(windows)]
+pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
+    (status.code() == Some(0xc000013a_u32 as i32)).then_some(130)
+}
+
+/// Installed Unix interrupt and termination listeners.
+#[cfg(unix)]
+pub(crate) struct Signals {
+    /// Ctrl-C at a terminal or SIGINT from a supervisor.
+    interrupt: tokio::signal::unix::Signal,
+    /// Termination requested by a supervisor.
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    /// Install handlers while a Tokio executor is entered.
+    pub(crate) fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    /// Return the conventional exit code for the first shutdown signal.
+    pub(crate) async fn wait(mut self) -> i32 {
+        tokio::select! {
+            _ = self.interrupt.recv() => 130,
+            _ = self.terminate.recv() => 143,
+        }
+    }
+}
+
+/// Installed Windows console lifecycle listeners.
+#[cfg(windows)]
+pub(crate) struct Signals {
+    /// Ctrl-C at a terminal.
+    interrupt: tokio::signal::windows::CtrlC,
+    /// Ctrl-Break at a terminal.
+    terminate: tokio::signal::windows::CtrlBreak,
+    /// Closure of the attached console.
+    close: tokio::signal::windows::CtrlClose,
+    /// End of the current login session.
+    logoff: tokio::signal::windows::CtrlLogoff,
+    /// Shutdown of the host.
+    shutdown: tokio::signal::windows::CtrlShutdown,
+}
+
+#[cfg(windows)]
+impl Signals {
+    /// Install console handlers while a Tokio executor is entered.
+    pub(crate) fn new() -> std::io::Result<Self> {
+        use tokio::signal::windows;
+        Ok(Self {
+            interrupt: windows::ctrl_c()?,
+            terminate: windows::ctrl_break()?,
+            close: windows::ctrl_close()?,
+            logoff: windows::ctrl_logoff()?,
+            shutdown: windows::ctrl_shutdown()?,
+        })
+    }
+
+    /// Return the conventional exit code for the first console signal.
+    pub(crate) async fn wait(mut self) -> i32 {
+        tokio::select! {
+            _ = self.interrupt.recv() => 130,
+            _ = self.terminate.recv() => 143,
+            _ = self.close.recv() => 143,
+            _ = self.logoff.recv() => 143,
+            _ = self.shutdown.recv() => 143,
+        }
+    }
+}
+
 /// Install the platform's native actions for starting another emulator.
 #[cfg(target_os = "macos")]
 pub(crate) fn install_menus(app: &tauri::App) -> anyhow::Result<()> {
@@ -115,12 +206,12 @@ pub(crate) fn suppress_child_console(_cmd: &mut Command) {}
 pub(crate) fn attach_console() {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_UNKNOWN, GetFileType,
-        OPEN_EXISTING,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, FILE_TYPE_UNKNOWN,
+        GetFileType, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE, SetStdHandle,
+        ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
     // SAFETY: every call is a documented Win32 entry point called with the
@@ -144,6 +235,16 @@ pub(crate) fn attach_console() {
                 .then_some(handle);
             (stream, device, inherited)
         });
+        // A detached headless child has three NUL handles. Reattaching it
+        // would let closing the caller's console terminate the emulator.
+        if streams.iter().all(|(_, _, handle)| {
+            handle.is_some_and(|handle| {
+                let mut mode = 0;
+                GetFileType(handle) == FILE_TYPE_CHAR && GetConsoleMode(handle, &mut mode) == 0
+            })
+        }) {
+            return;
+        }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return;
         }

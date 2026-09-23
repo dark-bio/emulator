@@ -763,205 +763,26 @@
     </button>
   </div>
   <script type="module">
-    import { startBootAnimation } from './boot_anim.js';
+    import { mountDevice } from './device.js';
     import { mountSettings } from './settings.js';
 
-    // Identity of the emulated device, pushed by the firmware once it has
-    // booted and again whenever a claim changes, such as a rename or an
-    // onboarding. Frames are partial, so this is the accumulated picture rather
-    // than a copy of the last one. The socket below fills it in and the info
-    // tray draws it, so it is parked here between the two. Held rather than
-    // asked for on demand, since the tray can be opened long before the
-    // firmware is far enough along to answer.
+    // The latest complete nameplate from Rust, shared with the info tray
     const deviceInfo = { known: false, env: null, name: null, serial: null, expiry: null };
     let onDeviceInfo = () => { };
 
-    // Starts the local boot animation. Assigned by the hardware channel below,
-    // and called once there is a guest behind the device face, which is not
-    // necessarily when the page loads: the settings panel can still be gating
-    // the start.
-    let startBootLeds = () => { };
-
-    // Hardware channel: driver frames stream in from the firmware, reset-pin
-    // edges go out. Every /v1/hw message is wrapped in the bus envelope
-    //   { "d": "<driver>", "id": "<instance>", "payload": { ... } }
-    // Recognised tags are handled below; anything else is ignored.
-    (() => {
-      const pin = document.querySelector('.reset-pin');
-      const leds = [
+    mountDevice({
+      pin: document.querySelector('.reset-pin'),
+      leds: [
         document.querySelector('.led.bl'),
         document.querySelector('.led.tl'),
         document.querySelector('.led.tr'),
         document.querySelector('.led.br'),
-      ];
-
-      // Address of the /v1/hw bus, injected by the launcher before this script
-      // runs so the UI follows --host-addr. Falls back to the default for
-      // running the UI outside the launcher.
-      const HW_ADDR = window.__HW_ADDR__ ?? '127.0.0.1:18181';
-
-      // GPIO id the firmware watches for reset-button edges, paired with the
-      // carrier identity advertised below.
-      const BUTTON_PIN_ID = '5';
-
-      // GPIO id the firmware drives high once it has taken over the LEDs from
-      // its own boot sequence. Until we see this, the UI runs a local boot
-      // animation; after, it displays the colours streamed over /v1/hw.
-      const LED_SWITCH_PIN_ID = '22';
-
-      // Carrier identity the UI advertises when the firmware reads it at boot.
-      // Could be made configurable later to exercise other carriers.
-      const CARRIER_VERSION = 1;
-      const CARRIER_REVISION = 11;
-
-      // The wire carries raw sRGB floats out of the firmware (no clamping, no
-      // 0..255 quantization). The real device's LEDs are typically driven at
-      // ~10% of their max to look comfortably bright, so we boost 10x and
-      // scale to 0..255 for CSS: BRIGHTNESS = 10 * 255 = 2550. When a
-      // channel would clip past 255 the colour saturates and the excess grows
-      // the glow proportionally (e.g. 250% peak -> 2.5x blur + spread), so an
-      // overdriven LED looks roughly the way it would on hardware.
-      const BRIGHTNESS = 10 * 255;
-      const GLOW_BLUR = 0.6;   // vmin, at 100% brightness
-      const GLOW_SPREAD = 0.1; // vmin, at 100% brightness
-
-      function applyLeds(colors) {
-        for (let i = 0; i < 4; i++) {
-          const [r0, g0, b0] = colors[i] || [0, 0, 0];
-          const rScaled = r0 * BRIGHTNESS, gScaled = g0 * BRIGHTNESS, bScaled = b0 * BRIGHTNESS;
-          const peak = Math.max(rScaled, gScaled, bScaled);
-          const overflow = peak > 255 ? peak / 255 : 1;
-          const r = Math.min(255, rScaled);
-          const g = Math.min(255, gScaled);
-          const b = Math.min(255, bScaled);
-          leds[i].style.background = `rgb(${r}, ${g}, ${b})`;
-          leds[i].style.boxShadow =
-            `0 0 ${GLOW_BLUR * overflow}vmin ${GLOW_SPREAD * overflow}vmin ` +
-            `rgba(${r}, ${g}, ${b}, 0.55)`;
-        }
-      }
-
-      // Local boot animation runs until the firmware signals (via the led
-      // switch GPIO) that it has taken over the LEDs. Routes through applyLeds
-      // so the brightness/glow look matches firmware-driven frames. Restarted
-      // whenever the /v1/hw socket drops, which is our proxy for "firmware just
-      // rebooted". Covers clean reboots, crashes, and firmware process
-      // respawns equally, since none of them get to send a graceful signal
-      // first.
-      //
-      // It does not start on its own. The window can be on screen with the
-      // settings panel up and nothing booted behind it, and LEDs running a boot
-      // sequence for a device nobody has started yet would be a lie.
-      let bootMode = true;
-      let bootCtrl = null;
-      startBootLeds = () => {
-        if (!bootCtrl) bootCtrl = startBootAnimation(applyLeds);
-      };
-
-      let ws = null;
-      function connect() {
-        if (ws) return;
-        ws = new WebSocket(`ws://${HW_ADDR}/v1/hw`);
-        ws.onmessage = ev => {
-          try {
-            const env = JSON.parse(ev.data);
-            if (env.d === 'rgbled' && Array.isArray(env.payload?.colors)) {
-              // Ignore firmware LED frames until the led switch flips; the
-              // local boot animation owns the display until then.
-              if (!bootMode) applyLeds(env.payload.colors);
-            } else if (
-              env.d === 'switch' &&
-              env.id === LED_SWITCH_PIN_ID &&
-              env.payload?.level === 'high'
-            ) {
-              bootMode = false;
-              bootCtrl?.stop();
-            } else if (env.d === 'revbits' && env.payload?.op === 'read') {
-              // Firmware is asking what carrier it's running on; reply on
-              // the same (driver, instance) key with our configured identity.
-              ws.send(JSON.stringify({
-                d: 'revbits',
-                id: env.id,
-                payload: { version: CARRIER_VERSION, revision: CARRIER_REVISION },
-              }));
-            } else if (env.d === 'nameplate') {
-              // A frame carries only the claims that changed, so merge it
-              // in rather than replacing: a claim it leaves out keeps the
-              // value it already has.
-              const claims = env.payload ?? {};
-              for (const claim of ['env', 'name', 'serial', 'expiry']) {
-                if (Object.hasOwn(claims, claim)) {
-                  deviceInfo[claim] = claims[claim] ?? null;
-                }
-              }
-              deviceInfo.known = true;
-              onDeviceInfo();
-              // The launcher publishes this device to the registry that lets
-              // other tools find it, and this socket is the only place the
-              // claims arrive. Its first arrival is also what tells the
-              // launcher the firmware is up: the guest accepts no other client
-              // until this bus has a peer.
-              window.__TAURI__?.core.invoke('nameplate', claims).catch(() => { });
-            }
-            // Unrecognised driver tags no-op.
-          } catch { }
-        };
-        ws.onclose = () => {
-          ws = null;
-          // Treat a dropped /v1/hw socket as "firmware is rebooting": flip back
-          // into bootMode so firmware LED frames are ignored again, and kick
-          // off a fresh local animation. Guarded so the no-op case (initial
-          // connection refused while still in bootMode) doesn't stack
-          // animations.
-          if (!bootMode) {
-            bootMode = true;
-            bootCtrl = startBootAnimation(applyLeds);
-          }
-          setTimeout(connect, 1000);
-        };
-        ws.onerror = () => { try { ws.close(); } catch { } };
-      }
-      connect();
-
-      // The launcher keeps time for this page as well. WebKit stops the timers
-      // of a page it considers hidden, and the face is hidden whenever the
-      // screen is locked, the display is off or the window is covered, so the
-      // retry above never fires there. Each tick dials if there is no socket.
-      // A dial that is pending is left alone: QEMU's user networking holds it
-      // and delivers it once the guest listens, and abandoning it would hand
-      // the firmware a socket nobody is behind.
-      window.__TAURI__?.event.listen('hw-dial', connect);
-
-      function sendButton(edge) {
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ d: 'button', id: BUTTON_PIN_ID, payload: { edge } }));
-        }
-      }
-
-      // Pointer capture keeps the press "sticky" -- once the user mousedowns
-      // on the pin, the .pressed state (and the firmware's view of the button)
-      // stays until mouseup anywhere, even if the cursor leaves the moving
-      // hitbox. `pressed` guards against duplicate edges from pointerup +
-      // pointercancel firing on the same release.
-      let pressed = false;
-      pin.addEventListener('pointerdown', e => {
-        pin.setPointerCapture(e.pointerId);
-        pin.classList.add('pressed');
-        if (!pressed) {
-          pressed = true;
-          sendButton('falling');
-        }
-      });
-      const release = () => {
-        pin.classList.remove('pressed');
-        if (pressed) {
-          pressed = false;
-          sendButton('rising');
-        }
-      };
-      pin.addEventListener('pointerup', release);
-      pin.addEventListener('pointercancel', release);
-    })();
+      ],
+      onNameplate: nameplate => {
+        Object.assign(deviceInfo, nameplate);
+        onDeviceInfo();
+      },
+    });
 
     // Info tray: a notch on the device's bottom edge that opens into a strip
     // naming what the emulated device is running on. The disk path is fetched
@@ -1018,7 +839,11 @@
       // no trusted claims, hence no serial and no expiry to show, and one the
       // user has not named yet has no name.
       function renderDevice() {
-        if (!deviceInfo.known) return;
+        if (!deviceInfo.known) {
+          for (const key of ['name', 'serial', 'expires', 'env']) rows[key].row.hidden = true;
+          syncRows();
+          return;
+        }
         // An empty name is one the user cleared, which reads the same as
         // never having set one.
         rows.name.row.hidden = !deviceInfo.name;
@@ -1059,7 +884,6 @@
         gear: tray.querySelector('.info-gear'),
         onGuest: () => {
           loadDisk();
-          startBootLeds();
         },
       });
     })();
