@@ -15,6 +15,7 @@
         "width": 340,
         "height": 459,
         "resizable": false,
+        "zoomHotkeysEnabled": false,
         "decorations": false,
         "shadow": false,
         "transparent": true,

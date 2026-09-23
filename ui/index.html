@@ -13,6 +13,15 @@
 
     * {
       box-sizing: border-box;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    input,
+    textarea,
+    .opt-disk {
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     html,
@@ -40,10 +49,6 @@
      size is still solved against both axes so an off-ratio window shrinks the
      scene rather than overflowing it. */
     .scene {
-      /* No text on the device face is there to be copied, and the panel's own
-       background is a drag handle: without this, dragging the window from it
-       highlights the labels instead. */
-      user-select: none;
       --aspect-w: 220;
       --aspect-h: 297;
       --gutter: 2.9vmin;
@@ -68,7 +73,6 @@
       width: 100%;
       height: 100%;
       -webkit-user-drag: none;
-      user-select: none;
     }
 
     /* LED dots: 9/220 = 4.09% across; 23/220 = 10.45% from each corner edge.
@@ -152,7 +156,6 @@
       height: 100%;
       pointer-events: none;
       -webkit-user-drag: none;
-      user-select: none;
     }
 
     /* Info tray. Closed it tucks --tuck under the device and reads as a notch
@@ -392,19 +395,6 @@
     .panel.open {
       opacity: 1;
       visibility: visible;
-    }
-
-    .panel,
-    .panel * {
-      -webkit-user-select: none;
-      user-select: none;
-    }
-
-    .panel input,
-    .panel textarea,
-    .panel .opt-disk {
-      -webkit-user-select: text;
-      user-select: text;
     }
 
     /* Both name a device, and before the startup form is answered there is not
@@ -675,7 +665,7 @@
 <body>
   <div class="scene">
     <div class="device" data-tauri-drag-region>
-      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" data-tauri-drag-region />
+      <img class="device-img" src="assets/dark_bio_vault.svg" alt="Ark device" draggable="false" data-tauri-drag-region />
       <span class="led tl" data-tauri-drag-region></span>
       <span class="led tr" data-tauri-drag-region></span>
       <span class="led bl" data-tauri-drag-region></span>
@@ -769,7 +759,7 @@
       </button>
     </div>
     <button class="reset-pin" type="button" aria-label="reset button" title="Device reset button">
-      <img src="assets/sim_removal_tool.svg" alt="" />
+      <img src="assets/sim_removal_tool.svg" alt="" draggable="false" />
     </button>
   </div>
   <script type="module">
