@@ -15,20 +15,13 @@ use std::process::Command;
 /// The script preserves arguments, waits for output, and returns the application's exit code.
 #[test]
 fn test_windows_launcher_waits_and_preserves_arguments_and_exit_codes() {
-    for executable in ["ark-emulator.exe", "Ark Emulator.exe"] {
-        check_layout(executable);
-    }
-}
-
-/// Run the forwarding checks with the executable name used by one Windows package.
-fn check_layout(executable: &str) {
     let install = tempfile::Builder::new()
         .prefix("Ark Emulator café ")
         .tempdir()
         .unwrap();
     fs::copy(
         env!("CARGO_BIN_EXE_ark-emulator"),
-        install.path().join(executable),
+        install.path().join("ark-emulator.exe"),
     )
     .unwrap();
     fs::create_dir(install.path().join("bin")).unwrap();
@@ -58,14 +51,10 @@ fn check_layout(executable: &str) {
             command.env("NO_COLOR", "1").output().unwrap()
         };
         let help = invoke(&["help", "start"]);
-        assert_eq!(
-            help.status.code(),
-            Some(0),
-            "{shell}: {executable}: {help:?}"
-        );
+        assert_eq!(help.status.code(), Some(0), "{shell}: {help:?}");
         assert!(
             String::from_utf8_lossy(&help.stdout).contains("Requires:"),
-            "{shell}: {executable}: {help:?}"
+            "{shell}: {help:?}"
         );
 
         // PowerShell uses its legacy native argument rules for .cmd files
@@ -89,7 +78,7 @@ fn check_layout(executable: &str) {
             assert_eq!(
                 output.status.code(),
                 Some(2),
-                "{shell}: {executable}: {argument:?}: {output:?}"
+                "{shell}: {argument:?}: {output:?}"
             );
             let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(document["error"]["code"], "usage");

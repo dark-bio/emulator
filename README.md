@@ -24,7 +24,7 @@ include QEMU and ArkOS, so you can launch the app without configuring either.
 | Platform | Installer | Portable version |
 |---|---|---|
 | macOS | `.dmg` | Unzip the `.zip` and open the app |
-| Windows | `.exe` | Unzip the `.zip` and run `Ark Emulator.exe` |
+| Windows | `.exe` | Unzip the `.zip` and run `ark-emulator.exe` |
 | Linux | `.deb` | Make the `.AppImage` executable and run it |
 
 On macOS, you can also install with Homebrew:
@@ -77,7 +77,7 @@ colors, and returns its exit code. Installation adds the `bin` directory to
 your user PATH; uninstalling removes that entry. No administrator rights or
 PowerShell execution policy changes are needed.
 
-For a portable Windows ZIP, keep the `bin` folder beside `Ark Emulator.exe`
+For a portable Windows ZIP, keep the `bin` folder beside `ark-emulator.exe`
 and run this from the extracted emulator folder:
 
 ```powershell
