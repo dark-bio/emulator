@@ -67,33 +67,20 @@ use **Open** or **New** in that window to choose one.
 
 ## Command line
 
-The app's executable is `ark-emulator`, and it manages emulators without
-opening a window. The Homebrew cask, Windows installer and `.deb` put the
-command on your `PATH`. Open a new terminal after installing on Windows.
-
-On Windows, `ark-emulator` runs the bundled `bin\ark-emulator.cmd` in
-PowerShell or Command Prompt. It waits for the command, preserves terminal
-colors, and returns its exit code. Installation adds the `bin` directory to
-your user PATH; uninstalling removes that entry. No administrator rights or
-PowerShell execution policy changes are needed.
-
-For a portable Windows ZIP, keep the `bin` folder beside `ark-emulator.exe`
-and run this from the extracted emulator folder:
-
-```powershell
-.\bin\ark-emulator.cmd list
-```
-
-You can add that `bin` directory to your user PATH manually for the shorter
-`ark-emulator` command. The launcher also works in PowerShell pipelines,
-such as `ark-emulator --json list | ConvertFrom-Json`. On macOS and Linux,
-run the executable inside a portable build directly.
+Use `ark-emulator` to manage emulators without opening a window. Installing
+with Homebrew, the Windows installer or the `.deb` makes the command
+available in your terminal. On Windows, open a new PowerShell or Command
+Prompt window after installing.
 
 ```sh
 ark-emulator start        # boot one, and print its locator once it is ready
 ark-emulator list         # show what is running on this computer
 ark-emulator stop         # shut it down, the way closing its window does
 ```
+
+For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
+`ark-emulator` from the extracted folder. On macOS and Linux, run the
+executable inside the portable build directly.
 
 Hand the locator to [`ark`](https://github.com/dark-bio/cli), which talks to an
 emulated Ark exactly as it talks to hardware:
