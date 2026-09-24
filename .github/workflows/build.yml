@@ -273,6 +273,14 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --release --locked -p launcher --test cli --test windows_cli
 
+      - name: Trace disk-image creation (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/dmg-diagnostics"
+          cp .github/scripts/hdiutil-debug.sh "$RUNNER_TEMP/dmg-diagnostics/hdiutil"
+          chmod +x "$RUNNER_TEMP/dmg-diagnostics/hdiutil"
+          echo "$RUNNER_TEMP/dmg-diagnostics" >> "$GITHUB_PATH"
+
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
         # clone works: tauri-build validates externalBin paths and resource globs
@@ -283,13 +291,15 @@ jobs:
         # it into the .dmg, which is the only moment the copy inside the image
         # can be given a ticket. It stops there and never notarizes the .dmg,
         # which is the next step's job.
+        # Verbose mode exposes the disk-image tool's error, which Tauri
+        # otherwise hides behind "error running bundle_dmg.sh".
         shell: bash
         run: |
           configs=(--config launcher/tauri.release.conf.json)
           if [ "$RUNNER_OS" = "Windows" ]; then
             configs+=(--config .github/packaging/windows/tauri.conf.json)
           fi
-          cargo tauri build "${configs[@]}" --bundles ${{ matrix.bundles }} -- --locked
+          cargo tauri build --verbose "${configs[@]}" --bundles ${{ matrix.bundles }} -- --locked
 
       - name: Notarize and staple the disk image
         # The .app is already done, by the build. A .dmg is assessed on its own
