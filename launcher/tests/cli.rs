@@ -12,10 +12,12 @@
 use std::process::{Command, Output};
 
 /// Every command the tool has, in the order the root lists them.
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 9] = [
     "start",
     "list",
     "stop",
+    "button press",
+    "button release",
     "wipe",
     "doctor",
     "completions",
@@ -177,16 +179,52 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
 #[test]
 fn test_both_help_forms_answer_on_every_command() {
     for command in COMMANDS {
-        let scan = run(&[command, "-h"]);
+        let mut arguments: Vec<_> = command.split_whitespace().collect();
+        arguments.push("-h");
+        let scan = run(&arguments);
         assert_eq!(scan.status.code(), Some(0), "{command} -h");
         assert!(!stdout(&scan).contains("Requires:"), "{command} -h");
 
-        let contract = run(&[command, "--help"]);
+        *arguments.last_mut().unwrap() = "--help";
+        let contract = run(&arguments);
         assert_eq!(contract.status.code(), Some(0), "{command} --help");
         assert!(stdout(&contract).contains("Requires:"), "{command} --help");
 
-        let page = run(&["help", command]);
+        let mut arguments = vec!["help"];
+        arguments.extend(command.split_whitespace());
+        let page = run(&arguments);
         assert_eq!(stdout(&contract).trim(), stdout(&page).trim(), "{command}");
+    }
+}
+
+/// Nested commands retain global flags, reject incomplete input and open no UI.
+#[test]
+fn test_button_group_and_invalid_arguments() {
+    let group = run(&["button", "--help"]);
+    assert!(group.status.success());
+    assert!(!stdout(&group).contains("Requires:"));
+    assert!(stdout(&group).contains("Each subcommand has its own contract"));
+    assert_eq!(stdout(&group), stdout(&run(&["help", "button"])));
+    for arguments in [
+        vec!["--json", "button"],
+        vec!["button", "press", "--all", "--json"],
+        vec!["button", "--json", "release", "--timeout", "0"],
+        vec!["button", "press", "one", "two", "--json"],
+        vec!["--headless", "button", "press", "--json"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "usage", "{arguments:?}");
+    }
+    for arguments in [
+        vec!["--json", "button", "press", "--help"],
+        vec!["button", "--json", "press", "--help"],
+        vec!["button", "release", "--json", "--help"],
+    ] {
+        let output = run(&arguments);
+        assert!(output.status.success(), "{arguments:?}");
+        assert!(stdout(&output).contains("cli_pressed"));
     }
 }
 

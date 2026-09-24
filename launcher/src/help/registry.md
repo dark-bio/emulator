@@ -51,6 +51,9 @@ publishing a path. No path is ever published, since any page in any browser
 can read a loopback port.
 
 The Rust launcher owns the hardware connection in both window modes.
+New launchers also publish an optional `control` object with a loopback HTTP
+`port` and an opaque launch `id`. Older registry hosts may omit this field;
+restart all emulators with the current build to enable button commands.
 
 `ready` becomes true on the first nameplate and false when the hardware
 connection drops. `env`, `name`, `serial` and
@@ -73,3 +76,28 @@ down the way closing its window does. Nothing signals a process or looks up a
 pid, so a stop that is never collected gives up after --timeout. Close the
 device window or interrupt a foreground headless process when it cannot
 collect the request.
+
+## Button control
+
+`ark-emulator button press [EMULATOR]` and `button release [EMULATOR]` send
+inputs directly to the selected launcher, independently of registry
+heartbeats. The CLI and window hold the button independently. Either hold
+keeps it pressed, and both clear on hardware disconnection.
+
+The control endpoint accepts these routes:
+
+    GET  /v1/button           current connection and button state
+    POST /v1/button/press     establish a CLI hold
+    POST /v1/button/release   release the CLI hold
+
+Requests carry `X-Ark-Emulator` with the advertised launch id and no body.
+The GET response carries connected, generation as a decimal string, pressed
+and cli_pressed. POST requests also carry `X-Ark-Generation` from that read,
+so inputs cannot carry over into another connection. A 200 response confirms
+hardware delivery or an already applied hold, with pressed, cli_pressed and
+changed. It does not confirm completion of any resulting firmware operation.
+
+A POST answers 409 when hardware cannot accept the input. A missing or wrong
+launch id answers 412, and a missing or malformed generation answers 400.
+Requests with bodies answer 413. Browser origins answer 403, and the endpoint
+permits no cross-origin requests. No command retries an uncertain input.

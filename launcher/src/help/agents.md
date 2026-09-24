@@ -5,8 +5,9 @@ One process is one emulated Ark, and its whole state is one disk image. It
 exists for development and demos, so keep real data on hardware. Everything
 that touches the emulated Ark's data goes through `ark`, from the repository
 at https://github.com/dark-bio/cli, where the owner approves on their phone
-in Ark Companion exactly as on hardware. This tool never talks to the Ark, and
-nothing here needs approval, which is why no command has an Approval line.
+in Ark Companion exactly as on hardware. This tool controls the emulator's
+lifecycle and reset button. Nothing here needs approval, which is why no
+command has an Approval line.
 Read `ark help agents` before driving the Ark itself.
 
 ## Running
@@ -30,6 +31,17 @@ Read `ark help agents` before driving the Ark itself.
 - `ark-emulator stop` shuts the only running emulator down the way closing
   its window does. With several running, name one as `ark -d` would, by its
   locator, serial, name or image, or pass --all for every one.
+- `ark-emulator button press` holds the only emulator's reset button, and
+  `ark-emulator button release` releases that CLI hold. Both accept the same
+  selector as stop. They work with a window or headless and wait for hardware
+  delivery, without waiting for any resulting firmware operation to finish.
+  Repeating either command sends no extra edge. The hold survives the command
+  exiting and UI focus changes, but ends when the hardware disconnects.
+  A separate window hold keeps the button pressed until the pointer releases.
+  The result reports the physical state, the CLI hold and whether that hold
+  changed. --timeout bounds each reply wait. A timeout or interruption leaves
+  the outcome unknown; use button release to clear a CLI hold. No input is
+  retried automatically or carried into a restarted guest.
 - `ark-emulator wipe --yes` resets the image start would boot to a fresh
   device, and `wipe PATH --yes` another one. The file stays, so the next
   start boots a factory-fresh device that needs `ark enroll`, `ark pair` and

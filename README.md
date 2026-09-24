@@ -74,12 +74,16 @@ Prompt window after installing.
 ```sh
 ark-emulator start --headless  # boot without a window, return when ready
 ark-emulator list              # show what is running on this computer
+ark-emulator button press      # hold its reset button
+ark-emulator button release    # release the CLI hold
 ark-emulator stop              # shut it down
 ```
 
 Omit `--headless` to show the device window. For a foreground process, use
 `ark-emulator --headless --image demo.ark`; Ctrl-C stops it. See
 `ark-emulator help start` for readiness, timeouts and image defaults.
+Button commands accept a locator, name, serial or image when several emulators
+are running. See `ark-emulator button press --help` for delivery and hold behavior.
 
 For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
 `ark-emulator` from the extracted folder. On macOS and Linux, run the

@@ -87,8 +87,20 @@ object whose one member is `error`. The codes are stable.
   named. Name one by its locator, or pass --all to stop. Exit 3.
 - registry-unreachable: something answered on the registry's port and could
   not be read. Exit 3.
+- control-unsupported: the emulator does not advertise button control. Update
+  Ark Emulator and restart every running emulator, including the registry
+  host. Exit 3.
+- control-unreachable: the launcher's control endpoint could not be reached
+  or understood. Check `ark-emulator list` and retry against the current
+  emulator. An input without a reply has an unknown outcome; use button
+  release to clear a CLI hold. Exit 3.
+- button-unavailable: hardware is disconnected, has restarted or could not
+  accept the input. Wait for boot and retry against the current emulator.
+  Inputs never carry into a restarted guest. Exit 3.
 - timeout: the device was not ready, or did not stop, within --timeout. The
-  emulator is still running; watch `ark-emulator list`. Exit 7.
+  emulator is still running; watch `ark-emulator list`. For button commands,
+  a reply did not arrive within --timeout and the outcome is unknown. Use
+  button release to clear a CLI hold. Exit 7.
 
 ## Exit codes
 

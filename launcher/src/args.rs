@@ -88,7 +88,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Whole wait for a start or a stop; each network wait in doctor
+    /// Each network wait, or whole start or stop
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
@@ -236,6 +236,14 @@ pub(crate) enum Command {
         all: bool,
     },
 
+    /// Control the reset button of a running emulator
+    #[command(disable_help_subcommand = true)]
+    Button {
+        /// Which hold to apply to the running emulator.
+        #[command(subcommand)]
+        action: ButtonAction,
+    },
+
     /// Reset a stopped image so its next boot is a fresh device
     Wipe {
         /// Image to reset; the image start would boot otherwise
@@ -261,11 +269,28 @@ pub(crate) enum Command {
     Help {
         /// Command or topic to explain: agents, output, images, registry
         #[arg(value_name = "COMMAND_OR_TOPIC")]
-        name: Option<String>,
+        name: Vec<String>,
 
         /// Print the whole manual: every command page and every topic
         #[arg(long, conflicts_with = "name")]
         all: bool,
+    },
+}
+
+/// Explicit command line holds of the emulated reset button.
+#[derive(clap::Subcommand)]
+pub(crate) enum ButtonAction {
+    /// Hold the reset button until explicitly released
+    Press {
+        /// Locator, serial, name or image; the only emulator otherwise
+        #[arg(value_name = "EMULATOR")]
+        emulator: Option<String>,
+    },
+    /// Release the command line hold on the reset button
+    Release {
+        /// Locator, serial, name or image; the only emulator otherwise
+        #[arg(value_name = "EMULATOR")]
+        emulator: Option<String>,
     },
 }
 

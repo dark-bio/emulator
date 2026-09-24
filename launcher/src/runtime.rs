@@ -160,6 +160,7 @@ impl Runtime {
         exited: impl FnOnce(Result<ExitStatus>) + Send + 'static,
     ) -> Result<()> {
         diagnostics::record_path("Disk", disk);
+        let control = crate::control::Control::start(self.hardware.clone())?;
         let mut child = spawn_qemu(
             pending.arch,
             &pending.firmware,
@@ -171,7 +172,12 @@ impl Runtime {
         )?;
         disk::mark_booted(disk);
         self.hardware.start(pending.host_port.addr());
-        discovery::register(pending.host_port.port(), disk, self.hardware.clone());
+        discovery::register(
+            pending.host_port.port(),
+            disk,
+            self.hardware.clone(),
+            control.endpoint.clone(),
+        );
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {
@@ -186,6 +192,7 @@ impl Runtime {
         thread::spawn(move || {
             let result = child.wait().context("lost track of the QEMU process");
             hardware.stop();
+            drop(control);
             discovery::deregister();
             let result = result.and_then(|status| {
                 log!("[launcher] QEMU exited with {status}");

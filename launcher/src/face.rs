@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tauri::{Emitter as _, Manager as _};
 
-use crate::hardware::{Controller, State};
+use crate::hardware::{ButtonSource, Controller, State};
 
 /// Minimum spacing between presentation updates.
 const FRAME_TIME: Duration = Duration::from_millis(33);
@@ -77,5 +77,7 @@ pub(crate) fn set_button_pressed(
     pressed: bool,
     generation: u64,
 ) -> Result<(), String> {
-    view.hardware.button(pressed, generation)
+    view.hardware
+        .button(ButtonSource::Ui, pressed, generation)
+        .map(|_| ())
 }

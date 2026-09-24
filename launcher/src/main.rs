@@ -19,6 +19,7 @@
 
 mod args;
 mod bundle;
+mod control;
 mod diagnostics;
 mod discovery;
 mod disk;

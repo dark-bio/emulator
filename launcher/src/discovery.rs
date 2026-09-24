@@ -130,9 +130,15 @@ pub(crate) fn request_stop(port: u16) -> Result<()> {
 
 /// Publish this emulator, and start the heartbeat that keeps it published.
 /// Each heartbeat takes readiness and identity from the latest hardware state.
-pub(crate) fn register(port: u16, disk: &Path, hardware: Controller) {
+pub(crate) fn register(
+    port: u16,
+    disk: &Path,
+    hardware: Controller,
+    control: crate::control::Endpoint,
+) {
     let instance = Instance {
         port,
+        control: Some(control),
         disk: disk
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -450,6 +456,7 @@ mod tests {
         let image = tmp.path().join("a.ark");
         let instances = [Instance {
             port: 18181,
+            control: None,
             disk: "a.ark".into(),
             disk_id: disk_id(&image),
             ready: true,

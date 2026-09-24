@@ -109,18 +109,44 @@ pub(crate) struct State {
     pub(crate) colors: [[f64; 3]; 4],
     /// Whether a button press has been sent on this connection.
     pub(crate) pressed: bool,
+    /// Whether the window currently holds the button.
+    pub(crate) ui_pressed: bool,
+    /// Whether the command line currently holds the button.
+    pub(crate) cli_pressed: bool,
     /// Latest identity claims from this connection.
     pub(crate) nameplate: Nameplate,
 }
 
+/// Independent holders of the emulated button.
+#[derive(Clone, Copy)]
+pub(crate) enum ButtonSource {
+    /// Pointer input and window cleanup.
+    Ui,
+    /// Explicit commands, persisting after the CLI exits.
+    Cli,
+}
+
+/// Button state after an input has been delivered or found already applied.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ButtonOutcome {
+    /// Physical button state, combining the window and CLI holds.
+    pub(crate) pressed: bool,
+    /// Whether a CLI hold remains active.
+    pub(crate) cli_pressed: bool,
+    /// Whether this request changed its source's hold.
+    pub(crate) changed: bool,
+}
+
 /// A button input and the connection on which it was requested.
 struct Button {
-    /// Desired physical button state.
+    /// Holder whose state is being changed.
+    source: ButtonSource,
+    /// Desired hold for this input source.
     pressed: bool,
     /// Connection generation, preventing delayed inputs reaching a new guest.
     generation: u64,
     /// Reports whether the edge was written to the socket.
-    reply: mpsc::Sender<Result<(), String>>,
+    reply: mpsc::Sender<Result<ButtonOutcome, String>>,
 }
 
 /// The active worker and its bounded input queue.
@@ -182,6 +208,8 @@ impl Controller {
         self.update(|state| {
             state.connected = false;
             state.pressed = false;
+            state.ui_pressed = false;
+            state.cli_pressed = false;
             state.phase = Phase::Stopped;
         });
         if let Some(socket) = self.0.socket.lock().unwrap().take() {
@@ -194,8 +222,13 @@ impl Controller {
     }
 
     /// Send an explicit button input, failing instead of queuing it for a reboot.
-    pub(crate) fn button(&self, pressed: bool, generation: u64) -> Result<(), String> {
-        self.enqueue_button(pressed, generation)?
+    pub(crate) fn button(
+        &self,
+        source: ButtonSource,
+        pressed: bool,
+        generation: u64,
+    ) -> Result<ButtonOutcome, String> {
+        self.enqueue_button(source, pressed, generation)?
             .recv()
             .unwrap_or_else(|_| {
                 Err("The device disconnected before accepting the input.".to_owned())
@@ -204,15 +237,16 @@ impl Controller {
 
     /// Queue a release on view dismissal without making its event loop wait.
     pub(crate) fn release_button(&self) {
-        let _ = self.enqueue_button(false, self.snapshot().generation);
+        let _ = self.enqueue_button(ButtonSource::Ui, false, self.snapshot().generation);
     }
 
     /// Validate and queue an input, returning its delivery acknowledgement.
     fn enqueue_button(
         &self,
+        source: ButtonSource,
         pressed: bool,
         generation: u64,
-    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    ) -> Result<mpsc::Receiver<Result<ButtonOutcome, String>>, String> {
         let state = self.snapshot();
         if !state.connected || state.generation != generation {
             return Err("The device is not connected.".to_owned());
@@ -224,6 +258,7 @@ impl Controller {
             .buttons
             .try_send(Button {
                 pressed,
+                source,
                 generation,
                 reply,
             })
@@ -257,6 +292,8 @@ impl Controller {
                     self.update(|state| {
                         state.connected = false;
                         state.pressed = false;
+                        state.ui_pressed = false;
+                        state.cli_pressed = false;
                         state.phase = Phase::Booting;
                         state.colors = [[0.0; 3]; 4];
                         state.nameplate = Nameplate::default();
@@ -316,10 +353,18 @@ impl Controller {
                         "The device restarted before accepting the input.".to_owned(),
                     ));
                 } else {
-                    if self.snapshot().pressed != button.pressed {
+                    let mut state = self.snapshot();
+                    let held = match button.source {
+                        ButtonSource::Ui => &mut state.ui_pressed,
+                        ButtonSource::Cli => &mut state.cli_pressed,
+                    };
+                    let changed = *held != button.pressed;
+                    *held = button.pressed;
+                    let pressed = state.ui_pressed || state.cli_pressed;
+                    if state.pressed != pressed {
                         let frame = json!({
                             "d": "button", "id": BUTTON_PIN,
-                            "payload": { "edge": if button.pressed { "falling" } else { "rising" } }
+                            "payload": { "edge": if pressed { "falling" } else { "rising" } }
                         });
                         if let Err(err) = socket.send(frame.to_string().into()) {
                             let _ = button
@@ -327,9 +372,19 @@ impl Controller {
                                 .send(Err("The button input could not be delivered.".to_owned()));
                             return Err(err.into());
                         }
-                        self.update(|state| state.pressed = button.pressed);
                     }
-                    let _ = button.reply.send(Ok(()));
+                    if changed {
+                        self.update(|current| {
+                            current.pressed = pressed;
+                            current.ui_pressed = state.ui_pressed;
+                            current.cli_pressed = state.cli_pressed;
+                        });
+                    }
+                    let _ = button.reply.send(Ok(ButtonOutcome {
+                        pressed,
+                        cli_pressed: state.cli_pressed,
+                        changed,
+                    }));
                 }
             }
             match socket.read() {
@@ -536,22 +591,30 @@ mod tests {
     fn test_button_edges_and_reconnect_reset_transient_state() {
         let (controller, listener, mut socket) = connect();
         let generation = controller.snapshot().generation;
-        controller.button(true, generation).unwrap();
+        controller
+            .button(ButtonSource::Ui, true, generation)
+            .unwrap();
         assert_eq!(
             read(&mut socket),
             json!({
                 "d": "button", "id": "5", "payload": {"edge": "falling"}
             })
         );
-        controller.button(true, generation).unwrap();
-        controller.button(false, generation).unwrap();
+        controller
+            .button(ButtonSource::Ui, true, generation)
+            .unwrap();
+        controller
+            .button(ButtonSource::Ui, false, generation)
+            .unwrap();
         assert_eq!(
             read(&mut socket),
             json!({
                 "d": "button", "id": "5", "payload": {"edge": "rising"}
             })
         );
-        controller.button(true, generation).unwrap();
+        controller
+            .button(ButtonSource::Ui, true, generation)
+            .unwrap();
         read(&mut socket);
         socket
             .send(r#"{"d":"nameplate","id":"self","payload":{"name":"before restart"}}"#.into())
@@ -563,10 +626,18 @@ mod tests {
         assert!(!state.pressed);
         assert!(!state.nameplate.known);
         assert!(state.phase == Phase::Booting);
-        assert!(controller.button(true, generation).is_err());
+        assert!(
+            controller
+                .button(ButtonSource::Ui, true, generation)
+                .is_err()
+        );
         let mut socket = tungstenite::accept(accept(&listener)).unwrap();
         wait_for(&controller, |state| state.connected);
-        assert!(controller.button(true, generation).is_err());
+        assert!(
+            controller
+                .button(ButtonSource::Ui, true, generation)
+                .is_err()
+        );
         socket
             .send(r#"{"d":"revbits","id":"i2c@0x20","payload":{"op":"read"}}"#.into())
             .unwrap();
@@ -622,7 +693,7 @@ mod tests {
         let (controller, _listener, mut socket) = connect();
         thread::sleep(Duration::from_millis(50));
         let reply = controller
-            .enqueue_button(true, controller.snapshot().generation)
+            .enqueue_button(ButtonSource::Ui, true, controller.snapshot().generation)
             .unwrap();
         reply
             .recv_timeout(Duration::from_millis(500))
@@ -652,7 +723,7 @@ mod tests {
             .unwrap();
         thread::sleep(Duration::from_millis(50));
         let reply = controller
-            .enqueue_button(true, controller.snapshot().generation)
+            .enqueue_button(ButtonSource::Ui, true, controller.snapshot().generation)
             .unwrap();
         reply
             .recv_timeout(Duration::from_millis(500))

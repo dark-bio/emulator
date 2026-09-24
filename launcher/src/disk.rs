@@ -386,6 +386,7 @@ mod tests {
     fn booted(port: u16, image: &Path) -> Instance {
         Instance {
             port,
+            control: None,
             disk: name_of(image),
             disk_id: discovery::disk_id(image),
             ready: true,

@@ -41,6 +41,12 @@ pub(crate) enum Code {
     AmbiguousEmulator,
     /// Something answered on the registry's port and could not be read.
     RegistryUnreachable,
+    /// The launcher did not advertise direct button control.
+    ControlUnsupported,
+    /// The launcher's direct endpoint could not be reached or understood.
+    ControlUnreachable,
+    /// Hardware disconnected, restarted or could not accept a button input.
+    ButtonUnavailable,
     /// A wait on a machine ran out.
     Timeout,
 }
@@ -49,7 +55,7 @@ impl Code {
     /// Every code, in the order the output topic lists them, which the test
     /// on that topic walks.
     #[cfg(test)]
-    pub(crate) const ALL: [Code; 15] = [
+    pub(crate) const ALL: [Code; 18] = [
         Code::Usage,
         Code::ConfirmationRequired,
         Code::DiskMissing,
@@ -64,6 +70,9 @@ impl Code {
         Code::NoEmulator,
         Code::AmbiguousEmulator,
         Code::RegistryUnreachable,
+        Code::ControlUnsupported,
+        Code::ControlUnreachable,
+        Code::ButtonUnavailable,
         Code::Timeout,
     ];
 
@@ -84,6 +93,9 @@ impl Code {
             Code::NoEmulator => "no-emulator",
             Code::AmbiguousEmulator => "ambiguous-emulator",
             Code::RegistryUnreachable => "registry-unreachable",
+            Code::ControlUnsupported => "control-unsupported",
+            Code::ControlUnreachable => "control-unreachable",
+            Code::ButtonUnavailable => "button-unavailable",
             Code::Timeout => "timeout",
         }
     }
@@ -106,7 +118,10 @@ impl Code {
             Code::DiskBusy
             | Code::NoEmulator
             | Code::AmbiguousEmulator
-            | Code::RegistryUnreachable => 3,
+            | Code::RegistryUnreachable
+            | Code::ControlUnsupported
+            | Code::ControlUnreachable
+            | Code::ButtonUnavailable => 3,
             Code::Timeout => 7,
         }
     }

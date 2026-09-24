@@ -160,6 +160,10 @@ Topics: agents, output, images, registry.";
         decorated = decorated
             .after_help(format!("{closing}\n"))
             .after_long_help(format!("{footer}\n\n{closing}\n"));
+    } else if command.has_subcommands() {
+        decorated = decorated.after_long_help(format!(
+            "Each subcommand has its own contract.\nRead `{} <command> --help` for that command's behavior.\n", path
+        ));
     } else {
         decorated = decorated.after_long_help(format!("{footer}\n"));
     }
@@ -232,6 +236,20 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "stopped, the locators that went, which is the partial result on a timeout",
             "0 done; 2 usage; 3 none matches, or several do; 7 one did not go in time; 130/143 interrupted",
             "ark-emulator stop\nark-emulator stop emulator:18181 --json",
+        ),
+        "button press" => (
+            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
+            "normally under a second; --timeout bounds each reply wait; success means written to hardware or already held; the CLI hold persists until button release, disconnect or shutdown",
+            "locator, pressed (physical state), cli_pressed (CLI hold), changed (whether this command changed the CLI hold)",
+            "0 held; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
+            "ark-emulator button press\nark-emulator button press emulator:18181 --json",
+        ),
+        "button release" => (
+            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
+            "normally under a second; --timeout bounds each reply wait; success means written to hardware or already released; the button remains pressed while the window holds it",
+            "locator, pressed (physical state), cli_pressed (CLI hold), changed (whether this command changed the CLI hold)",
+            "0 CLI hold released; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
+            "ark-emulator button release\nark-emulator button release emulator:18181 --json",
         ),
         "wipe" => (
             "an existing image no emulator holds; confirmation at a terminal, or --yes",
@@ -401,10 +419,11 @@ mod tests {
     use super::*;
 
     /// Every command the tool has, in the order the root lists them.
-    const COMMANDS: [&str; 7] = [
+    const COMMANDS: [&str; 8] = [
         "start",
         "list",
         "stop",
+        "button",
         "wipe",
         "doctor",
         "completions",
@@ -426,6 +445,9 @@ mod tests {
         let theme = Theme::fixed(80, Color::Off, false);
         let mut root = command(&theme);
         for name in COMMANDS {
+            if name == "button" {
+                continue;
+            }
             let page = root
                 .find_subcommand_mut(name)
                 .unwrap()
@@ -436,6 +458,33 @@ mod tests {
             }
             assert_eq!(page.matches("\n  ark-emulator ").count(), 2, "{name}");
             assert!(!page.contains("$ "), "{name}");
+        }
+    }
+
+    /// Group help describes its leaves, and each button leaf carries a contract.
+    #[test]
+    fn test_button_help_has_nested_contracts() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let mut root = command(&theme);
+        let group = root.find_subcommand_mut("button").unwrap();
+        let page = group.render_long_help().to_string();
+        assert!(!page.contains("Requires:"));
+        assert!(page.contains("Each subcommand has its own contract"));
+        for name in ["press", "release"] {
+            let page = group
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
+                assert!(page.contains(label), "{name}: {label}");
+            }
+            assert_eq!(
+                page.matches(&format!("\n  ark-emulator button {name}"))
+                    .count(),
+                2
+            );
+            assert!(!page.contains("--no-input"));
         }
     }
 

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tauri::PackageInfo;
 
-use crate::args::{Boot, Command, Global};
+use crate::args::{Boot, ButtonAction, Command, Global};
 use crate::bundle::{self, Paths};
 use crate::diagnostics::{self, Sink};
 use crate::discovery;
@@ -100,6 +100,7 @@ fn dispatch(
         Some(Command::Start { boot }) => start(&boot, global, output, &paths),
         Some(Command::List) => list(output, &paths),
         Some(Command::Stop { emulator, all }) => stop(emulator.as_deref(), all, global, output),
+        Some(Command::Button { action }) => button(action, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
         Some(Command::Doctor) => crate::doctor::doctor(output, &paths, global.timeout),
         Some(Command::Completions { .. } | Command::Help { .. }) => {
@@ -199,6 +200,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     drop(reservation);
 
     let unready = Instance {
+        control: None,
         port: address.port(),
         disk: disk::name_of(&image),
         disk_id: discovery::disk_id(&image),
@@ -388,6 +390,49 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
     output.block(&stopped(&done), &[("Stopped", "stopped")])
 }
 
+/// Set this emulator's CLI hold and report the state after hardware delivery.
+fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), Error> {
+    let (pressed, selector) = match action {
+        ButtonAction::Press { emulator } => (true, emulator),
+        ButtonAction::Release { emulator } => (false, emulator),
+    };
+    let targets = pick(&listing()?, selector.as_deref())?;
+    let instance = &targets[0];
+    let endpoint = instance.control.as_ref().ok_or_else(|| {
+        Error::new(
+            Code::ControlUnsupported,
+            "this emulator does not advertise button control",
+        )
+        .hint("update Ark Emulator and restart all running emulators, including the registry host")
+    })?;
+    let outcome = crate::control::button(endpoint, pressed, Duration::from_secs(global.timeout))?;
+    if !outcome.changed {
+        output.event(
+            "note",
+            if pressed {
+                "the CLI already holds the button"
+            } else {
+                "the CLI hold was already released"
+            },
+        );
+    }
+    if !pressed && outcome.pressed {
+        output.event("note", "the window still holds the button");
+    }
+    output.block(
+        &json!({
+            "locator": locator(instance), "pressed": outcome.pressed,
+            "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
+        }),
+        &[
+            ("Locator", "locator"),
+            ("Pressed", "pressed"),
+            ("CLI held", "cli_pressed"),
+            ("Changed", "changed"),
+        ],
+    )
+}
+
 /// Reset a stopped image to a fresh device, so that its next boot needs
 /// enrolling, pairing and unlocking again. The file stays where it is, so
 /// the window and `start` find it afterwards. The registry says which
@@ -515,7 +560,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                 Code::AmbiguousEmulator,
                 format!("several emulators are running: {}", listed(running)),
             )
-            .hint("name one, or pass `--all`")),
+            .hint("name one by its locator")),
         };
     };
     if let Some(port) = selector.strip_prefix("emulator:") {
@@ -742,6 +787,7 @@ mod tests {
     fn running(port: u16, image: &str, name: Option<&str>, serial: Option<&str>) -> Instance {
         Instance {
             port,
+            control: None,
             disk: image.into(),
             disk_id: format!("{port:016x}"),
             ready: true,

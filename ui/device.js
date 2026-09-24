@@ -23,6 +23,7 @@ export async function mountDevice({ pin, leds, onNameplate }) {
   let generation = 0;
   let boot = null;
   let pressed = false;
+  let reportedPressed = false;
   let inputs = Promise.resolve();
 
   // Preserve saturation and increase glow for intensities above display white
@@ -49,6 +50,8 @@ export async function mountDevice({ pin, leds, onNameplate }) {
       pin.classList.remove("pressed");
     }
     generation = state.generation;
+    reportedPressed = state.pressed;
+    pin.classList.toggle("pressed", reportedPressed);
     if (state.phase !== phase) {
       boot?.stop();
       boot = state.phase === "booting" ? startBootAnimation(applyLeds) : null;
@@ -84,7 +87,7 @@ export async function mountDevice({ pin, leds, onNameplate }) {
       .catch((error) => {
         pin.title = String(error);
         pressed = false;
-        pin.classList.remove("pressed");
+        refresh();
       });
   }
 
@@ -100,7 +103,7 @@ export async function mountDevice({ pin, leds, onNameplate }) {
   function release() {
     if (!pressed) return;
     pressed = false;
-    pin.classList.remove("pressed");
+    pin.classList.toggle("pressed", reportedPressed);
     sendButton(false);
   }
   pin.addEventListener("pointerup", release);
