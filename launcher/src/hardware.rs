@@ -11,17 +11,17 @@
 //! keep only the latest snapshot, and button requests are bounded and never
 //! replayed across connections.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::io::ErrorKind;
+use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use futures_util::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
 
 use crate::diagnostics::log;
 
@@ -29,6 +29,8 @@ use crate::diagnostics::log;
 const RETRY: Duration = Duration::from_secs(1);
 /// Bounds socket writes without limiting how long boot may take.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Limits button latency when the guest sends no hardware frames.
+const INPUT_POLL: Duration = Duration::from_millis(10);
 /// Hardware frames contain only a few LED values or identity claims.
 const MAX_FRAME: usize = 64 * 1024;
 /// GPIO for the active-low reset button on the emulated carrier.
@@ -118,23 +120,27 @@ struct Button {
     /// Connection generation, preventing delayed inputs reaching a new guest.
     generation: u64,
     /// Reports whether the edge was written to the socket.
-    reply: oneshot::Sender<Result<(), String>>,
+    reply: mpsc::Sender<Result<(), String>>,
 }
 
 /// The active worker and its bounded input queue.
 struct Connection {
     /// Inputs awaiting delivery to the guest.
-    buttons: mpsc::Sender<Button>,
-    /// Worker aborted when QEMU exits.
-    task: JoinHandle<()>,
+    buttons: mpsc::SyncSender<Button>,
+    /// Worker joined when QEMU exits.
+    thread: JoinHandle<()>,
 }
 
 /// Shared state and worker ownership for one emulated device.
 struct Inner {
-    /// Latest state, with coalesced notifications for observers.
-    state: watch::Sender<State>,
+    /// Latest snapshot, without a queue of old LED frames.
+    state: Mutex<State>,
     /// Absent until launch, and after shutdown.
     connection: Mutex<Option<Connection>>,
+    /// Prevents reconnects after QEMU exits.
+    stopping: AtomicBool,
+    /// A duplicate handle lets shutdown interrupt a pending handshake or I/O.
+    socket: Mutex<Option<TcpStream>>,
 }
 
 /// The runtime's hardware controller, shared with optional state readers.
@@ -144,8 +150,10 @@ pub(crate) struct Controller(Arc<Inner>);
 impl Default for Controller {
     fn default() -> Self {
         Self(Arc::new(Inner {
-            state: watch::channel(State::default()).0,
+            state: Mutex::new(State::default()),
             connection: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+            socket: Mutex::new(None),
         }))
     }
 }
@@ -153,93 +161,97 @@ impl Default for Controller {
 impl Controller {
     /// Read a complete snapshot without waiting on networking or a UI.
     pub(crate) fn snapshot(&self) -> State {
-        self.0.state.borrow().clone()
-    }
-
-    /// Subscribe to the latest state without accumulating old LED frames.
-    pub(crate) fn subscribe(&self) -> watch::Receiver<State> {
-        self.0.state.subscribe()
+        self.0.state.lock().unwrap().clone()
     }
 
     /// Start the sole hardware connection after QEMU has been spawned.
-    pub(crate) fn start(&self, executor: &tokio::runtime::Handle, address: SocketAddr) {
+    pub(crate) fn start(&self, address: SocketAddr) {
         let mut connection = self.0.connection.lock().unwrap();
         assert!(connection.is_none(), "hardware already started");
         self.update(|state| state.phase = Phase::Booting);
-        let (buttons, receiver) = mpsc::channel(16);
+        let (buttons, receiver) = mpsc::sync_channel(16);
         let controller = self.clone();
-        let task = executor.spawn(async move { controller.run(address, receiver).await });
-        *connection = Some(Connection { buttons, task });
+        let thread = thread::spawn(move || controller.run(address, receiver));
+        *connection = Some(Connection { buttons, thread });
     }
 
     /// Stop reconnecting when the guest exits and clear its transient state.
     pub(crate) fn stop(&self) {
-        if let Some(connection) = self.0.connection.lock().unwrap().take() {
-            connection.task.abort();
-        }
+        let connection = self.0.connection.lock().unwrap().take();
+        self.0.stopping.store(true, Ordering::SeqCst);
         self.update(|state| {
             state.connected = false;
             state.pressed = false;
             state.phase = Phase::Stopped;
         });
+        if let Some(socket) = self.0.socket.lock().unwrap().take() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        if let Some(connection) = connection {
+            connection.thread.thread().unpark();
+            let _ = connection.thread.join();
+        }
     }
 
     /// Send an explicit button input, failing instead of queuing it for a reboot.
-    pub(crate) async fn button(&self, pressed: bool, generation: u64) -> Result<(), String> {
-        let receiver = {
-            let state = self.snapshot();
-            if !state.connected || state.generation != generation {
-                return Err("The device is not connected.".to_owned());
-            }
-            let connection = self.0.connection.lock().unwrap();
-            let connection = connection.as_ref().ok_or("The device has stopped.")?;
-            let (reply, receiver) = oneshot::channel();
-            connection
-                .buttons
-                .try_send(Button {
-                    pressed,
-                    generation,
-                    reply,
-                })
-                .map_err(|_| "The device cannot accept another button input.".to_owned())?;
-            receiver
-        };
-        receiver.await.unwrap_or_else(|_| {
-            Err("The device disconnected before accepting the input.".to_owned())
-        })
+    pub(crate) fn button(&self, pressed: bool, generation: u64) -> Result<(), String> {
+        self.enqueue_button(pressed, generation)?
+            .recv()
+            .unwrap_or_else(|_| {
+                Err("The device disconnected before accepting the input.".to_owned())
+            })
     }
 
-    /// Serialize state changes and notify readers without waiting for them.
+    /// Queue a release on view dismissal without making its event loop wait.
+    pub(crate) fn release_button(&self) {
+        let _ = self.enqueue_button(false, self.snapshot().generation);
+    }
+
+    /// Validate and queue an input, returning its delivery acknowledgement.
+    fn enqueue_button(
+        &self,
+        pressed: bool,
+        generation: u64,
+    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+        let state = self.snapshot();
+        if !state.connected || state.generation != generation {
+            return Err("The device is not connected.".to_owned());
+        }
+        let connection = self.0.connection.lock().unwrap();
+        let connection = connection.as_ref().ok_or("The device has stopped.")?;
+        let (reply, receiver) = mpsc::channel();
+        connection
+            .buttons
+            .try_send(Button {
+                pressed,
+                generation,
+                reply,
+            })
+            .map_err(|_| "The device cannot accept another button input.".to_owned())?;
+        Ok(receiver)
+    }
+
+    /// Serialize state changes without waiting for networking or a frontend.
     fn update(&self, change: impl FnOnce(&mut State)) {
-        self.0.state.send_if_modified(|state| {
-            // An aborted worker may finish its current synchronous frame
-            if state.phase == Phase::Stopped {
-                return false;
-            }
-            change(state);
+        let mut state = self.0.state.lock().unwrap();
+        if state.phase != Phase::Stopped {
+            change(&mut state);
             state.revision += 1;
-            true
-        });
+        }
     }
 
     /// Attach when the guest listens, preserving pending handshakes during boot.
-    async fn run(&self, address: SocketAddr, mut buttons: mpsc::Receiver<Button>) {
-        let url = format!("ws://{address}/v1/hw");
-        loop {
-            let config = WebSocketConfig::default()
-                .max_message_size(Some(MAX_FRAME))
-                .max_frame_size(Some(MAX_FRAME));
-            // QEMU can accept TCP before the guest boots. Abandoning that
-            // handshake could consume the guest's only hardware connection.
-            match tokio_tungstenite::connect_async_with_config(&url, Some(config), true).await {
-                Ok((socket, _)) => {
+    fn run(&self, address: SocketAddr, buttons: mpsc::Receiver<Button>) {
+        while !self.0.stopping.load(Ordering::SeqCst) {
+            match self.connect(address) {
+                Ok(socket) => {
                     self.update(|state| {
                         state.connected = true;
                         state.generation += 1;
                     });
                     let generation = self.snapshot().generation;
                     log!("[hardware] connected to {address}");
-                    if let Err(err) = self.serve(socket, &mut buttons, generation).await {
+                    if let Err(err) = self.serve(socket, &buttons, generation) {
                         log!("[hardware] connection ended: {err:#}");
                     }
                     self.update(|state| {
@@ -252,64 +264,89 @@ impl Controller {
                 }
                 Err(err) => log!("[hardware] waiting for guest: {err}"),
             }
+            self.0.socket.lock().unwrap().take();
             while let Ok(button) = buttons.try_recv() {
                 let _ = button
                     .reply
                     .send(Err("The device disconnected.".to_owned()));
             }
-            tokio::time::sleep(RETRY).await;
+            if !self.0.stopping.load(Ordering::SeqCst) {
+                thread::park_timeout(RETRY);
+            }
         }
     }
 
+    /// Keep the handshake blocking until the guest responds or shutdown closes it.
+    fn connect(&self, address: SocketAddr) -> Result<WebSocket<TcpStream>> {
+        let stream = TcpStream::connect_timeout(&address, RETRY)?;
+        stream.set_nodelay(true)?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        {
+            let mut socket = self.0.socket.lock().unwrap();
+            if self.0.stopping.load(Ordering::SeqCst) {
+                bail!("hardware has stopped");
+            }
+            *socket = Some(stream.try_clone()?);
+        }
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_FRAME))
+            .max_frame_size(Some(MAX_FRAME));
+        // QEMU can accept TCP before the guest boots. Abandoning that
+        // handshake could consume the guest's only hardware connection.
+        let (socket, _) = tungstenite::client::client_with_config(
+            format!("ws://{address}/v1/hw"),
+            stream,
+            Some(config),
+        )?;
+        socket.get_ref().set_read_timeout(Some(INPUT_POLL))?;
+        Ok(socket)
+    }
+
     /// Consume hardware frames and explicit inputs on one ordered connection.
-    async fn serve<S>(
+    fn serve(
         &self,
-        mut socket: tokio_tungstenite::WebSocketStream<S>,
-        buttons: &mut mpsc::Receiver<Button>,
+        mut socket: WebSocket<TcpStream>,
+        buttons: &mpsc::Receiver<Button>,
         generation: u64,
-    ) -> Result<()>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        loop {
-            tokio::select! {
-                frame = socket.next() => {
-                    match frame.transpose()? {
-                        Some(Message::Text(text)) => match self.frame(text.as_str()) {
-                            Ok(Some(reply)) => {
-                                tokio::time::timeout(WRITE_TIMEOUT, socket.send(reply.into())).await??;
-                            }
-                            Ok(None) => {}
-                            Err(err) => log!("[hardware] ignoring malformed frame: {err}"),
-                        },
-                        Some(Message::Close(_)) | None => return Ok(()),
-                        Some(Message::Ping(_)) => {
-                            tokio::time::timeout(WRITE_TIMEOUT, socket.flush()).await??;
-                        }
-                        Some(_) => {}
-                    }
-                }
-                Some(button) = buttons.recv() => {
-                    if button.generation != generation {
-                        let _ = button.reply.send(Err("The device restarted before accepting the input.".to_owned()));
-                        continue;
-                    }
+    ) -> Result<()> {
+        while !self.0.stopping.load(Ordering::SeqCst) {
+            if let Ok(button) = buttons.try_recv() {
+                if button.generation != generation {
+                    let _ = button.reply.send(Err(
+                        "The device restarted before accepting the input.".to_owned(),
+                    ));
+                } else {
                     if self.snapshot().pressed != button.pressed {
                         let frame = json!({
                             "d": "button", "id": BUTTON_PIN,
                             "payload": { "edge": if button.pressed { "falling" } else { "rising" } }
                         });
-                        let result = tokio::time::timeout(WRITE_TIMEOUT, socket.send(frame.to_string().into())).await;
-                        if let Err(err) = result.context("button write timed out").and_then(|result| result.map_err(Into::into)) {
-                            let _ = button.reply.send(Err("The button input could not be delivered.".to_owned()));
-                            return Err(err);
+                        if let Err(err) = socket.send(frame.to_string().into()) {
+                            let _ = button
+                                .reply
+                                .send(Err("The button input could not be delivered.".to_owned()));
+                            return Err(err.into());
                         }
                         self.update(|state| state.pressed = button.pressed);
                     }
                     let _ = button.reply.send(Ok(()));
                 }
             }
+            match socket.read() {
+                Ok(Message::Text(text)) => match self.frame(text.as_str()) {
+                    Ok(Some(reply)) => socket.send(reply.into())?,
+                    Ok(None) => {}
+                    Err(err) => log!("[hardware] ignoring malformed frame: {err}"),
+                },
+                Ok(Message::Close(_)) => return Ok(()),
+                Ok(Message::Ping(_)) => socket.flush()?,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(err))
+                    if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(err) => return Err(err.into()),
+            }
         }
+        Ok(())
     }
 
     /// Decode a driver frame, returning only replies the protocol requires.
@@ -370,113 +407,109 @@ struct Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::time::timeout;
-    use tokio_tungstenite::{WebSocketStream, accept_async};
+    use std::net::TcpListener;
+    use std::time::Instant;
 
     /// Start the production controller against a loopback hardware peer.
-    async fn connect() -> (Controller, TcpListener, WebSocketStream<TcpStream>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    fn connect() -> (Controller, TcpListener, WebSocket<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let controller = Controller::default();
-        controller.start(
-            &tokio::runtime::Handle::current(),
-            listener.local_addr().unwrap(),
-        );
-        let socket = accept(&listener).await;
-        wait_for(&controller, |state| state.connected).await;
+        controller.start(listener.local_addr().unwrap());
+        let socket = tungstenite::accept(accept(&listener)).unwrap();
+        wait_for(&controller, |state| state.connected);
         (controller, listener, socket)
     }
 
     /// Accept the controller with a deadline so regressions cannot hang tests.
-    async fn accept(listener: &TcpListener) -> WebSocketStream<TcpStream> {
-        timeout(Duration::from_secs(5), async {
-            accept_async(listener.accept().await.unwrap().0)
-                .await
-                .unwrap()
-        })
-        .await
-        .unwrap()
+    fn accept(listener: &TcpListener) -> TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(500)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "hardware did not connect");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
     }
 
-    /// Wait for a state reached through socket traffic, without polling sleeps.
-    async fn wait_for(controller: &Controller, predicate: impl Fn(&State) -> bool) -> State {
-        timeout(Duration::from_secs(5), async {
-            let mut states = controller.subscribe();
-            loop {
-                let state = states.borrow_and_update().clone();
-                if predicate(&state) {
-                    return state;
-                }
-                states.changed().await.unwrap();
+    /// Wait for a state reached through socket traffic under a test deadline.
+    fn wait_for(controller: &Controller, predicate: impl Fn(&State) -> bool) -> State {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = controller.snapshot();
+            if predicate(&state) {
+                return state;
             }
-        })
-        .await
-        .unwrap()
+            assert!(Instant::now() < deadline, "hardware state did not arrive");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Read the next hardware reply under the carrier's response deadline.
-    async fn read(socket: &mut WebSocketStream<TcpStream>) -> Value {
-        let frame = timeout(Duration::from_millis(500), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+    fn read(socket: &mut WebSocket<TcpStream>) -> Value {
+        let frame = socket.read().unwrap();
         serde_json::from_str(frame.to_text().unwrap()).unwrap()
     }
 
     /// Boot and merge state without any frontend reading notifications.
-    #[tokio::test]
-    async fn test_hardware_boot_and_partial_nameplates_need_no_frontend() {
-        let (controller, _listener, mut socket) = connect().await;
+    #[test]
+    fn test_hardware_boot_and_partial_nameplates_need_no_frontend() {
+        let (controller, _listener, mut socket) = connect();
         socket
             .send(r#"{"d":"revbits","id":"i2c@0x20","payload":{"op":"read"}}"#.into())
-            .await
             .unwrap();
         assert_eq!(
-            read(&mut socket).await,
+            read(&mut socket),
             json!({
                 "d": "revbits", "id": "i2c@0x20", "payload": {"version": 1, "revision": 11}
             })
         );
-        socket.send(r#"{"d":"nameplate","id":"self","payload":{"env":"develop","name":"test device","serial":"test-serial","expiry":1800000000}}"#.into()).await.unwrap();
+        socket.send(r#"{"d":"nameplate","id":"self","payload":{"env":"develop","name":"test device","serial":"test-serial","expiry":1800000000}}"#.into()).unwrap();
         socket
             .send(r#"{"d":"nameplate","id":"self","payload":{"name":""}}"#.into())
-            .await
             .unwrap();
         let state = wait_for(&controller, |state| {
             state.nameplate.known && state.nameplate.name.is_none()
-        })
-        .await;
+        });
         assert_eq!(state.nameplate.env.as_deref(), Some("develop"));
         assert_eq!(state.nameplate.serial.as_deref(), Some("test-serial"));
         assert_eq!(state.nameplate.expiry, Some(1_800_000_000));
         socket
             .send(r#"{"d":"nameplate","id":"self","payload":{"expiry":null}}"#.into())
-            .await
             .unwrap();
-        wait_for(&controller, |state| state.nameplate.expiry.is_none()).await;
+        wait_for(&controller, |state| state.nameplate.expiry.is_none());
 
-        socket.send(r#"{"d":"rgbled","id":"0","payload":{"colors":[[0.1,0.2,0.3],[0,0,0],[1,1,1],[0.4,0,0]]}}"#.into()).await.unwrap();
-        let state = wait_for(&controller, |state| state.colors[0][0] == 0.1).await;
+        socket.send(r#"{"d":"rgbled","id":"0","payload":{"colors":[[0.1,0.2,0.3],[0,0,0],[1,1,1],[0.4,0,0]]}}"#.into()).unwrap();
+        let state = wait_for(&controller, |state| state.colors[0][0] == 0.1);
         assert!(state.phase == Phase::Booting);
         socket
             .send(r#"{"d":"switch","id":"22","payload":{"level":"high"}}"#.into())
-            .await
             .unwrap();
-        let state = wait_for(&controller, |state| state.phase == Phase::Firmware).await;
+        let state = wait_for(&controller, |state| state.phase == Phase::Firmware);
         assert_eq!(state.colors[0], [0.1, 0.2, 0.3]);
         socket
             .send(r#"{"d":"switch","id":"22","payload":{"level":"low"}}"#.into())
-            .await
             .unwrap();
-        wait_for(&controller, |state| state.phase == Phase::Booting).await;
+        wait_for(&controller, |state| state.phase == Phase::Booting);
         controller.stop();
     }
 
     /// Bad frames leave state intact and do not prevent required replies.
-    #[tokio::test]
-    async fn test_invalid_and_unknown_frames_do_not_corrupt_state() {
-        let (controller, _listener, mut socket) = connect().await;
+    #[test]
+    fn test_invalid_and_unknown_frames_do_not_corrupt_state() {
+        let (controller, _listener, mut socket) = connect();
         for frame in [
             "not json",
             r#"{"d":"unknown","id":"0","payload":{"future":true}}"#,
@@ -484,13 +517,12 @@ mod tests {
             r#"{"d":"rgbled","id":"0","payload":{"colors":[[1,0,0]]}}"#,
             r#"{"d":"switch","id":"99","payload":{"level":"high"}}"#,
         ] {
-            socket.send(frame.into()).await.unwrap();
+            socket.send(frame.into()).unwrap();
         }
         socket
             .send(r#"{"d":"revbits","id":"i2c@0x20","payload":{"op":"read"}}"#.into())
-            .await
             .unwrap();
-        read(&mut socket).await;
+        read(&mut socket);
         let state = controller.snapshot();
         assert!(!state.nameplate.known);
         assert!(state.nameplate.env.is_none());
@@ -500,47 +532,45 @@ mod tests {
     }
 
     /// Button edges are ordered, deduplicated and cleared on a guest restart.
-    #[tokio::test]
-    async fn test_button_edges_and_reconnect_reset_transient_state() {
-        let (controller, listener, mut socket) = connect().await;
+    #[test]
+    fn test_button_edges_and_reconnect_reset_transient_state() {
+        let (controller, listener, mut socket) = connect();
         let generation = controller.snapshot().generation;
-        controller.button(true, generation).await.unwrap();
+        controller.button(true, generation).unwrap();
         assert_eq!(
-            read(&mut socket).await,
+            read(&mut socket),
             json!({
                 "d": "button", "id": "5", "payload": {"edge": "falling"}
             })
         );
-        controller.button(true, generation).await.unwrap();
-        controller.button(false, generation).await.unwrap();
+        controller.button(true, generation).unwrap();
+        controller.button(false, generation).unwrap();
         assert_eq!(
-            read(&mut socket).await,
+            read(&mut socket),
             json!({
                 "d": "button", "id": "5", "payload": {"edge": "rising"}
             })
         );
-        controller.button(true, generation).await.unwrap();
-        read(&mut socket).await;
+        controller.button(true, generation).unwrap();
+        read(&mut socket);
         socket
             .send(r#"{"d":"nameplate","id":"self","payload":{"name":"before restart"}}"#.into())
-            .await
             .unwrap();
-        wait_for(&controller, |state| state.nameplate.known).await;
-        socket.close(None).await.unwrap();
+        wait_for(&controller, |state| state.nameplate.known);
+        socket.close(None).unwrap();
         drop(socket);
-        let state = wait_for(&controller, |state| !state.connected).await;
+        let state = wait_for(&controller, |state| !state.connected);
         assert!(!state.pressed);
         assert!(!state.nameplate.known);
         assert!(state.phase == Phase::Booting);
-        assert!(controller.button(true, generation).await.is_err());
-        let mut socket = accept(&listener).await;
-        wait_for(&controller, |state| state.connected).await;
-        assert!(controller.button(true, generation).await.is_err());
+        assert!(controller.button(true, generation).is_err());
+        let mut socket = tungstenite::accept(accept(&listener)).unwrap();
+        wait_for(&controller, |state| state.connected);
+        assert!(controller.button(true, generation).is_err());
         socket
             .send(r#"{"d":"revbits","id":"i2c@0x20","payload":{"op":"read"}}"#.into())
-            .await
             .unwrap();
-        assert_eq!(read(&mut socket).await["d"], "revbits");
+        assert_eq!(read(&mut socket)["d"], "revbits");
         controller.stop();
         assert!(controller.snapshot().phase == Phase::Stopped);
         controller
@@ -550,38 +580,102 @@ mod tests {
     }
 
     /// A pending handshake survives boot delays on QEMU's forwarded port.
-    #[tokio::test]
-    async fn test_a_pending_boot_connection_is_not_replaced() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    #[test]
+    fn test_a_pending_boot_connection_is_not_replaced() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let controller = Controller::default();
-        controller.start(
-            &tokio::runtime::Handle::current(),
-            listener.local_addr().unwrap(),
-        );
-        let (stream, _) = timeout(Duration::from_secs(5), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            timeout(Duration::from_millis(1200), listener.accept())
-                .await
-                .is_err()
-        );
-        let mut socket = accept_async(stream).await.unwrap();
+        controller.start(listener.local_addr().unwrap());
+        let stream = accept(&listener);
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+        let mut socket = tungstenite::accept(stream).unwrap();
         socket
             .send(r#"{"d":"revbits","id":"i2c@0x20","payload":{"op":"read"}}"#.into())
-            .await
             .unwrap();
-        assert_eq!(read(&mut socket).await["payload"]["revision"], 11);
+        assert_eq!(read(&mut socket)["payload"]["revision"], 11);
+        controller.stop();
+    }
+
+    /// Stopping closes a blocked handshake and joins the socket worker promptly.
+    #[test]
+    fn test_stop_interrupts_a_pending_handshake() {
+        use std::io::Read as _;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = Controller::default();
+        controller.start(listener.local_addr().unwrap());
+        let mut stream = accept(&listener);
+        let (done, finished) = mpsc::channel();
+        let worker = controller.clone();
+        thread::spawn(move || {
+            worker.stop();
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_millis(500)).unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        assert!(controller.snapshot().phase == Phase::Stopped);
+    }
+
+    /// Idle reads do not hold up input delivery or a release after focus loss.
+    #[test]
+    fn test_idle_socket_accepts_button_inputs() {
+        let (controller, _listener, mut socket) = connect();
+        thread::sleep(Duration::from_millis(50));
+        let reply = controller
+            .enqueue_button(true, controller.snapshot().generation)
+            .unwrap();
+        reply
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read(&mut socket)["payload"]["edge"], "falling");
+        controller.release_button();
+        assert_eq!(read(&mut socket)["payload"]["edge"], "rising");
+        wait_for(&controller, |state| !state.pressed);
+        controller.stop();
+    }
+
+    /// A read timeout preserves an incomplete message and still permits inputs.
+    #[test]
+    fn test_fragmented_frames_survive_idle_reads() {
+        use tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+        let (controller, _listener, mut socket) = connect();
+        socket
+            .send(Message::Frame(Frame::message(
+                br#"{"d":"revbits","id":"carrier","payload":"#.as_slice(),
+                OpCode::Data(Data::Text),
+                false,
+            )))
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let reply = controller
+            .enqueue_button(true, controller.snapshot().generation)
+            .unwrap();
+        reply
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read(&mut socket)["payload"]["edge"], "falling");
+        socket
+            .send(Message::Frame(Frame::message(
+                br#"{"op":"read"}}"#.as_slice(),
+                OpCode::Data(Data::Continue),
+                true,
+            )))
+            .unwrap();
+        assert_eq!(read(&mut socket)["payload"]["revision"], 11);
         controller.stop();
     }
 
     /// Oversized messages terminate the connection before any state is applied.
-    #[tokio::test]
-    async fn test_oversized_hardware_frames_disconnect() {
-        let (controller, _listener, mut socket) = connect().await;
-        socket.send("x".repeat(65 * 1024).into()).await.unwrap();
-        let state = wait_for(&controller, |state| !state.connected).await;
+    #[test]
+    fn test_oversized_hardware_frames_disconnect() {
+        let (controller, _listener, mut socket) = connect();
+        socket.send("x".repeat(65 * 1024).into()).unwrap();
+        let state = wait_for(&controller, |state| !state.connected);
         assert!(!state.nameplate.known);
         controller.stop();
     }

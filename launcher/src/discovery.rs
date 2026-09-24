@@ -37,7 +37,7 @@ use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::{log, trace};
-use crate::hardware::State;
+use crate::hardware::Controller;
 use crate::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 
 /// How often this emulator re-registers itself. It is the heartbeat keeping
@@ -53,7 +53,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// anything near this is not a registry.
 const MAX_RESPONSE: u64 = 1 << 20;
 
-/// This emulator's entry, shared by the heartbeat and hardware controller.
+/// This emulator's entry, shared by the heartbeat and shutdown.
 static ENTRY: OnceLock<Mutex<Instance>> = OnceLock::new();
 
 /// Serializes publication with withdrawal and prevents a stopped guest returning.
@@ -129,8 +129,8 @@ pub(crate) fn request_stop(port: u16) -> Result<()> {
 }
 
 /// Publish this emulator, and start the heartbeat that keeps it published.
-/// Called before the guest has booted, so the entry starts out not ready.
-pub(crate) fn register(port: u16, disk: &Path) {
+/// Each heartbeat takes readiness and identity from the latest hardware state.
+pub(crate) fn register(port: u16, disk: &Path, hardware: Controller) {
     let instance = Instance {
         port,
         disk: disk
@@ -148,30 +148,17 @@ pub(crate) fn register(port: u16, disk: &Path) {
         return;
     }
 
-    publish();
-    thread::spawn(|| {
+    publish(&hardware);
+    thread::spawn(move || {
         loop {
             thread::sleep(HEARTBEAT);
-            publish();
+            publish(&hardware);
         }
     });
 }
 
-/// Copy the hardware state for the next heartbeat without doing network I/O.
-pub(crate) fn state(state: &State) {
-    let Some(entry) = ENTRY.get() else {
-        return;
-    };
-    let mut entry = entry.lock().unwrap();
-    entry.ready = state.connected && state.nameplate.known;
-    entry.env = state.nameplate.env.clone();
-    entry.name = state.nameplate.name.clone();
-    entry.serial = state.nameplate.serial.clone();
-    entry.expiry = state.nameplate.expiry;
-}
-
 /// Send the current entry to the registry, and act on whatever comes back.
-fn publish() {
+fn publish(hardware: &Controller) {
     let publishing = PUBLISHING.lock().unwrap();
     if !*publishing || crate::runtime::stopping() {
         return;
@@ -179,7 +166,16 @@ fn publish() {
     let Some(entry) = ENTRY.get() else {
         return;
     };
-    let body = serde_json::to_vec(&*entry.lock().unwrap());
+    let body = {
+        let state = hardware.snapshot();
+        let mut entry = entry.lock().unwrap();
+        entry.ready = state.connected && state.nameplate.known;
+        entry.env = state.nameplate.env;
+        entry.name = state.nameplate.name;
+        entry.serial = state.nameplate.serial;
+        entry.expiry = state.nameplate.expiry;
+        serde_json::to_vec(&*entry)
+    };
     let body = match body {
         Ok(body) => body,
         Err(e) => {

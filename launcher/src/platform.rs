@@ -47,15 +47,12 @@ mod macos_menu;
 /// Recognize a terminal interrupt also delivered directly to QEMU.
 #[cfg(unix)]
 pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
     use std::os::unix::process::ExitStatusExt as _;
-    use tokio::signal::unix::SignalKind;
-    let signal = status.signal()?;
-    if signal == SignalKind::interrupt().as_raw_value() {
-        Some(130)
-    } else if signal == SignalKind::terminate().as_raw_value() {
-        Some(143)
-    } else {
-        None
+    match status.signal()? {
+        SIGINT => Some(130),
+        SIGTERM => Some(143),
+        _ => None,
     }
 }
 
@@ -65,74 +62,46 @@ pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
     (status.code() == Some(0xc000013a_u32 as i32)).then_some(130)
 }
 
-/// Installed Unix interrupt and termination listeners.
+/// Handle Unix termination on a worker, keeping cleanup out of signal handlers.
 #[cfg(unix)]
-pub(crate) struct Signals {
-    /// Ctrl-C at a terminal or SIGINT from a supervisor.
-    interrupt: tokio::signal::unix::Signal,
-    /// Termination requested by a supervisor.
-    terminate: tokio::signal::unix::Signal,
+pub(crate) fn install_shutdown() -> std::io::Result<()> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+    let mut signals = Signals::new([SIGINT, SIGTERM])?;
+    std::thread::Builder::new()
+        .name("signals".to_owned())
+        .spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                crate::runtime::shut_down(128 + signal);
+            }
+        })?;
+    Ok(())
 }
 
-#[cfg(unix)]
-impl Signals {
-    /// Install handlers while a Tokio executor is entered.
-    pub(crate) fn new() -> std::io::Result<Self> {
-        use tokio::signal::unix::{SignalKind, signal};
-        Ok(Self {
-            interrupt: signal(SignalKind::interrupt())?,
-            terminate: signal(SignalKind::terminate())?,
-        })
-    }
+/// Handle console termination on the dedicated thread supplied by Windows.
+#[cfg(windows)]
+pub(crate) fn install_shutdown() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        SetConsoleCtrlHandler,
+    };
 
-    /// Return the conventional exit code for the first shutdown signal.
-    pub(crate) async fn wait(mut self) -> i32 {
-        tokio::select! {
-            _ = self.interrupt.recv() => 130,
-            _ = self.terminate.recv() => 143,
+    /// Keep the handler alive until cleanup ends, including console closure.
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        match event {
+            CTRL_C_EVENT => crate::runtime::shut_down(130),
+            CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+                crate::runtime::shut_down(143)
+            }
+            _ => 0,
         }
     }
-}
 
-/// Installed Windows console lifecycle listeners.
-#[cfg(windows)]
-pub(crate) struct Signals {
-    /// Ctrl-C at a terminal.
-    interrupt: tokio::signal::windows::CtrlC,
-    /// Ctrl-Break at a terminal.
-    terminate: tokio::signal::windows::CtrlBreak,
-    /// Closure of the attached console.
-    close: tokio::signal::windows::CtrlClose,
-    /// End of the current login session.
-    logoff: tokio::signal::windows::CtrlLogoff,
-    /// Shutdown of the host.
-    shutdown: tokio::signal::windows::CtrlShutdown,
-}
-
-#[cfg(windows)]
-impl Signals {
-    /// Install console handlers while a Tokio executor is entered.
-    pub(crate) fn new() -> std::io::Result<Self> {
-        use tokio::signal::windows;
-        Ok(Self {
-            interrupt: windows::ctrl_c()?,
-            terminate: windows::ctrl_break()?,
-            close: windows::ctrl_close()?,
-            logoff: windows::ctrl_logoff()?,
-            shutdown: windows::ctrl_shutdown()?,
-        })
+    // SAFETY: the handler has the documented ABI and lives for the process
+    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
     }
-
-    /// Return the conventional exit code for the first console signal.
-    pub(crate) async fn wait(mut self) -> i32 {
-        tokio::select! {
-            _ = self.interrupt.recv() => 130,
-            _ = self.terminate.recv() => 143,
-            _ = self.close.recv() => 143,
-            _ = self.logoff.recv() => 143,
-            _ = self.shutdown.recv() => 143,
-        }
-    }
+    Ok(())
 }
 
 /// Install the platform's native actions for starting another emulator.

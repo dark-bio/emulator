@@ -135,10 +135,8 @@ pub(crate) fn prepare(
     ))
 }
 
-/// Background executor and hardware state shared by either launch mode.
+/// Hardware state and lifecycle shared by either launch mode.
 pub(crate) struct Runtime {
-    /// Runs I/O and signal handling without Tauri's event loop.
-    executor: tokio::runtime::Runtime,
     /// The hardware state shown by an optional frontend.
     pub(crate) hardware: Controller,
 }
@@ -146,21 +144,8 @@ pub(crate) struct Runtime {
 impl Runtime {
     /// Install lifecycle handling before starting QEMU.
     pub(crate) fn new() -> Result<Self> {
-        let executor = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()?;
-        let signals = {
-            let _entered = executor.enter();
-            platform::Signals::new()?
-        };
-        executor.spawn(async move {
-            let code = signals.wait().await;
-            // Registry withdrawal performs blocking I/O.
-            tokio::task::spawn_blocking(move || shut_down(code));
-        });
+        platform::install_shutdown()?;
         Ok(Self {
-            executor,
             hardware: Controller::default(),
         })
     }
@@ -185,19 +170,8 @@ impl Runtime {
             &mut pending.host_port,
         )?;
         disk::mark_booted(disk);
-        discovery::register(pending.host_port.port(), disk);
-        let mut states = self.hardware.subscribe();
-        self.hardware
-            .start(self.executor.handle(), pending.host_port.addr());
-
-        // Registry updates only take a lock here. The heartbeat publishes
-        // them separately, so a stalled registry never delays hardware I/O.
-        let publication = self.executor.spawn(async move {
-            while states.changed().await.is_ok() {
-                let state = states.borrow_and_update().clone();
-                discovery::state(&state);
-            }
-        });
+        self.hardware.start(pending.host_port.addr());
+        discovery::register(pending.host_port.port(), disk, self.hardware.clone());
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {
@@ -212,7 +186,6 @@ impl Runtime {
         thread::spawn(move || {
             let result = child.wait().context("lost track of the QEMU process");
             hardware.stop();
-            publication.abort();
             discovery::deregister();
             let result = result.and_then(|status| {
                 log!("[launcher] QEMU exited with {status}");

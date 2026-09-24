@@ -67,19 +67,15 @@ pub(crate) fn release_button(app: &tauri::AppHandle) {
     let Some(view) = app.try_state::<View>() else {
         return;
     };
-    let hardware = view.hardware.clone();
-    let generation = hardware.snapshot().generation;
-    tauri::async_runtime::spawn(async move {
-        let _ = hardware.button(false, generation).await;
-    });
+    view.hardware.release_button();
 }
 
 /// Apply a user button interaction without exposing GPIO or bus envelopes.
 #[tauri::command]
-pub(crate) async fn set_button_pressed(
+pub(crate) fn set_button_pressed(
     view: tauri::State<'_, View>,
     pressed: bool,
     generation: u64,
 ) -> Result<(), String> {
-    view.hardware.button(pressed, generation).await
+    view.hardware.button(pressed, generation)
 }
