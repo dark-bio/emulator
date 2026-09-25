@@ -11,6 +11,8 @@
 
 use std::process::{Command, Output};
 
+mod support;
+
 /// Every command the tool has, in the order the root lists them.
 const COMMANDS: [&str; 9] = [
     "start",
@@ -26,7 +28,7 @@ const COMMANDS: [&str; 9] = [
 
 /// Run the built binary with `arguments` and hand back what it did.
 fn run(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
+    Command::new(support::executable())
         .args(arguments)
         .env("NO_COLOR", "1")
         .env("CI", "1")
@@ -80,7 +82,10 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     std::fs::write(application_data, "not a directory").unwrap();
 
     // A fresh cached version exercises notices without starting network lookups
-    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let output = run(&["--json", "--version"]);
+    assert!(output.status.success());
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let version = semver::Version::parse(document["version"].as_str().unwrap()).unwrap();
     let newest = format!("{}.0.0", version.major + 1);
     let answer = serde_json::to_vec(&serde_json::json!({
         "asked": time::OffsetDateTime::now_utc()
@@ -90,7 +95,7 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     .unwrap();
     std::fs::write(cache.join("update.json"), &answer).unwrap();
     let invoke = |arguments: &[&str], ci: Option<&str>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ark-emulator"));
+        let mut command = Command::new(support::executable());
         command
             .args(arguments)
             .env_remove("CI")
@@ -382,7 +387,7 @@ fn test_headless_startup_error_without_a_display_or_no_input_flag() {
         "not a directory",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
+    let output = Command::new(support::executable())
         .args(["--headless", "--json"])
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
