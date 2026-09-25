@@ -62,6 +62,15 @@ pub(crate) fn run(
         Some(_) => Sink::Events(output.clone()),
         None => Sink::Quiet,
     });
+
+    // Valid management commands start with the kept release note
+    if matches!(
+        command,
+        Some(Command::Start { .. } | Command::List | Command::Stop { .. } | Command::Wipe { .. })
+    ) {
+        crate::update::start(output, time::OffsetDateTime::now_utc());
+    }
+
     match dispatch(command, global, output, identifier, package) {
         Ok(()) => 0,
         Err(error) => {
@@ -92,7 +101,7 @@ fn dispatch(
         Some(Command::List) => list(output, &paths),
         Some(Command::Stop { emulator, all }) => stop(emulator.as_deref(), all, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
-        Some(Command::Doctor) => crate::doctor::doctor(output, &paths),
+        Some(Command::Doctor) => crate::doctor::doctor(output, &paths, global.timeout),
         Some(Command::Completions { .. } | Command::Help { .. }) => {
             unreachable!("answered above")
         }

@@ -88,7 +88,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Whole wait for a start or a stop
+    /// Whole wait for a start or a stop; each network wait in doctor
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 

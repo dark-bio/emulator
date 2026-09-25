@@ -27,6 +27,7 @@ fn run(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
         .args(arguments)
         .env("NO_COLOR", "1")
+        .env("CI", "1")
         .output()
         .expect("the binary runs")
 }
@@ -39,6 +40,138 @@ fn stdout(output: &Output) -> String {
 /// What a run put on stderr.
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The private update entry point does nothing and prints nothing under CI.
+#[test]
+fn test_update_entry_point_is_silent_under_ci() {
+    let output = run(&["__update"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+/// A fresh isolated answer prints one note while help and invalid invocations stay quiet.
+#[cfg(unix)]
+#[test]
+fn test_update_note_preserves_command_output_and_excludes_noncommands() {
+    // macOS uses Library/Caches while other Unix targets use XDG_CACHE_HOME
+    let directory = tempfile::TempDir::new().unwrap();
+    let home = directory.path().join("home");
+    let xdg_cache = directory.path().join("cache");
+    let cache = if cfg!(target_os = "macos") {
+        home.join("Library/Caches/bio.dark.emulator")
+    } else {
+        xdg_cache.join("bio.dark.emulator")
+    };
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let newest = format!("{}.0.0", version.major + 1);
+    let answer = serde_json::to_vec(&serde_json::json!({
+        "asked": time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339).unwrap(),
+        "newest": newest,
+    }))
+    .unwrap();
+    std::fs::write(cache.join("update.json"), &answer).unwrap();
+    let invoke = |arguments: &[&str], ci: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ark-emulator"));
+        command
+            .args(arguments)
+            .env_remove("CI")
+            .env("HOME", &home)
+            .env("XDG_CACHE_HOME", &xdg_cache)
+            .env("NO_COLOR", "1");
+        if let Some(ci) = ci {
+            command.env("CI", ci);
+        }
+        command.output().unwrap()
+    };
+
+    // The note repeats in both outputs without changing the result or exit
+    let message = format!(
+        "Ark Emulator {newest} is available, this is {version}; download it from https://github.com/dark-bio/emulator"
+    );
+    for json in [false, true] {
+        let mut arguments = vec!["list"];
+        if json {
+            arguments.push("--json");
+        }
+        let baseline = invoke(&arguments, Some("1"));
+        for ci in [None, Some("")] {
+            let output = invoke(&arguments, ci);
+            assert_eq!(
+                output.status.code(),
+                baseline.status.code(),
+                "json={json}, CI={ci:?}"
+            );
+            assert_eq!(output.stdout, baseline.stdout, "json={json}, CI={ci:?}");
+            let text = stderr(&output);
+            if json {
+                let events: Vec<serde_json::Value> = text
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(
+                    events[0],
+                    serde_json::json!({"event":"note", "message":message})
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["event"] == "note")
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(text.starts_with("note: Ark Emulator"), "{text}");
+                assert!(
+                    text.split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .starts_with(&format!("note: {message}")),
+                    "{text}"
+                );
+                assert_eq!(
+                    text.lines()
+                        .filter(|line| line.starts_with("note:"))
+                        .count(),
+                    1
+                );
+            }
+        }
+
+        // Quiet and CI suppress the notice without changing the result
+        arguments.push("-q");
+        let quiet = invoke(&arguments, None);
+        assert_eq!(quiet.stdout, baseline.stdout);
+        assert_eq!(quiet.status.code(), baseline.status.code());
+        assert!(!stderr(&quiet).contains("is available"));
+        assert!(!stderr(&baseline).contains("is available"));
+    }
+
+    // These paths must neither announce nor refresh; doctor and the window never run here
+    for arguments in [
+        vec!["help"],
+        vec!["help", "--all"],
+        vec!["-h"],
+        vec!["--help"],
+        vec!["list", "--help"],
+        vec!["completions", "zsh"],
+        vec!["--version"],
+        vec!["--json", "--version"],
+        vec!["list", "--bogus"],
+        vec!["list", "--timeout", "0"],
+        vec!["list", "-q", "-v"],
+        vec!["--version", "list"],
+        vec!["--image", "unused.ark", "list"],
+        vec!["__update", "extra"],
+    ] {
+        let output = invoke(&arguments, None);
+        assert!(!stderr(&output).contains("is available"), "{arguments:?}");
+    }
+    assert_eq!(std::fs::read(cache.join("update.json")).unwrap(), answer);
 }
 
 #[test]

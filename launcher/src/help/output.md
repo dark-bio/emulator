@@ -30,6 +30,21 @@ Absent values print as `-`, empty lists as `none`, and the two truth values as
 `_bytes` in JSON. Times are ISO 8601 in UTC. The reading output may show fewer
 fields than the document; --json always has them all.
 
+## New releases
+
+At most once an hour, ark-emulator reads the redirect at
+https://github.com/dark-bio/emulator/releases/latest to learn the newest
+release. The request carries nothing about this computer, its emulators or
+the running version. It runs in a detached copy that exits within 30 s, so no
+command waits for it. The answer is kept in update.json in the emulator's
+cache directory, and a nonempty CI turns the lookup off.
+
+While the kept answer names a newer version, start, list, stop and wipe start
+with a note naming both versions and how to upgrade. Under --json it is an
+ordinary note event. The note never changes the result or the exit code, and
+-q hides it. doctor looks up afresh and reports the answer as its update
+check.
+
 ## Log files
 
 Every emulator writes its launcher's own lines to a file under the data

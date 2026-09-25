@@ -73,6 +73,7 @@ mod qemu;
 mod registry;
 mod settings;
 mod style;
+mod update;
 mod verbs;
 mod webview;
 
@@ -140,12 +141,18 @@ fn usage(error: &clap::Error) -> Error {
 }
 
 fn main() {
+    // Handle the detached copy before parsing or initializing command or window state
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if arguments.len() == 2 && arguments[1] == update::ENTRY_POINT {
+        update::run();
+        return;
+    }
+
     // Parsed through the help tree, so that -h and --help after a command
     // print the page `help <command>` prints, and a mistake typed at the
     // command line comes back in the house error shape, JSON included. The
     // console is attached before anything is printed, since a Windows release
     // build has none of its own.
-    let arguments: Vec<_> = std::env::args_os().collect();
     let json = arguments
         .iter()
         .skip(1)

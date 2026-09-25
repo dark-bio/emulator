@@ -480,7 +480,7 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)]) -> String {
 
 /// One line per check, the name marked by its result, the detail muted and
 /// wrapped under its own column, and the hint on a line of its own beneath a
-/// failure.
+/// warning or failure.
 fn checklist(theme: &Theme, rows: &[Value]) -> String {
     let labels = rows
         .iter()
@@ -495,6 +495,7 @@ fn checklist(theme: &Theme, rows: &[Value]) -> String {
             let result = row["result"].as_str().unwrap_or("-");
             let role = match result {
                 "ok" => Role::Success,
+                "warn" => Role::Attention,
                 "fail" => Role::Failure,
                 _ => Role::Muted,
             };
@@ -616,6 +617,24 @@ mod tests {
         assert_eq!(
             checklist(&theme, &rows),
             "  ok qemu          11.1.1 on PATH\n  x acceleration   software emulation only\n    hint: add your user to the kvm group\n  - image          skipped: none chosen yet"
+        );
+    }
+
+    /// A warning uses the attention mark and color, and keeps its upgrade hint.
+    #[test]
+    fn test_a_checklist_warning_uses_attention_and_carries_its_hint() {
+        let rows = [json!({
+            "name": "update", "result": "warn",
+            "detail": "Ark Emulator 0.2.3 is available, this is 0.2.2",
+            "hint": "download it from https://github.com/dark-bio/emulator",
+        })];
+        assert_eq!(
+            checklist(&Theme::fixed(80, Color::Off, false), &rows),
+            "  ! update   Ark Emulator 0.2.3 is available, this is 0.2.2\n    hint: download it from https://github.com/dark-bio/emulator"
+        );
+        assert_eq!(
+            checklist(&Theme::fixed(80, Color::True, true), &rows),
+            "  \x1b[1m\x1b[38;2;232;162;74m! update\x1b[0m  \x1b[38;2;124;128;152mArk Emulator 0.2.3 is available, this is 0.2.2\x1b[0m\n    \x1b[1m\x1b[38;2;137;180;250mhint:\x1b[0m download it from https://github.com/dark-bio/emulator"
         );
     }
 

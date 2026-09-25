@@ -46,6 +46,11 @@ an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
 cannot keep the two streams apart, drop the lines that start with
 `{"event":` under --json; what remains is the document.
 
+A note that a newer Ark Emulator is available names the upgrade and repeats
+on every start, list, stop and wipe until it happens, so pass it on to the
+person; upgrading is their call. doctor reports the same as its update check,
+and a nonempty CI turns the note off.
+
 A start without hardware acceleration takes minutes, so run it in the
 background and follow stderr, without starting another:
 
@@ -58,9 +63,10 @@ background and follow stderr, without starting another:
 `ark-emulator list` shows every running emulator with its locator, image,
 ready state and what the firmware has reported about the device, under the
 names `ark devices` uses for the same facts.
-`ark-emulator doctor` checks this computer and this build, QEMU, the bundled
-firmware, hardware acceleration, the data directory, the settings, the
-remembered image, the registry and a free port, and says what to fix; its
+`ark-emulator doctor` checks this computer and this build, whether a newer
+release is out, QEMU, the bundled firmware, hardware acceleration, the data
+directory, the settings, the remembered image, the registry and a free port,
+and says what to fix; its
 JSON also carries where everything lives. Every emulator writes its launcher
 log to a file under the data directory, named by port; start --json and
 list --json name it, and a failed start quotes its tail. The device itself
