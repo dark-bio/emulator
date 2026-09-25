@@ -1,0 +1,506 @@
+name: Build and Smoke Test One Platform (Reusable)
+
+# Builds one platform and smoke tests its artifacts on a clean machine.
+# Each call can start its smoke test as soon as its own build finishes.
+#
+# The no-install artifact is the AppImage on Linux, the raw .app on macOS, and a
+# hand-assembled portable .zip on Windows: NSIS has no portable mode, and Tauri
+# gives no other way to get one.
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      bundles:
+        type: string
+        required: true
+      # The GitHub environment holding the Apple signing secrets, or empty to
+      # build unsigned. Passing a name is what makes a run sign. Reading those
+      # secrets takes both halves of an awkward contract: the job below has to
+      # declare the environment, because `on.workflow_call` has no `environment`
+      # keyword for the caller to use, and the caller has to pass
+      # `secrets: inherit` anyway, which grants the right to resolve a secrets
+      # context rather than carrying any value. With one half missing the
+      # context is empty and every secret reads as "".
+      #
+      # release.yml names it; build-and-smoke.yml passes nothing, so pull
+      # requests and forks keep the ad-hoc signature they have always had.
+      signing-environment:
+        type: string
+        required: false
+        default: ""
+
+env:
+  # Bumping the bundled firmware is updating these values: the release tag, and
+  # the digest of each asset that release publishes.
+  FIRMWARE_TAG: "v0.11.6"
+  FIRMWARE_ARM64_KERNEL_SHA256: "e45e1f6083d1ed45db6647b422e32b6ae6dc54de7b8190b7b97744fb293412e3"
+  FIRMWARE_ARM64_INITRD_SHA256: "7f3dfb81c3980dbfc0dafce4c5400a31c2878410e7b0f9aff3e7eda28d0ba865"
+  FIRMWARE_AMD64_KERNEL_SHA256: "40f620bc8c93d952e57dd8dfc0f94fca1759d192a4fc4a260705d50ca378559c"
+  FIRMWARE_AMD64_INITRD_SHA256: "f18faeff4ac545417d3353feeedc2d2edefe42518234cdb85aa02e749ff138df"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    environment: ${{ inputs.signing-environment }}
+    env:
+      # Hoisted into env because the verify step needs it in the shell as well
+      # as in a step `if`, and the smoke job reads the same value. Deliberately
+      # not the certificate itself: Tauri's bundler runs a keychain import of
+      # its own whenever it finds APPLE_CERTIFICATE in the environment, and this
+      # workflow has to do that import earlier, before the QEMU fetch signs the
+      # bundled dylibs.
+      SIGN_MACOS: ${{ inputs.signing-environment != '' }}
+      # Read by fetch-qemu-macos.sh for those dylibs and by Tauri's bundler,
+      # which prefers this over bundle.macOS.signingIdentity in the config. It
+      # has to fall back to the config's own "-" rather than to empty: an
+      # unsigned bundle will not execute on Apple Silicon at all, and codesign
+      # reads a set-but-empty identity as "no identity found".
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        # Skipped on tags so a release always builds from scratch.
+        if: github.ref_type != 'tag'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install tauri-cli
+        # Use Tauri's release binaries on every run, including tags.
+        # A missing binary fails instead of falling back to a source build.
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          format=zip
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            format=tgz
+          fi
+          cargo binstall tauri-cli --version '=2.11.5' --pkg-fmt "$format" \
+            --strategies crate-meta-data --no-confirm --force
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            qemu-system-x86 qemu-utils ipxe-qemu
+
+      - name: Fetch bundled QEMU (Linux)
+        if: runner.os == 'Linux'
+        run: .github/scripts/fetch-qemu-linux.sh
+
+      - name: Import the Apple signing credentials
+        # A throwaway keychain rather than the login one, which on a runner is
+        # unlocked with a published password. It has to exist before the QEMU
+        # fetch, which signs the bundled dylibs with this identity.
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # Presence only, never a value, so an empty secrets context reports
+          # itself instead of failing later inside security(1).
+          SECRETS_SEEN: >-
+            APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE != '' }}
+            APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+            APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+            APPLE_API_KEY=${{ secrets.APPLE_API_KEY != '' }}
+            APPLE_API_KEY_P8=${{ secrets.APPLE_API_KEY_P8 != '' }}
+            APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER != '' }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ] \
+            || [ -z "$APPLE_API_KEY" ] || [ -z "$APPLE_API_KEY_P8" ] \
+            || [ -z "$APPLE_API_ISSUER" ] || [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then
+            # The identity is checked against its fallback rather than against
+            # empty: absent, it silently ad-hoc signs a run that then fails on
+            # the far side, at notarization.
+            echo "the signing environment supplied no complete set of secrets" >&2
+            echo "  repository:  ${{ github.repository }}" >&2
+            echo "  environment: ${{ inputs.signing-environment }}" >&2
+            echo "  visible:     $SECRETS_SEEN" >&2
+            echo "A fork cannot read the upstream repository's secrets, and an" >&2
+            echo "environment that does not exist here is created empty." >&2
+            exit 1
+          fi
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          password="$(openssl rand -base64 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$certificate"
+
+          # Without a partition list every codesign call raises a UI prompt for
+          # keychain access, which on a headless runner hangs until the timeout.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" > /dev/null
+
+          # codesign only searches keychains on the user's search list, so the
+          # new one is prepended to it rather than replacing it.
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+
+          # Guards against the two key secrets being filled in the other way
+          # round, which otherwise surfaces as an opaque auth failure.
+          if ! grep -q 'BEGIN PRIVATE KEY' "$key"; then
+            echo "APPLE_API_KEY_P8 does not decode to a .p8 private key" >&2
+            exit 1
+          fi
+
+          # Exported here rather than named on the build step so they stay
+          # undefined on a run that does not sign: Tauri reads a defined but
+          # empty credential as present and fails on it.
+          {
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$key"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch bundled QEMU (macOS)
+        if: runner.os == 'macOS'
+        run: .github/scripts/fetch-qemu-macos.sh
+
+      - name: Fetch bundled QEMU (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/fetch-qemu-windows.ps1
+
+      - name: Fetch pinned firmware release
+        # shell: bash covers all three OSes: on Windows it runs via the Git for
+        # Windows bash already on the runner. The repo is public, so the ambient
+        # GITHUB_TOKEN is only for the API rate limit.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/fetch-firmware.sh
+
+      - name: Build
+        # The release config is separate so that a plain `cargo run` from a fresh
+        # clone works: tauri-build validates externalBin paths and resource globs
+        # on every cargo invocation, before the fetch scripts have run.
+        #
+        # Signing identity and notarization credentials come from the job env.
+        # Tauri notarizes and staples the .app between building it and sealing
+        # it into the .dmg, which is the only moment the copy inside the image
+        # can be given a ticket. It stops there and never notarizes the .dmg,
+        # which is the next step's job.
+        shell: bash
+        run: |
+          configs=(--config launcher/tauri.release.conf.json)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            configs+=(--config .github/packaging/windows/tauri.conf.json)
+          fi
+          cargo tauri build "${configs[@]}" --bundles ${{ inputs.bundles }} -- --locked
+
+      - name: Test Windows command entry point
+        if: runner.os == 'Windows'
+        env:
+          ARK_EMULATOR_TEST_EXE: ${{ github.workspace }}/target/release/ark-emulator.exe
+        run: cargo test --locked -p cli-tests --features packaged
+
+      - name: Notarize and staple the disk image
+        # The .app is already done, by the build. A .dmg is assessed on its own
+        # when a browser hands one to a user, so it needs its own ticket.
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        run: |
+          key="$APPLE_API_KEY_PATH"
+          result="$RUNNER_TEMP/submission.json"
+
+          dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
+
+          # --wait polls until Apple answers. The reported status is what decides
+          # the step, not the exit code: a submission that is delivered and then
+          # rejected is still a call that succeeded.
+          xcrun notarytool submit "$dmg" \
+            --key "$key" --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --output-format json > "$result" || true
+          cat "$result"
+
+          if [ "$(jq -r '.status // empty' "$result")" != "Accepted" ]; then
+            # The log is the only thing that names which nested binary Apple
+            # objected to and why.
+            id="$(jq -r '.id // empty' "$result")"
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --key "$key" \
+                --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
+            fi
+            exit 1
+          fi
+
+          xcrun stapler staple "$dmg"
+
+          # Last use of the key. The cleanup step at the end of the job is the
+          # backstop for the paths that exit before here.
+          rm -f "$key"
+
+      - name: Verify macOS signature
+        # The per-dylib loop is not redundant with --deep: codesign seals a loose
+        # .dylib under Resources/ as data rather than nested code, so --deep alone
+        # passes a bundle full of unsigned libraries. The --display calls are
+        # logging.
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          for lib in "$app/Contents/Resources/qemu-libs"/*.dylib; do
+            codesign --verify --strict "$lib"
+          done
+          codesign --display --entitlements - "$app"
+          codesign --display --entitlements - "$app/Contents/MacOS/qemu-system-guest"
+
+          if [ "$SIGN_MACOS" = "true" ]; then
+            dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
+            # stapler is the offline half: spctl alone also passes on an
+            # unstapled build for as long as this runner can reach Apple.
+            xcrun stapler validate "$app"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type exec --verbose=4 "$app"
+            spctl --assess --type install --verbose=4 "$dmg"
+
+            # A different file from the .app above, stapled at a different
+            # moment. Without this a build that tickets only the loose .app
+            # looks healthy here.
+            mount="$RUNNER_TEMP/dmg-check"
+            rm -rf "$mount"
+            mkdir -p "$mount"
+            # The image embeds LICENSE as a click-through agreement, so
+            # attaching it prompts and cancels on EOF. Answering it also prints
+            # the whole license, which is what the redirect is for.
+            printf 'Y\n' \
+              | hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly \
+                > /dev/null
+
+            status=0
+            inner="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
+            if [ -z "$inner" ]; then
+              echo "no .app at the root of $dmg" >&2
+              ls -la "$mount" >&2
+              status=1
+            else
+              xcrun stapler validate "$inner" || status=$?
+            fi
+
+            hdiutil detach "$mount" || hdiutil detach "$mount" -force
+            [ "$status" -eq 0 ]
+          else
+            spctl --assess --type exec --verbose=4 "$app" \
+              || echo "not accepted by Gatekeeper: ad-hoc signed, not notarized"
+          fi
+
+      - name: Zip portable macOS app
+        # ditto, not zip -r, which can mangle extended attributes and resource
+        # forks. --keepParent so extracting drops the .app, not its contents.
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "target/release/bundle/macos/Ark-Emulator.app.zip"
+
+      - name: Build portable Windows zip
+        # Tauri stages resources only inside the NSIS payload, never as a loose
+        # directory, so this reassembles the installed layout by hand: main exe +
+        # sidecar exes + qemu-libs/firmware as siblings.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $portableDir = "target/release/portable/Ark Emulator"
+          New-Item -ItemType Directory -Force -Path (Join-Path $portableDir "bin") | Out-Null
+          Copy-Item "target/release/ark-emulator.exe" $portableDir
+          Copy-Item ".github/packaging/windows/ark-emulator.cmd" (Join-Path $portableDir "bin")
+          Copy-Item "target/release/qemu-system-guest.exe" $portableDir
+          Copy-Item "target/release/qemu-img.exe" $portableDir
+          Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
+          Copy-Item "launcher/firmware" (Join-Path $portableDir "firmware") -Recurse
+          Compress-Archive -Path $portableDir `
+            -DestinationPath "target/release/portable/Ark-Emulator-portable.zip"
+
+      - name: Stage artifacts
+        # upload-artifact preserves the directory structure below the least common
+        # ancestor of its `path:` patterns, so pointing it at the bundle
+        # directories yields real subdirectories, which gh release create then
+        # fails to upload as assets. Staging flat sidesteps that.
+        #
+        # Also where each artifact gets its final name. Only a tag carries a
+        # version, and GITHUB_REF_NAME is a "<pr>/merge" fragment on a pull
+        # request, so anything else is named after its commit. nullglob so a
+        # pattern that doesn't apply to this OS contributes nothing.
+        shell: bash
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          shopt -s nullglob
+          mkdir -p dist
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${GITHUB_SHA:0:7}"
+          fi
+          os_name="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          prefix="dist/ark-emulator-${version}-${os_name}-${ARCH}"
+
+          for f in target/release/bundle/dmg/*.dmg; do cp "$f" "${prefix}.dmg"; done
+          for f in target/release/bundle/macos/*.app.zip; do cp "$f" "${prefix}.zip"; done
+          for f in target/release/bundle/nsis/*.exe; do cp "$f" "${prefix}.exe"; done
+          for f in target/release/portable/*.zip; do cp "$f" "${prefix}.zip"; done
+          for f in target/release/bundle/deb/*.deb; do cp "$f" "${prefix}.deb"; done
+          for f in target/release/bundle/appimage/*.AppImage; do cp "$f" "${prefix}.AppImage"; done
+
+          ls -la dist/
+
+      - name: Upload installers
+        # Uploaded on every run: the smoke job downloads these rather than
+        # rebuilding, so it tests bit-for-bit what a release would publish.
+        uses: actions/upload-artifact@v6
+        with:
+          name: installers-${{ inputs.os }}
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Delete the signing credentials
+        # Runners are ephemeral, but a failed build must not leave a private key
+        # readable to anything else scheduled onto this one first.
+        if: always() && runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/certificate.p12"
+
+  # Launches each platform's no-install artifact on a runner that never had the
+  # build job's dependencies installed on it, which is the point: the build job
+  # installs QEMU and webkit, so it cannot test the "nothing to install" claim.
+  # No flags are passed, so this is a user's first launch.
+  smoke:
+    needs: build
+    runs-on: ${{ inputs.os }}
+    # A boot that hangs is what this job exists to catch, so it has a bound of
+    # its own beyond the start's --timeout.
+    timeout-minutes: 30
+    env:
+      SIGN_MACOS: ${{ inputs.signing-environment != '' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Fetch the built installers
+        uses: actions/download-artifact@v8
+        with:
+          name: installers-${{ inputs.os }}
+          path: dist
+
+      - name: Install what a desktop Linux has and a runner image does not
+        # Everything this job is allowed to install. Whatever the emulator itself
+        # needs has to come out of the bundle or this tests nothing.
+        #
+        # libfuse2 is what an AppImage needs to mount itself; the rest is the
+        # host's graphics driver stack, which AppImage never bundles because a
+        # driver has to match the machine it runs on.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfuse2 \
+            libegl1 libgl1 libgles2 libglx-mesa0 libgl1-mesa-dri libgbm1
+
+      - name: Smoke test the portable AppImage
+        # The launcher is a GUI app with no headless mode, so it needs a display
+        # to get past window creation. xvfb-run wraps the script, not the
+        # AppImage, so the whole process tree shares one ephemeral server.
+        if: runner.os == 'Linux'
+        env:
+          # Xvfb exposes no DRI device, so the DMA-BUF renderer has nothing to
+          # allocate against and Mesa has no GPU. Neither affects the guest.
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          app="$(echo dist/*.AppImage)"
+          chmod +x "$app"
+          xvfb-run -a .github/scripts/smoke-unix.sh "$app"
+
+      - name: Check Gatekeeper accepts the downloaded artifacts
+        # On a runner that has never held the certificate, which is the point:
+        # this is the assessment a user's machine makes. Its own copy, so the
+        # smoke test below still launches an unquarantined bundle.
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        run: |
+          unzip -q dist/*.zip -d gatekeeper
+          app="$(find gatekeeper -maxdepth 1 -name '*.app')"
+          # upload-artifact does not preserve extended attributes, so the flag a
+          # browser would have set is applied by hand. On the bundle only, the
+          # way a download carries it: writing an xattr needs write permission
+          # on the file, and the QEMU payload arrives from Homebrew read-only.
+          xattr -w com.apple.quarantine \
+            "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$app"
+          spctl --assess --type exec --verbose=4 "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type install --verbose=4 dist/*.dmg
+          xcrun stapler validate dist/*.dmg
+
+      - name: Smoke test the portable app bundle
+        # The bundle's own executable rather than `open`, which returns
+        # immediately and leaves no pid to poll or redirect. Downloaded artifacts
+        # carry no quarantine attribute.
+        if: runner.os == 'macOS'
+        run: |
+          unzip -q dist/*.zip -d unpacked
+          app="$(find unpacked -maxdepth 1 -name '*.app')"
+          exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          .github/scripts/smoke-unix.sh "$app/Contents/MacOS/$exe"
+
+      - name: Smoke test the portable zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path (Get-Item dist/*.zip).FullName -DestinationPath unpacked
+          $exe = Get-ChildItem unpacked -Recurse -Filter "ark-emulator.exe" | Select-Object -First 1
+          if (-not $exe) {
+              throw "no ark-emulator.exe inside the portable zip"
+          }
+          .github/scripts/smoke-windows.ps1 -Executable $exe.FullName
+
+      - name: Test Windows installer PATH setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/smoke-windows-installer.ps1 -Installer (Get-Item dist/*.exe).FullName
+
+      - name: Upload the smoke test log
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: smoke-log-${{ inputs.os }}
+          path: smoke*.log
+          retention-days: 7
+          if-no-files-found: warn

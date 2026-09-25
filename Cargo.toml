@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["launcher"]
+members = ["launcher", "tools/cli-tests"]
+default-members = ["launcher"]
 
 [profile.release]
 strip = true

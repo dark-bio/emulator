@@ -9,8 +9,9 @@
 #![cfg(windows)]
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
+
+mod support;
 
 /// The script preserves arguments, waits for output, and returns the application's exit code.
 #[test]
@@ -20,15 +21,15 @@ fn test_windows_launcher_waits_and_preserves_arguments_and_exit_codes() {
         .tempdir()
         .unwrap();
     fs::copy(
-        env!("CARGO_BIN_EXE_ark-emulator"),
+        support::executable(),
         install.path().join("ark-emulator.exe"),
     )
     .unwrap();
     fs::create_dir(install.path().join("bin")).unwrap();
     let script = install.path().join("bin/ark-emulator.cmd");
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/packaging/windows/ark-emulator.cmd"),
+    fs::write(
         &script,
+        include_str!("../../.github/packaging/windows/ark-emulator.cmd"),
     )
     .unwrap();
 
