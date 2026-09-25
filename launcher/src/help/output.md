@@ -39,11 +39,12 @@ the running version. It runs in a detached copy that exits within 30 s, so no
 command waits for it. The answer is kept in update.json in the emulator's
 cache directory, and a nonempty CI turns the lookup off.
 
-While the kept answer names a newer version, start, list, stop and wipe start
-with a note naming both versions and how to upgrade. Under --json it is an
-ordinary note event. The note never changes the result or the exit code, and
--q hides it. doctor looks up afresh and reports the answer as its update
-check.
+While the kept answer names a newer version, start, list, stop, button press,
+button release and wipe open with a note naming both versions and how to
+upgrade. Foreground headless runs also print the note at startup. Under --json
+it is an ordinary note event. The note never changes the result or the exit
+code, and -q hides it. doctor looks up afresh and reports the answer as its
+update check.
 
 ## Log files
 

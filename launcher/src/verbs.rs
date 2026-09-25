@@ -66,7 +66,13 @@ pub(crate) fn run(
     // Valid management commands start with the kept release note
     if matches!(
         command,
-        Some(Command::Start { .. } | Command::List | Command::Stop { .. } | Command::Wipe { .. })
+        Some(
+            Command::Start { .. }
+                | Command::List
+                | Command::Stop { .. }
+                | Command::Button { .. }
+                | Command::Wipe { .. }
+        )
     ) {
         crate::update::start(output, time::OffsetDateTime::now_utc());
     }

@@ -137,6 +137,7 @@ fn main() {
         diagnostics::log_sink(diagnostics::Sink::Events(output.clone()));
     }
     if cli.boot.headless {
+        update::start(&output, time::OffsetDateTime::now_utc());
         let result = Paths::resolve(&context.config().identifier, context.package_info())
             .and_then(|paths| headless(&paths, cli.boot, output.clone()));
         if let Err(err) = result {

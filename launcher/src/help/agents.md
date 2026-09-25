@@ -70,10 +70,11 @@ an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
 cannot keep the two streams apart, drop the lines that start with
 `{"event":` under --json; what remains is the document.
 
-A note that a newer Ark Emulator is available names the upgrade and repeats
-on every start, list, stop and wipe until it happens, so pass it on to the
-person; upgrading is their call. doctor reports the same as its update check,
-and a nonempty CI turns the note off.
+A note that a newer Ark Emulator is available names the upgrade. It repeats
+on every start, list, stop, button press, button release and wipe, and when a
+foreground headless run starts. Pass it on to the person; upgrading is their
+call. doctor reports the same as its update check, and a nonempty CI turns
+the note off.
 
 A start without hardware acceleration takes minutes, so run it in the
 background and follow stderr, without starting another:

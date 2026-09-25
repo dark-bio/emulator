@@ -68,6 +68,18 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     };
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&cache).unwrap();
+
+    // Headless startup must fail before binding a registry or starting QEMU
+    let data = directory.path().join("data");
+    let application_data = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/bio.dark.emulator")
+    } else {
+        data.join("bio.dark.emulator")
+    };
+    std::fs::create_dir_all(application_data.parent().unwrap()).unwrap();
+    std::fs::write(application_data, "not a directory").unwrap();
+
+    // A fresh cached version exercises notices without starting network lookups
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     let newest = format!("{}.0.0", version.major + 1);
     let answer = serde_json::to_vec(&serde_json::json!({
@@ -84,6 +96,9 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
             .env_remove("CI")
             .env("HOME", &home)
             .env("XDG_CACHE_HOME", &xdg_cache)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .env("NO_COLOR", "1");
         if let Some(ci) = ci {
             command.env("CI", ci);
@@ -95,62 +110,79 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     let message = format!(
         "Ark Emulator {newest} is available, this is {version}; download it from https://github.com/dark-bio/emulator"
     );
-    for json in [false, true] {
-        let mut arguments = vec!["list"];
-        if json {
-            arguments.push("--json");
-        }
-        let baseline = invoke(&arguments, Some("1"));
-        for ci in [None, Some("")] {
-            let output = invoke(&arguments, ci);
-            assert_eq!(
-                output.status.code(),
-                baseline.status.code(),
-                "json={json}, CI={ci:?}"
-            );
-            assert_eq!(output.stdout, baseline.stdout, "json={json}, CI={ci:?}");
-            let text = stderr(&output);
+    for case in [
+        vec!["list"],
+        vec!["button", "press", "emulator:0"],
+        vec!["button", "press", "emulator:0", "--release-after", "0"],
+        vec!["button", "release", "emulator:0"],
+        vec!["--headless"],
+    ] {
+        for json in [false, true] {
+            let mut arguments = case.clone();
             if json {
-                let events: Vec<serde_json::Value> = text
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                assert_eq!(
-                    events[0],
-                    serde_json::json!({"event":"note", "message":message})
-                );
-                assert_eq!(
-                    events
-                        .iter()
-                        .filter(|event| event["event"] == "note")
-                        .count(),
-                    1
-                );
-            } else {
-                assert!(text.starts_with("note: Ark Emulator"), "{text}");
-                assert!(
-                    text.split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .starts_with(&format!("note: {message}")),
-                    "{text}"
-                );
-                assert_eq!(
-                    text.lines()
-                        .filter(|line| line.starts_with("note:"))
-                        .count(),
-                    1
-                );
+                arguments.push("--json");
             }
-        }
+            let baseline = invoke(&arguments, Some("1"));
+            if case[0] == "--headless" {
+                assert_eq!(baseline.status.code(), Some(1));
+                assert!(stderr(&baseline).contains("could not create the data directory"));
+            } else if case[0] == "button" {
+                assert_eq!(baseline.status.code(), Some(3));
+            }
+            for ci in [None, Some("")] {
+                let output = invoke(&arguments, ci);
+                assert_eq!(
+                    output.status.code(),
+                    baseline.status.code(),
+                    "{case:?}, json={json}, CI={ci:?}"
+                );
+                assert_eq!(
+                    output.stdout, baseline.stdout,
+                    "{case:?}, json={json}, CI={ci:?}"
+                );
+                let text = stderr(&output);
+                if json {
+                    let events: Vec<serde_json::Value> = text
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect();
+                    assert_eq!(
+                        events[0],
+                        serde_json::json!({"event":"note", "message":message})
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event["event"] == "note")
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert!(text.starts_with("note: Ark Emulator"), "{text}");
+                    assert!(
+                        text.split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .starts_with(&format!("note: {message}")),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        text.lines()
+                            .filter(|line| line.starts_with("note:"))
+                            .count(),
+                        1
+                    );
+                }
+            }
 
-        // Quiet and CI suppress the notice without changing the result
-        arguments.push("-q");
-        let quiet = invoke(&arguments, None);
-        assert_eq!(quiet.stdout, baseline.stdout);
-        assert_eq!(quiet.status.code(), baseline.status.code());
-        assert!(!stderr(&quiet).contains("is available"));
-        assert!(!stderr(&baseline).contains("is available"));
+            // Quiet and CI suppress the notice without changing the result
+            arguments.push("-q");
+            let quiet = invoke(&arguments, None);
+            assert_eq!(quiet.stdout, baseline.stdout);
+            assert_eq!(quiet.status.code(), baseline.status.code());
+            assert!(!stderr(&quiet).contains("is available"));
+            assert!(!stderr(&baseline).contains("is available"));
+        }
     }
 
     // These paths must neither announce nor refresh; doctor and the window never run here
@@ -160,11 +192,18 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
         vec!["-h"],
         vec!["--help"],
         vec!["list", "--help"],
+        vec!["button", "press", "--help"],
+        vec!["button", "release", "-h"],
+        vec!["--headless", "--help"],
         vec!["completions", "zsh"],
         vec!["--version"],
         vec!["--json", "--version"],
         vec!["list", "--bogus"],
         vec!["list", "--timeout", "0"],
+        vec!["button", "press", "--release-after", "-1"],
+        vec!["button", "release", "--release-after", "0"],
+        vec!["--headless", "button", "press"],
+        vec!["--headless", "--kernel", "kernel"],
         vec!["list", "-q", "-v"],
         vec!["--version", "list"],
         vec!["--image", "unused.ark", "list"],
@@ -348,6 +387,7 @@ fn test_headless_startup_error_without_a_display_or_no_input_flag() {
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .env("XDG_DATA_HOME", directory.path())
+        .env("CI", "1")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
