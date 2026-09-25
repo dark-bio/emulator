@@ -316,6 +316,9 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     {
         return bytes(count);
     }
+    if key.ends_with("_seconds") && value.is_number() {
+        return format!("{value} s");
+    }
     let text = style::cell(&scalar(value));
     match key {
         // The day is what a reader scans for; the document keeps the instant.

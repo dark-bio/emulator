@@ -3,8 +3,8 @@
 An emulated Ark is one `.ark` file. It holds everything the device knows: its
 identity, its pairing, its data. Copy the file and you have copied the device;
 delete it and the device is gone. Two emulators can never share one image,
-since two guests writing one file would destroy it. The window refuses a
-second boot of an image, and `start` waits for and reports the emulator that
+since two guests writing one file would destroy it. A foreground launch refuses
+a second boot of an image, and `start` waits for and reports the emulator that
 already holds it instead of booting another.
 
 The file is a plain qcow2 image with no encryption of any kind. It starts at a
@@ -35,10 +35,11 @@ bound to. The window's settings panel writes it. The command line reads it and
 never writes it, so a `start --image` somewhere else leaves the remembered
 choice alone.
 
-A start with no --image takes the remembered image, which is the device the
-owner opens by double-click, and creates it afresh if it is gone rather than
-booting another file. Only when nothing was ever remembered does it take the
-image the launcher allocates for itself.
+A start or headless launch with no --image takes the remembered image, which
+is the device the owner opens by double-click. It creates that image afresh
+if it is gone. Only when nothing was ever remembered does it take the image
+the launcher allocates for itself.
+Headless launches ignore the saved autostart toggle and never open a picker.
 
 ## Environments
 

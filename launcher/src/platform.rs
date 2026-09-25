@@ -44,6 +44,66 @@ use crate::diagnostics::{self, log};
 #[path = "macos_menu.rs"]
 mod macos_menu;
 
+/// Recognize a terminal interrupt also delivered directly to QEMU.
+#[cfg(unix)]
+pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use std::os::unix::process::ExitStatusExt as _;
+    match status.signal()? {
+        SIGINT => Some(130),
+        SIGTERM => Some(143),
+        _ => None,
+    }
+}
+
+/// Recognize Windows' exit status for an interrupted console process.
+#[cfg(windows)]
+pub(crate) fn interrupted(status: std::process::ExitStatus) -> Option<i32> {
+    (status.code() == Some(0xc000013a_u32 as i32)).then_some(130)
+}
+
+/// Handle Unix termination on a worker, keeping cleanup out of signal handlers.
+#[cfg(unix)]
+pub(crate) fn install_shutdown() -> std::io::Result<()> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+    let mut signals = Signals::new([SIGINT, SIGTERM])?;
+    std::thread::Builder::new()
+        .name("signals".to_owned())
+        .spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                crate::runtime::shut_down(128 + signal);
+            }
+        })?;
+    Ok(())
+}
+
+/// Handle console termination on the dedicated thread supplied by Windows.
+#[cfg(windows)]
+pub(crate) fn install_shutdown() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        SetConsoleCtrlHandler,
+    };
+
+    /// Keep the handler alive until cleanup ends, including console closure.
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        match event {
+            CTRL_C_EVENT => crate::runtime::shut_down(130),
+            CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+                crate::runtime::shut_down(143)
+            }
+            _ => 0,
+        }
+    }
+
+    // SAFETY: the handler has the documented ABI and lives for the process
+    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Install the platform's native actions for starting another emulator.
 #[cfg(target_os = "macos")]
 pub(crate) fn install_menus(app: &tauri::App) -> anyhow::Result<()> {
@@ -115,12 +175,12 @@ pub(crate) fn suppress_child_console(_cmd: &mut Command) {}
 pub(crate) fn attach_console() {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_UNKNOWN, GetFileType,
-        OPEN_EXISTING,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, FILE_TYPE_UNKNOWN,
+        GetFileType, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE, SetStdHandle,
+        ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
     // SAFETY: every call is a documented Win32 entry point called with the
@@ -144,6 +204,16 @@ pub(crate) fn attach_console() {
                 .then_some(handle);
             (stream, device, inherited)
         });
+        // A detached headless child has three NUL handles. Reattaching it
+        // would let closing the caller's console terminate the emulator.
+        if streams.iter().all(|(_, _, handle)| {
+            handle.is_some_and(|handle| {
+                let mut mode = 0;
+                GetFileType(handle) == FILE_TYPE_CHAR && GetConsoleMode(handle, &mut mode) == 0
+            })
+        }) {
+            return;
+        }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return;
         }

@@ -163,10 +163,8 @@ fn open_or_exit(app: &AppHandle, report: &str) {
 }
 
 fn open(app: &AppHandle, report: &str) -> tauri::Result<()> {
-    // Same trick the hw-addr plugin uses for __HW_ADDR__: Rust's Debug for str
-    // is a valid JS string literal, so the report crosses into the page as a
-    // constant with no IPC and no capability to grant. An init script is not
-    // inline HTML, so a `</script>` inside a QEMU error message is inert.
+    // The report enters the page through an init script without IPC. An init
+    // script is not inline HTML, so `</script>` in an error message is inert.
     // __WIDTH__ lets the page solve its enclosure geometry for whatever size
     // this window was given, so WIDTH and HEIGHT above stay the only place a
     // size is written down.

@@ -1,9 +1,8 @@
 # Dark Bio - Ark Emulator
 
-A desktop app that runs an Ark device locally for development and demo
-purposes. It boots the real ArkOS firmware inside QEMU and hosts a small
-native window standing in for the device's physical face (4 RGB LEDs and a
-reset pin).
+An emulated Ark enclave for development and demos. It boots the real ArkOS
+firmware inside QEMU, with an optional native window showing the device's
+physical face (4 RGB LEDs and a reset pin).
 
 > [!CAUTION]
 > **The emulator is not a vault.** The backing disk image is an unencrypted
@@ -73,10 +72,21 @@ available in your terminal. On Windows, open a new PowerShell or Command
 Prompt window after installing.
 
 ```sh
-ark-emulator start        # boot one, and print its locator once it is ready
-ark-emulator list         # show what is running on this computer
-ark-emulator stop         # shut it down, the way closing its window does
+ark-emulator start --headless  # boot without a window, return when ready
+ark-emulator list              # show what is running on this computer
+ark-emulator button press      # hold its reset button
+ark-emulator button release    # release the CLI hold
+ark-emulator stop              # shut it down
 ```
+
+Omit `--headless` to show the device window. For a foreground process, use
+`ark-emulator --headless --image demo.ark`; Ctrl-C stops it. See
+`ark-emulator help start` for readiness, timeouts and image defaults.
+Button commands accept a locator, name, serial or image when several emulators
+are running. `ark-emulator button press --release-after 3` schedules release
+after 3 s, even after the command exits. Use `--release-after 0` to release
+immediately after pressing. See `ark-emulator button press --help` for delivery
+and hold behavior.
 
 For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
 `ark-emulator` from the extracted folder. On macOS and Linux, run the
@@ -128,7 +138,7 @@ For everything the executable can do, run
 
 | path | role |
 |---|---|
-| `launcher/` | Tauri app (Rust). Spawns QEMU, hosts the window, and carries the packaging config and macOS entitlements. |
-| `ui/` | Static HTML/CSS/JS. Renders the device + pin, the info tray and the settings panel, and drives the firmware's `/v1/hw` driver bus. |
+| `launcher/` | Rust runtime and optional Tauri window. Owns QEMU, the hardware connection and discovery, and carries the packaging config and macOS entitlements. |
+| `ui/` | Static HTML/CSS/JS. Renders device state from Rust and forwards user interactions through Tauri commands. |
 | `docs/` | Maintainer documentation. Currently the one-time Apple Developer setup the macOS signing in CI depends on. |
 | `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. `packaging/` holds the Homebrew cask template a release publishes to the tap. |

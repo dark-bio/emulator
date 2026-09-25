@@ -160,6 +160,10 @@ Topics: agents, output, images, registry.";
         decorated = decorated
             .after_help(format!("{closing}\n"))
             .after_long_help(format!("{footer}\n\n{closing}\n"));
+    } else if command.has_subcommands() {
+        decorated = decorated.after_long_help(format!(
+            "Each subcommand has its own contract.\nRead `{} <command> --help` for that command's behavior.\n", path
+        ));
     } else {
         decorated = decorated.after_long_help(format!("{footer}\n"));
     }
@@ -214,10 +218,10 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
     let (requires, time, prints, exits, examples) = match path {
         "start" => (
             "a free loopback port from 18181 up, or --port; a source build needs --kernel and --initrd",
-            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; the device window opens in a process of its own",
+            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; a separate process opens the device window unless --headless is set; an already running image keeps its current mode",
             "locator, image, created, started, environment, ready, expires; JSON adds port, path, name, serial and log",
             "0 ready; 1 image, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
-            "ark-emulator start\nark-emulator start --env develop --image ~/arks/dev.ark --json",
+            "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
         ),
         "list" => (
             "nothing; no registry means no emulators",
@@ -232,6 +236,20 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "stopped, the locators that went, which is the partial result on a timeout",
             "0 done; 2 usage; 3 none matches, or several do; 7 one did not go in time; 130/143 interrupted",
             "ark-emulator stop\nark-emulator stop emulator:18181 --json",
+        ),
+        "button press" => (
+            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
+            "normally under a second; --timeout bounds each reply wait; --release-after accepts 0 to 4294967295 whole seconds, measured from delivery; 0 releases immediately after the press, before returning; positive delays return after scheduling, without waiting for release; each press replaces the timer, omitting the option cancels it; release, disconnect and shutdown also cancel it; a UI hold remains independent",
+            "locator, pressed (physical state), cli_pressed (CLI hold), changed (hold or timer changed), release_after_seconds (accepted delay, null without a timer)",
+            "0 delivered; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
+            "ark-emulator button press\nark-emulator button press emulator:18181 --release-after 3 --json",
+        ),
+        "button release" => (
+            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
+            "normally under a second; --timeout bounds each reply wait; success means written to hardware or already released; cancels any automatic release; the button remains pressed while the window holds it",
+            "locator, pressed (physical state), cli_pressed (CLI hold), changed (hold or timer changed), release_after_seconds (null)",
+            "0 CLI hold released; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
+            "ark-emulator button release\nark-emulator button release emulator:18181 --json",
         ),
         "wipe" => (
             "an existing image no emulator holds; confirmation at a terminal, or --yes",
@@ -263,10 +281,10 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
         ),
         _ => (
             "nothing on a packaged build; a source build needs --kernel and --initrd and a QEMU on PATH",
-            "the window opens at once; the device accepts clients about 10 s later with hardware acceleration, minutes without",
+            "runs in the foreground; --headless opens no window and never prompts; the device accepts clients after about 10 s with hardware acceleration, minutes without; --timeout does not limit this run",
             "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
-            "0 window closed; 1 could not start; 2 usage",
-            "ark-emulator\nark-emulator --env develop --image ~/arks/dev.ark",
+            "0 stopped; 1 startup or QEMU failure; 2 usage; 130/143 interrupted, device stopped",
+            "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
         ),
     };
     [
@@ -401,10 +419,11 @@ mod tests {
     use super::*;
 
     /// Every command the tool has, in the order the root lists them.
-    const COMMANDS: [&str; 7] = [
+    const COMMANDS: [&str; 8] = [
         "start",
         "list",
         "stop",
+        "button",
         "wipe",
         "doctor",
         "completions",
@@ -426,6 +445,9 @@ mod tests {
         let theme = Theme::fixed(80, Color::Off, false);
         let mut root = command(&theme);
         for name in COMMANDS {
+            if name == "button" {
+                continue;
+            }
             let page = root
                 .find_subcommand_mut(name)
                 .unwrap()
@@ -436,6 +458,33 @@ mod tests {
             }
             assert_eq!(page.matches("\n  ark-emulator ").count(), 2, "{name}");
             assert!(!page.contains("$ "), "{name}");
+        }
+    }
+
+    /// Group help describes its leaves, and each button leaf carries a contract.
+    #[test]
+    fn test_button_help_has_nested_contracts() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let mut root = command(&theme);
+        let group = root.find_subcommand_mut("button").unwrap();
+        let page = group.render_long_help().to_string();
+        assert!(!page.contains("Requires:"));
+        assert!(page.contains("Each subcommand has its own contract"));
+        for name in ["press", "release"] {
+            let page = group
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
+                assert!(page.contains(label), "{name}: {label}");
+            }
+            assert_eq!(
+                page.matches(&format!("\n  ark-emulator button {name}"))
+                    .count(),
+                2
+            );
+            assert!(!page.contains("--no-input"));
         }
     }
 

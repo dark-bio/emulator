@@ -76,6 +76,10 @@ pub(crate) struct Instance {
     /// identity here and what a consumer connects to.
     pub(crate) port: u16,
 
+    /// Direct launcher control, absent on builds that only support discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) control: Option<crate::control::Endpoint>,
+
     /// File name of the backing disk image, which tells two emulators apart
     /// while neither is named or onboarded. Never the path: see the module
     /// docs.
@@ -416,6 +420,7 @@ mod tests {
     fn instance(port: u16) -> Instance {
         Instance {
             port,
+            control: None,
             disk: "emulator.ark".into(),
             disk_id: "0123abcd".into(),
             ready: false,

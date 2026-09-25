@@ -37,6 +37,7 @@ use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
 use crate::diagnostics::{log, trace};
+use crate::hardware::Controller;
 use crate::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 
 /// How often this emulator re-registers itself. It is the heartbeat keeping
@@ -52,9 +53,11 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// anything near this is not a registry.
 const MAX_RESPONSE: u64 = 1 << 20;
 
-/// This emulator's entry, as last published. Held here so the heartbeat thread
-/// and the nameplate command can both reach it.
+/// This emulator's entry, shared by the heartbeat and shutdown.
 static ENTRY: OnceLock<Mutex<Instance>> = OnceLock::new();
+
+/// Serializes publication with withdrawal and prevents a stopped guest returning.
+static PUBLISHING: Mutex<bool> = Mutex::new(true);
 
 /// Address the registry is served on.
 fn registry_addr() -> SocketAddrV4 {
@@ -126,10 +129,16 @@ pub(crate) fn request_stop(port: u16) -> Result<()> {
 }
 
 /// Publish this emulator, and start the heartbeat that keeps it published.
-/// Called before the guest has booted, so the entry starts out not ready.
-pub(crate) fn register(port: u16, disk: &Path) {
+/// Each heartbeat takes readiness and identity from the latest hardware state.
+pub(crate) fn register(
+    port: u16,
+    disk: &Path,
+    hardware: Controller,
+    control: crate::control::Endpoint,
+) {
     let instance = Instance {
         port,
+        control: Some(control),
         disk: disk
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -145,58 +154,34 @@ pub(crate) fn register(port: u16, disk: &Path) {
         return;
     }
 
-    publish();
-    thread::spawn(|| {
+    publish(&hardware);
+    thread::spawn(move || {
         loop {
             thread::sleep(HEARTBEAT);
-            publish();
+            publish(&hardware);
         }
     });
 }
 
-/// Fold what the firmware has reported about itself into this emulator's entry
-/// and publish it. A claim left out is one that has not changed, matching the
-/// partial frames the firmware sends, so this merges rather than replaces.
-///
-/// The first of these also marks the entry ready: the guest accepts a client
-/// only once its hardware bus has a peer, and this arriving proves it does.
-#[tauri::command]
-pub(crate) fn nameplate(
-    env: Option<String>,
-    name: Option<String>,
-    serial: Option<String>,
-    expiry: Option<u64>,
-) {
-    let Some(entry) = ENTRY.get() else {
-        return;
-    };
-    {
-        let mut entry = entry.lock().unwrap();
-        entry.ready = true;
-        // An empty name is a device whose name was cleared, which is a value
-        // rather than an absence, so it is stored as one.
-        if env.is_some() {
-            entry.env = env;
-        }
-        if name.is_some() {
-            entry.name = name.filter(|name| !name.is_empty());
-        }
-        if serial.is_some() {
-            entry.serial = serial;
-        }
-        if expiry.is_some() {
-            entry.expiry = expiry;
-        }
-    }
-    publish();
-}
-
 /// Send the current entry to the registry, and act on whatever comes back.
-fn publish() {
+fn publish(hardware: &Controller) {
+    let publishing = PUBLISHING.lock().unwrap();
+    if !*publishing || crate::runtime::stopping() {
+        return;
+    }
     let Some(entry) = ENTRY.get() else {
         return;
     };
-    let body = serde_json::to_vec(&*entry.lock().unwrap());
+    let body = {
+        let state = hardware.snapshot();
+        let mut entry = entry.lock().unwrap();
+        entry.ready = state.connected && state.nameplate.known;
+        entry.env = state.nameplate.env;
+        entry.name = state.nameplate.name;
+        entry.serial = state.nameplate.serial;
+        entry.expiry = state.nameplate.expiry;
+        serde_json::to_vec(&*entry)
+    };
     let body = match body {
         Ok(body) => body,
         Err(e) => {
@@ -206,6 +191,7 @@ fn publish() {
     };
 
     if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+        drop(publishing);
         obey(&answer);
         return;
     }
@@ -215,9 +201,11 @@ fn publish() {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    match request("POST", "/v1/instances", Some(&body)) {
+    let answer = request("POST", "/v1/instances", Some(&body));
+    drop(publishing);
+    match answer {
         Ok(answer) => obey(&answer),
-        Err(e) => log!("[discovery] could not register: {e}"),
+        Err(err) => log!("[discovery] could not register: {err}"),
     }
 }
 
@@ -226,13 +214,18 @@ fn publish() {
 fn obey(answer: &[u8]) {
     if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
         log!("[discovery] asked to shut down");
-        crate::shut_down();
+        crate::runtime::shut_down(0);
     }
 }
 
 /// Withdraw this emulator from the registry. Best effort and quick: it runs
 /// while the window is closing, and the entry would expire on its own anyway.
 pub(crate) fn deregister() {
+    let mut publishing = PUBLISHING.lock().unwrap();
+    if !*publishing {
+        return;
+    }
+    *publishing = false;
     let Some(entry) = ENTRY.get() else {
         return;
     };
@@ -463,6 +456,7 @@ mod tests {
         let image = tmp.path().join("a.ark");
         let instances = [Instance {
             port: 18181,
+            control: None,
             disk: "a.ark".into(),
             disk_id: disk_id(&image),
             ready: true,

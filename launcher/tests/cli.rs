@@ -12,10 +12,12 @@
 use std::process::{Command, Output};
 
 /// Every command the tool has, in the order the root lists them.
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 9] = [
     "start",
     "list",
     "stop",
+    "button press",
+    "button release",
     "wipe",
     "doctor",
     "completions",
@@ -66,6 +68,18 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     };
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&cache).unwrap();
+
+    // Headless startup must fail before binding a registry or starting QEMU
+    let data = directory.path().join("data");
+    let application_data = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/bio.dark.emulator")
+    } else {
+        data.join("bio.dark.emulator")
+    };
+    std::fs::create_dir_all(application_data.parent().unwrap()).unwrap();
+    std::fs::write(application_data, "not a directory").unwrap();
+
+    // A fresh cached version exercises notices without starting network lookups
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     let newest = format!("{}.0.0", version.major + 1);
     let answer = serde_json::to_vec(&serde_json::json!({
@@ -82,6 +96,9 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
             .env_remove("CI")
             .env("HOME", &home)
             .env("XDG_CACHE_HOME", &xdg_cache)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .env("NO_COLOR", "1");
         if let Some(ci) = ci {
             command.env("CI", ci);
@@ -93,62 +110,79 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     let message = format!(
         "Ark Emulator {newest} is available, this is {version}; download it from https://github.com/dark-bio/emulator"
     );
-    for json in [false, true] {
-        let mut arguments = vec!["list"];
-        if json {
-            arguments.push("--json");
-        }
-        let baseline = invoke(&arguments, Some("1"));
-        for ci in [None, Some("")] {
-            let output = invoke(&arguments, ci);
-            assert_eq!(
-                output.status.code(),
-                baseline.status.code(),
-                "json={json}, CI={ci:?}"
-            );
-            assert_eq!(output.stdout, baseline.stdout, "json={json}, CI={ci:?}");
-            let text = stderr(&output);
+    for case in [
+        vec!["list"],
+        vec!["button", "press", "emulator:0"],
+        vec!["button", "press", "emulator:0", "--release-after", "0"],
+        vec!["button", "release", "emulator:0"],
+        vec!["--headless"],
+    ] {
+        for json in [false, true] {
+            let mut arguments = case.clone();
             if json {
-                let events: Vec<serde_json::Value> = text
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                assert_eq!(
-                    events[0],
-                    serde_json::json!({"event":"note", "message":message})
-                );
-                assert_eq!(
-                    events
-                        .iter()
-                        .filter(|event| event["event"] == "note")
-                        .count(),
-                    1
-                );
-            } else {
-                assert!(text.starts_with("note: Ark Emulator"), "{text}");
-                assert!(
-                    text.split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .starts_with(&format!("note: {message}")),
-                    "{text}"
-                );
-                assert_eq!(
-                    text.lines()
-                        .filter(|line| line.starts_with("note:"))
-                        .count(),
-                    1
-                );
+                arguments.push("--json");
             }
-        }
+            let baseline = invoke(&arguments, Some("1"));
+            if case[0] == "--headless" {
+                assert_eq!(baseline.status.code(), Some(1));
+                assert!(stderr(&baseline).contains("could not create the data directory"));
+            } else if case[0] == "button" {
+                assert_eq!(baseline.status.code(), Some(3));
+            }
+            for ci in [None, Some("")] {
+                let output = invoke(&arguments, ci);
+                assert_eq!(
+                    output.status.code(),
+                    baseline.status.code(),
+                    "{case:?}, json={json}, CI={ci:?}"
+                );
+                assert_eq!(
+                    output.stdout, baseline.stdout,
+                    "{case:?}, json={json}, CI={ci:?}"
+                );
+                let text = stderr(&output);
+                if json {
+                    let events: Vec<serde_json::Value> = text
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect();
+                    assert_eq!(
+                        events[0],
+                        serde_json::json!({"event":"note", "message":message})
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event["event"] == "note")
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert!(text.starts_with("note: Ark Emulator"), "{text}");
+                    assert!(
+                        text.split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .starts_with(&format!("note: {message}")),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        text.lines()
+                            .filter(|line| line.starts_with("note:"))
+                            .count(),
+                        1
+                    );
+                }
+            }
 
-        // Quiet and CI suppress the notice without changing the result
-        arguments.push("-q");
-        let quiet = invoke(&arguments, None);
-        assert_eq!(quiet.stdout, baseline.stdout);
-        assert_eq!(quiet.status.code(), baseline.status.code());
-        assert!(!stderr(&quiet).contains("is available"));
-        assert!(!stderr(&baseline).contains("is available"));
+            // Quiet and CI suppress the notice without changing the result
+            arguments.push("-q");
+            let quiet = invoke(&arguments, None);
+            assert_eq!(quiet.stdout, baseline.stdout);
+            assert_eq!(quiet.status.code(), baseline.status.code());
+            assert!(!stderr(&quiet).contains("is available"));
+            assert!(!stderr(&baseline).contains("is available"));
+        }
     }
 
     // These paths must neither announce nor refresh; doctor and the window never run here
@@ -158,11 +192,18 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
         vec!["-h"],
         vec!["--help"],
         vec!["list", "--help"],
+        vec!["button", "press", "--help"],
+        vec!["button", "release", "-h"],
+        vec!["--headless", "--help"],
         vec!["completions", "zsh"],
         vec!["--version"],
         vec!["--json", "--version"],
         vec!["list", "--bogus"],
         vec!["list", "--timeout", "0"],
+        vec!["button", "press", "--release-after", "-1"],
+        vec!["button", "release", "--release-after", "0"],
+        vec!["--headless", "button", "press"],
+        vec!["--headless", "--kernel", "kernel"],
         vec!["list", "-q", "-v"],
         vec!["--version", "list"],
         vec!["--image", "unused.ark", "list"],
@@ -177,17 +218,88 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
 #[test]
 fn test_both_help_forms_answer_on_every_command() {
     for command in COMMANDS {
-        let scan = run(&[command, "-h"]);
+        let mut arguments: Vec<_> = command.split_whitespace().collect();
+        arguments.push("-h");
+        let scan = run(&arguments);
         assert_eq!(scan.status.code(), Some(0), "{command} -h");
         assert!(!stdout(&scan).contains("Requires:"), "{command} -h");
 
-        let contract = run(&[command, "--help"]);
+        *arguments.last_mut().unwrap() = "--help";
+        let contract = run(&arguments);
         assert_eq!(contract.status.code(), Some(0), "{command} --help");
         assert!(stdout(&contract).contains("Requires:"), "{command} --help");
 
-        let page = run(&["help", command]);
+        let mut arguments = vec!["help"];
+        arguments.extend(command.split_whitespace());
+        let page = run(&arguments);
         assert_eq!(stdout(&contract).trim(), stdout(&page).trim(), "{command}");
     }
+}
+
+/// Nested commands retain global flags, reject incomplete input and open no UI.
+#[test]
+fn test_button_group_and_invalid_arguments() {
+    let group = run(&["button", "--help"]);
+    assert!(group.status.success());
+    assert!(!stdout(&group).contains("Requires:"));
+    assert!(stdout(&group).contains("Each subcommand has its own contract"));
+    assert_eq!(stdout(&group), stdout(&run(&["help", "button"])));
+    for arguments in [
+        vec!["--json", "button"],
+        vec!["button", "press", "--all", "--json"],
+        vec!["button", "--json", "release", "--timeout", "0"],
+        vec!["button", "press", "one", "two", "--json"],
+        vec!["--headless", "button", "press", "--json"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "usage", "{arguments:?}");
+    }
+    for arguments in [
+        vec!["--json", "button", "press", "--help"],
+        vec!["button", "--json", "press", "--help"],
+        vec!["button", "release", "--json", "--help"],
+    ] {
+        let output = run(&arguments);
+        assert!(output.status.success(), "{arguments:?}");
+        assert!(stdout(&output).contains("cli_pressed"));
+    }
+}
+
+/// Timed release is a press-only option with a bounded nonnegative duration.
+#[test]
+fn test_timed_release_option_validation_and_help() {
+    // Both help forms advertise the option only on the command that accepts it
+    for flag in ["-h", "--help"] {
+        assert!(stdout(&run(&["button", "press", flag])).contains("--release-after"));
+        assert!(!stdout(&run(&["button", "release", flag])).contains("--release-after"));
+    }
+
+    // Both duration limits reach selection, using a port no emulator can hold
+    for seconds in ["0", "4294967295"] {
+        let output = run(&[
+            "button",
+            "press",
+            "emulator:0",
+            "--release-after",
+            seconds,
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(3), "{seconds}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "no-emulator");
+    }
+
+    // Invalid durations fail as usage errors before discovery or hardware access
+    for seconds in ["-1", "1.5", "NaN", "inf", "4294967296", "seconds"] {
+        let output = run(&["button", "press", "--release-after", seconds, "--json"]);
+        assert_eq!(output.status.code(), Some(2), "{seconds}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "usage");
+    }
+    let output = run(&["button", "release", "--release-after", "1", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -239,4 +351,58 @@ fn test_completions_are_shell_text_even_under_json() {
     let text = stdout(&script);
     assert!(text.contains("ark-emulator"), "{text}");
     assert!(!text.trim_start().starts_with('{'), "{text}");
+}
+
+/// Headless is a boot option in both modes, never a management option.
+#[test]
+fn test_headless_option_placement_and_help() {
+    for arguments in [vec!["--help"], vec!["start", "--help"]] {
+        let output = run(&arguments);
+        assert!(output.status.success());
+        assert!(stdout(&output).contains("--headless"));
+    }
+    for arguments in [
+        vec!["--headless", "list"],
+        vec!["list", "--headless"],
+        vec!["start", "--headless", "--kernel", "kernel"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(stderr(&output).starts_with("error[usage]:"));
+    }
+}
+
+/// Startup failures in headless mode use CLI errors without touching a display.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_headless_startup_error_without_a_display_or_no_input_flag() {
+    let directory = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        directory.path().join("bio.dark.emulator"),
+        "not a directory",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
+        .args(["--headless", "--json"])
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_DATA_HOME", directory.path())
+        .env("CI", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let events: Vec<serde_json::Value> = stderr(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let error = events
+        .iter()
+        .find(|event| event["event"] == "error")
+        .unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not create the data directory")
+    );
 }

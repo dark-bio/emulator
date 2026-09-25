@@ -20,8 +20,8 @@ use crate::settings;
 
 /// What the tool is, which opens every help page.
 pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos\n\n\
-     An emulated Ark is the real firmware running in QEMU behind a small window \
-     that stands in for the device's face. It is not a vault, since everything \
+     An emulated Ark runs the real firmware in QEMU, with an optional window \
+     for the device's face. It is not a vault, since everything \
      lives in one plain disk image on this computer, so real data belongs on \
      hardware. Talk to it with `ark` from https://github.com/dark-bio/cli, \
      exactly as you would to hardware, where the owner approves on their phone \
@@ -88,7 +88,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Whole wait for a start or a stop; each network wait in doctor
+    /// Network wait, or whole start/stop
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
@@ -153,6 +153,10 @@ fn parse_port(value: &str) -> Result<u16, String> {
 /// boots one in the background.
 #[derive(clap::Args)]
 pub(crate) struct Boot {
+    /// Run without a window or prompts
+    #[arg(long)]
+    pub(crate) headless: bool,
+
     /// Image to boot, created if missing
     // Read for this run only. It neither consults nor updates the settings
     // file, so a one-off boot from another image leaves the remembered choice
@@ -197,7 +201,8 @@ pub(crate) struct Boot {
 impl Boot {
     /// Whether any of these was typed.
     pub(crate) fn named(&self) -> bool {
-        self.image.is_some()
+        self.headless
+            || self.image.is_some()
             || self.env.is_some()
             || self.memory.is_some()
             || self.arch.is_some()
@@ -231,6 +236,14 @@ pub(crate) enum Command {
         all: bool,
     },
 
+    /// Control the reset button of a running emulator
+    #[command(disable_help_subcommand = true)]
+    Button {
+        /// Which hold to apply to the running emulator.
+        #[command(subcommand)]
+        action: ButtonAction,
+    },
+
     /// Reset a stopped image so its next boot is a fresh device
     Wipe {
         /// Image to reset; the image start would boot otherwise
@@ -256,11 +269,32 @@ pub(crate) enum Command {
     Help {
         /// Command or topic to explain: agents, output, images, registry
         #[arg(value_name = "COMMAND_OR_TOPIC")]
-        name: Option<String>,
+        name: Vec<String>,
 
         /// Print the whole manual: every command page and every topic
         #[arg(long, conflicts_with = "name")]
         all: bool,
+    },
+}
+
+/// Explicit command line holds of the emulated reset button.
+#[derive(clap::Subcommand)]
+pub(crate) enum ButtonAction {
+    /// Hold the reset button, optionally releasing it later
+    Press {
+        /// Locator, serial, name or image; the only emulator otherwise
+        #[arg(value_name = "EMULATOR")]
+        emulator: Option<String>,
+
+        /// Release after whole seconds; 0 releases immediately after pressing
+        #[arg(long, value_name = "SECONDS")]
+        release_after: Option<u32>,
+    },
+    /// Release the command line hold on the reset button
+    Release {
+        /// Locator, serial, name or image; the only emulator otherwise
+        #[arg(value_name = "EMULATOR")]
+        emulator: Option<String>,
     },
 }
 

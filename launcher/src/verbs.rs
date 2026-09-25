@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tauri::PackageInfo;
 
-use crate::args::{Boot, Command, Global};
+use crate::args::{Boot, ButtonAction, Command, Global};
 use crate::bundle::{self, Paths};
 use crate::diagnostics::{self, Sink};
 use crate::discovery;
@@ -66,7 +66,13 @@ pub(crate) fn run(
     // Valid management commands start with the kept release note
     if matches!(
         command,
-        Some(Command::Start { .. } | Command::List | Command::Stop { .. } | Command::Wipe { .. })
+        Some(
+            Command::Start { .. }
+                | Command::List
+                | Command::Stop { .. }
+                | Command::Button { .. }
+                | Command::Wipe { .. }
+        )
     ) {
         crate::update::start(output, time::OffsetDateTime::now_utc());
     }
@@ -100,6 +106,7 @@ fn dispatch(
         Some(Command::Start { boot }) => start(&boot, global, output, &paths),
         Some(Command::List) => list(output, &paths),
         Some(Command::Stop { emulator, all }) => stop(emulator.as_deref(), all, global, output),
+        Some(Command::Button { action }) => button(action, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
         Some(Command::Doctor) => crate::doctor::doctor(output, &paths, global.timeout),
         Some(Command::Completions { .. } | Command::Help { .. }) => {
@@ -199,6 +206,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     drop(reservation);
 
     let unready = Instance {
+        control: None,
         port: address.port(),
         disk: disk::name_of(&image),
         disk_id: discovery::disk_id(&image),
@@ -381,11 +389,69 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
                     pending[0], global.timeout
                 ),
             )
-            .hint("close its window to shut it down"));
+            .hint("close its window, or interrupt its foreground headless process"));
         }
         std::thread::sleep(POLL);
     }
     output.block(&stopped(&done), &[("Stopped", "stopped")])
+}
+
+/// Set this emulator's CLI hold and report the state after hardware delivery.
+fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), Error> {
+    // Select the same running emulator for either kind of button input
+    let (pressed, selector, release_after) = match action {
+        ButtonAction::Press {
+            emulator,
+            release_after,
+        } => (true, emulator, release_after),
+        ButtonAction::Release { emulator } => (false, emulator, None),
+    };
+    let targets = pick(&listing()?, selector.as_deref())?;
+    let instance = &targets[0];
+    let endpoint = instance.control.as_ref().ok_or_else(|| {
+        Error::new(
+            Code::ControlUnsupported,
+            "this emulator does not advertise button control",
+        )
+        .hint("update Ark Emulator and restart all running emulators, including the registry host")
+    })?;
+
+    // The launcher acknowledges the timer together with the hardware write
+    let outcome = crate::control::button(
+        endpoint,
+        pressed,
+        release_after,
+        Duration::from_secs(global.timeout),
+    )?;
+    if !outcome.changed {
+        output.event(
+            "note",
+            if pressed {
+                "the CLI already holds the button"
+            } else {
+                "the CLI hold was already released"
+            },
+        );
+    }
+    if !outcome.cli_pressed && outcome.pressed {
+        output.event("note", "the window still holds the button");
+    }
+
+    // Report the accepted schedule; the command does not wait for its expiry
+    output.block(
+        &json!({
+            "locator": locator(instance), "pressed": outcome.pressed,
+            "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
+            "release_after_seconds": outcome.release_after_seconds,
+        }),
+        &[
+            ("Locator", "locator"),
+            ("Pressed", "pressed"),
+            ("CLI held", "cli_pressed"),
+            ("Changed", "changed"),
+            ("Release after", "release_after_seconds"),
+        ],
+    )
 }
 
 /// Reset a stopped image to a fresh device, so that its next boot needs
@@ -515,7 +581,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                 Code::AmbiguousEmulator,
                 format!("several emulators are running: {}", listed(running)),
             )
-            .hint("name one, or pass `--all`")),
+            .hint("name one by its locator")),
         };
     };
     if let Some(port) = selector.strip_prefix("emulator:") {
@@ -637,6 +703,9 @@ fn spawn(boot: &Boot, arch: GuestArch, image: &Path, address: SocketAddr) -> any
         .arg(address.port().to_string())
         .arg("--arch")
         .arg(arch.name());
+    if boot.headless {
+        command.arg("--headless");
+    }
     if let Some(env) = &boot.env {
         command.arg("--env").arg(env);
     }
@@ -739,6 +808,7 @@ mod tests {
     fn running(port: u16, image: &str, name: Option<&str>, serial: Option<&str>) -> Instance {
         Instance {
             port,
+            control: None,
             disk: image.into(),
             disk_id: format!("{port:016x}"),
             ready: true,

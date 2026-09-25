@@ -5,8 +5,9 @@ One process is one emulated Ark, and its whole state is one disk image. It
 exists for development and demos, so keep real data on hardware. Everything
 that touches the emulated Ark's data goes through `ark`, from the repository
 at https://github.com/dark-bio/cli, where the owner approves on their phone
-in Ark Companion exactly as on hardware. This tool never talks to the Ark, and
-nothing here needs approval, which is why no command has an Approval line.
+in Ark Companion exactly as on hardware. This tool controls the emulator's
+lifecycle and reset button. Nothing here needs approval, which is why no
+command has an Approval line.
 Read `ark help agents` before driving the Ark itself.
 
 ## Running
@@ -14,9 +15,9 @@ Read `ark help agents` before driving the Ark itself.
 - `ark-emulator start` boots the remembered image, the same device the
   owner opens by double-click, and returns once the firmware accepts clients.
   It prints the locator to pass to `ark -d`. The emulator runs in a process
-  of its own and shows the device face in a window, so it needs a window
-  system, though the window may stay covered, the screen locked or the
-  display dark. Pass --image for a separate device, and --env for the cloud
+  of its own. Pass --headless to run without a window or display server;
+  otherwise it shows the device face. A covered window or locked screen
+  does not interrupt the device. Pass --image for a separate device, and --env for the cloud
   environment of an image created on this run; an existing image keeps the
   environment it was created with. Use --json for exact values.
 - Expect seconds with hardware acceleration and minutes without;
@@ -24,18 +25,41 @@ Read `ark help agents` before driving the Ark itself.
   it. --timeout bounds the wait. On timeout the emulator keeps booting, the
   exit is 7, and `ark-emulator list` shows when it is ready.
 - start is idempotent. An image that is already booted is waited for and
-  reported with started false and exit 0. A second device is asked for by
+  reported with started false and exit 0, keeping its current window mode.
+  A second device is asked for by
   naming a second image; each runs on its own port from 18181 up.
 - `ark-emulator stop` shuts the only running emulator down the way closing
   its window does. With several running, name one as `ark -d` would, by its
   locator, serial, name or image, or pass --all for every one.
+- `ark-emulator button press` holds the only emulator's reset button, and
+  `ark-emulator button release` releases that CLI hold. Both accept the same
+  selector as stop. They work with a window or headless and wait for hardware
+  delivery, without waiting for any resulting firmware operation to finish.
+  Repeating an untimed press or release sends no extra edge. Pass --release-after
+  SECONDS on press to schedule release in the launcher, using whole seconds.
+  With 0 s, the launcher releases immediately after delivering the press and
+  replies with the released CLI state. Positive timers start at delivery and
+  work after the command exits. Each press replaces the timer; a press without
+  the option cancels it. Explicit release,
+  disconnection and shutdown cancel it too. The hold survives the command
+  exiting and UI focus changes, but ends when the hardware disconnects.
+  A separate window hold keeps the button pressed until the pointer releases.
+  The result reports the physical state, the CLI hold, whether that hold or its
+  timer changed, and release_after_seconds as the accepted delay or null.
+  Success confirms delivery and scheduling, without waiting for a positive delay.
+  --timeout bounds each reply wait. A timeout or interruption leaves
+  the outcome unknown; use button release to clear a CLI hold. No input is
+  retried automatically or carried into a restarted guest.
 - `ark-emulator wipe --yes` resets the image start would boot to a fresh
   device, and `wipe PATH --yes` another one. The file stays, so the next
   start boots a factory-fresh device that needs `ark enroll`, `ark pair` and
   `ark unlock` again. The reset loop is stop, wipe, start.
-- Nothing else asks a question, and no command opens a window of its own. A
-  bare `ark-emulator` opens the device window and may ask where to keep the
-  image; do not use it from a script.
+- No management command opens a window of its own. A bare `ark-emulator`
+  opens the device window and may ask where to keep the image.
+  `ark-emulator --headless` runs in the foreground without questions. It
+  uses the same image defaults as start, ignores the saved autostart toggle,
+  and exits on failure. Ctrl-C or SIGTERM stops that device and exits 130
+  or 143. Interrupting a start command only ends its readiness wait.
 
 ## Reading results
 
@@ -46,15 +70,16 @@ an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
 cannot keep the two streams apart, drop the lines that start with
 `{"event":` under --json; what remains is the document.
 
-A note that a newer Ark Emulator is available names the upgrade and repeats
-on every start, list, stop and wipe until it happens, so pass it on to the
-person; upgrading is their call. doctor reports the same as its update check,
-and a nonempty CI turns the note off.
+A note that a newer Ark Emulator is available names the upgrade. It repeats
+on every start, list, stop, button press, button release and wipe, and when a
+foreground headless run starts. Pass it on to the person; upgrading is their
+call. doctor reports the same as its update check, and a nonempty CI turns
+the note off.
 
 A start without hardware acceleration takes minutes, so run it in the
 background and follow stderr, without starting another:
 
-    ark-emulator start --json > result.json 2> events.log &
+    ark-emulator start --headless --json > result.json 2> events.log &
     tail -n 2 events.log
     wait $!
 
@@ -70,7 +95,9 @@ and says what to fix; its
 JSON also carries where everything lives. Every emulator writes its launcher
 log to a file under the data directory, named by port; start --json and
 list --json name it, and a failed start quotes its tail. The device itself
-prints nothing.
+prints nothing in a packaged build. A foreground source build gives stdout
+to the guest console, including under --json; its stderr still carries
+JSON events. Use start --json when a result document is needed.
 
 ## After it boots
 
