@@ -5,10 +5,10 @@
 // license that can be found in the LICENSE file.
 
 //! The checklist that says what to fix on this computer and in this build:
-//! QEMU, the firmware, hardware acceleration, the data directory, the
-//! settings, the remembered image, the registry and a free port. Every check
-//! runs and the whole list prints; the first failure then sets the exit, so a
-//! caller sees everything that is wrong at once.
+//! a newer release, QEMU, the firmware, hardware acceleration, the data
+//! directory, the settings, the remembered image, the registry and a free
+//! port. Every check runs and the whole list prints; the first failure then
+//! sets the exit, so a caller sees everything that is wrong at once.
 
 use std::path::Path;
 
@@ -22,10 +22,12 @@ use crate::output::{self, Output};
 use crate::qemu::{self, GuestArch, HostPort};
 use crate::registry::REGISTRY_PORT;
 use crate::settings::Settings;
+use crate::update;
 
 /// Run every check and print the list, then fail with the first failure.
-pub(crate) fn doctor(output: &Output, paths: &Paths) -> Result<(), Error> {
+pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(), Error> {
     let mut checks = Checks::default();
+    checks.update(timeout);
     let arch = GuestArch::native().ok_or_else(|| {
         Error::new(
             Code::FirmwareMissing,
@@ -204,9 +206,46 @@ struct Checks {
 }
 
 impl Checks {
+    /// Looks up the newest release afresh. A newer one is a warn and a failed
+    /// lookup a skip, so neither sets the exit code.
+    fn update(&mut self, timeout: u64) {
+        // Under CI nothing is looked up
+        if update::disabled() {
+            self.skip("update", "CI is set");
+            return;
+        }
+
+        // Look up within --timeout, keeping the answer for later commands
+        let running = update::running();
+        let result = update::refresh(
+            update::directory().as_deref(),
+            time::OffsetDateTime::now_utc(),
+            std::time::Duration::from_secs(timeout),
+        );
+
+        // An unpublished local build newer than the release is current too
+        match result {
+            Ok(newest) if newest.cmp_precedence(&running).is_gt() => self.warn(
+                "update",
+                &format!("Ark Emulator {newest} is available, this is {running}"),
+                &update::hint(),
+            ),
+            Ok(_) => self.ok(
+                "update",
+                &format!("Ark Emulator {running} is the newest release"),
+            ),
+            Err(error) => self.skip("update", error),
+        }
+    }
+
     /// Record a check that passed, with what it saw.
     fn ok(&mut self, name: &str, detail: &str) {
         self.add(name, "ok", detail, None);
+    }
+
+    /// Record something to act on with its hint, without failing the command.
+    fn warn(&mut self, name: &str, detail: &str, hint: &str) {
+        self.add(name, "warn", detail, Some(hint));
     }
 
     /// Record a check that could not run, without failing the command.

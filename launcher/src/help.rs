@@ -242,8 +242,8 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
         ),
         "doctor" => (
             "nothing; a check that cannot run is skipped",
-            "seconds",
-            "checks: result, name, detail, hint; JSON adds version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry",
+            "seconds; the release lookup waits up to --timeout for each network reply",
+            "checks: result (ok, warn, fail or skip), name, detail, hint; JSON adds version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry",
             "0 done; 1 a check failed on this computer; 2 usage; 3 the registry could not be read; 130/143 interrupted",
             "ark-emulator doctor\nark-emulator doctor --json",
         ),

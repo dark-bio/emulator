@@ -48,7 +48,11 @@ fn test_windows_launcher_waits_and_preserves_arguments_and_exit_codes() {
                     .env("ARK_TEST_LAUNCHER", &script);
                 command
             };
-            command.env("NO_COLOR", "1").output().unwrap()
+            command
+                .env("NO_COLOR", "1")
+                .env("CI", "1")
+                .output()
+                .unwrap()
         };
         let help = invoke(&["help", "start"]);
         assert_eq!(help.status.code(), Some(0), "{shell}: {help:?}");
