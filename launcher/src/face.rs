@@ -78,6 +78,6 @@ pub(crate) fn set_button_pressed(
     generation: u64,
 ) -> Result<(), String> {
     view.hardware
-        .button(ButtonSource::Ui, pressed, generation)
+        .button(ButtonSource::Ui, pressed, generation, None)
         .map(|_| ())
 }

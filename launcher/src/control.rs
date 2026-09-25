@@ -123,6 +123,7 @@ impl Drop for Control {
 
 /// Answer one request without accepting bodies or cross-origin browser access.
 fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
+    // Read headers without consuming a request body
     let header = |name: &str| {
         request
             .headers()
@@ -148,6 +149,21 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
             serde_json::json!({"error": "the launcher no longer matches discovery"}),
         )
     } else {
+        // Bind every input to the connection observed by its caller
+        let apply = |pressed, release_after| match header(GENERATION_HEADER)
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(generation) => {
+                match hardware.button(ButtonSource::Cli, pressed, generation, release_after) {
+                    Ok(outcome) => (200, serde_json::to_value(outcome).unwrap()),
+                    Err(err) => (409, serde_json::json!({"error": err})),
+                }
+            }
+            None => (
+                400,
+                serde_json::json!({"error": "a connection generation is required"}),
+            ),
+        };
         match (request.method(), request.url()) {
             (&Method::Get, "/v1/button") => {
                 let state = hardware.snapshot();
@@ -163,24 +179,27 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
                 )
             }
             (&Method::Post, path @ ("/v1/button/press" | "/v1/button/release")) => {
-                match header(GENERATION_HEADER).and_then(|value| value.parse::<u64>().ok()) {
-                    Some(generation) => match hardware.button(
-                        ButtonSource::Cli,
-                        path.ends_with("/press"),
-                        generation,
-                    ) {
-                        Ok(outcome) => (200, serde_json::to_value(outcome).unwrap()),
-                        Err(err) => (409, serde_json::json!({"error": err})),
-                    },
-                    None => (
+                apply(path.ends_with("/press"), None)
+            }
+            (&Method::Post, path) if path.starts_with("/v1/button/press/") => {
+                // A separate route makes older launchers reject timed presses entirely
+                match path
+                    .strip_prefix("/v1/button/press/")
+                    .unwrap()
+                    .parse::<u32>()
+                {
+                    Ok(seconds) => apply(true, Some(seconds)),
+                    Err(_) => (
                         400,
-                        serde_json::json!({"error": "a connection generation is required"}),
+                        serde_json::json!({"error": "release delay must be whole seconds from 0 to 4294967295"}),
                     ),
                 }
             }
             _ => (404, serde_json::json!({"error": "no such control route"})),
         }
     };
+
+    // Do not grant cross-origin access to this control endpoint
     let response = Response::from_data(serde_json::to_vec(&body).unwrap())
         .with_status_code(StatusCode(status))
         .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
@@ -191,8 +210,18 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
 pub(crate) fn button(
     endpoint: &Endpoint,
     pressed: bool,
+    release_after: Option<u32>,
     timeout: Duration,
 ) -> Result<ButtonOutcome, Error> {
+    // Reject an inconsistent input before contacting the launcher
+    if !pressed && release_after.is_some() {
+        return Err(Error::new(
+            Code::Usage,
+            "automatic release requires a button press",
+        ));
+    }
+
+    // Read the target generation before submitting an input
     let snapshot: Snapshot =
         serde_json::from_slice(&request(endpoint, "GET", "/v1/button", None, timeout)?).map_err(
             |err| {
@@ -216,14 +245,41 @@ pub(crate) fn button(
             "invalid hardware connection generation",
         )
     })?;
-    let path = if pressed {
-        "/v1/button/press"
+
+    // Send timed presses on a route that older launchers cannot silently accept
+    let path = if let Some(seconds) = release_after {
+        format!("/v1/button/press/{seconds}")
+    } else if pressed {
+        "/v1/button/press".to_owned()
     } else {
-        "/v1/button/release"
+        "/v1/button/release".to_owned()
     };
-    serde_json::from_slice(&request(endpoint, "POST", path, Some(generation), timeout)?)
-        .map_err(|err| Error::new(Code::ControlUnreachable, format!("could not read button delivery: {err}"))
-            .hint("the button state is unknown; use `ark-emulator button release` to clear a CLI hold"))
+    let outcome: ButtonOutcome = serde_json::from_slice(&request(
+        endpoint,
+        "POST",
+        &path,
+        Some(generation),
+        timeout,
+    )?)
+    .map_err(|err| {
+        Error::new(
+            Code::ControlUnreachable,
+            format!("could not read button delivery: {err}"),
+        )
+        .hint("the button state is unknown; use `ark-emulator button release` to clear a CLI hold")
+    })?;
+
+    // A successful timed command must acknowledge the requested schedule
+    if outcome.release_after_seconds != release_after {
+        return Err(Error::new(
+            Code::ControlUnreachable,
+            "the launcher did not confirm the requested release schedule",
+        )
+        .hint(
+            "the button state is unknown; use `ark-emulator button release` to clear a CLI hold",
+        ));
+    }
+    Ok(outcome)
 }
 
 /// Exchange one bounded HTTP/1.0 request, without retrying an uncertain input.
@@ -304,6 +360,13 @@ fn request(
         .ok()
         .and_then(|body| body["error"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "emulator control returned an invalid response".to_owned());
+    if status == Some(404) {
+        return Err(Error::new(
+            Code::ControlUnsupported,
+            "the launcher does not support this button request",
+        )
+        .hint("update Ark Emulator and restart the selected emulator"));
+    }
     let code = if status == Some(409) {
         Code::ButtonUnavailable
     } else {
@@ -402,31 +465,314 @@ mod tests {
         let mut fixture = Fixture::new();
         let timeout = Duration::from_secs(1);
         let generation = fixture.hardware.snapshot().generation;
-        let result = button(&fixture.control.endpoint, true, timeout).unwrap();
+        let result = button(&fixture.control.endpoint, true, None, timeout).unwrap();
         assert!(result.pressed && result.cli_pressed && result.changed);
         assert_eq!(fixture.edge(), "falling");
-        let result = button(&fixture.control.endpoint, true, timeout).unwrap();
+        let result = button(&fixture.control.endpoint, true, None, timeout).unwrap();
         assert!(!result.changed);
         fixture.hardware.release_button();
         fixture
             .hardware
-            .button(ButtonSource::Ui, true, generation)
+            .button(ButtonSource::Ui, true, generation, None)
             .unwrap();
-        let result = button(&fixture.control.endpoint, false, timeout).unwrap();
+        let result = button(&fixture.control.endpoint, false, None, timeout).unwrap();
         assert!(result.pressed && !result.cli_pressed && result.changed);
         fixture
             .hardware
-            .button(ButtonSource::Ui, false, generation)
+            .button(ButtonSource::Ui, false, generation, None)
             .unwrap();
         assert_eq!(fixture.edge(), "rising");
-        let result = button(&fixture.control.endpoint, false, timeout).unwrap();
+        let result = button(&fixture.control.endpoint, false, None, timeout).unwrap();
         assert!(!result.pressed && !result.cli_pressed && !result.changed);
-        button(&fixture.control.endpoint, true, timeout).unwrap();
+        button(&fixture.control.endpoint, true, None, timeout).unwrap();
         assert_eq!(fixture.edge(), "falling");
         fixture.hardware.release_button();
-        let result = button(&fixture.control.endpoint, false, timeout).unwrap();
+        let result = button(&fixture.control.endpoint, false, None, timeout).unwrap();
         assert!(!result.pressed);
         assert_eq!(fixture.edge(), "rising");
+    }
+
+    /// Zero seconds delivers ordered press and release edges before replying.
+    #[test]
+    fn test_zero_delay_releases_before_replying() {
+        let mut fixture = Fixture::new();
+        for _ in 0..2 {
+            // Each request completes the release before acknowledging its state
+            let outcome = button(
+                &fixture.control.endpoint,
+                true,
+                Some(0),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(outcome.release_after_seconds, Some(0));
+            assert!(outcome.changed);
+            assert!(!outcome.pressed && !outcome.cli_pressed);
+            assert!(!fixture.hardware.snapshot().pressed);
+
+            // Repeated immediate presses each produce both edges in order
+            assert_eq!(fixture.edge(), "falling");
+            assert_eq!(fixture.edge(), "rising");
+        }
+    }
+
+    /// Zero seconds cancels a previous timer while preserving the window hold.
+    #[test]
+    fn test_zero_delay_cancels_the_timer_and_preserves_the_window_hold() {
+        // Hold the button from both sources with a release timer pending
+        let mut fixture = Fixture::new();
+        let timeout = Duration::from_secs(1);
+        button(&fixture.control.endpoint, true, Some(1), timeout).unwrap();
+        assert_eq!(fixture.edge(), "falling");
+        let generation = fixture.hardware.snapshot().generation;
+        fixture
+            .hardware
+            .button(ButtonSource::Ui, true, generation, None)
+            .unwrap();
+
+        // Immediate release clears the CLI hold without a physical release edge
+        let outcome = button(&fixture.control.endpoint, true, Some(0), timeout).unwrap();
+        assert!(outcome.pressed && outcome.changed);
+        assert!(!outcome.cli_pressed);
+        fixture
+            .hardware
+            .button(ButtonSource::Ui, false, generation, None)
+            .unwrap();
+        assert_eq!(fixture.edge(), "rising");
+
+        // A subsequent hold survives the timer that the immediate release cancelled
+        button(&fixture.control.endpoint, true, None, timeout).unwrap();
+        assert_eq!(fixture.edge(), "falling");
+        thread::sleep(Duration::from_millis(1200));
+        assert!(fixture.hardware.snapshot().cli_pressed);
+        button(&fixture.control.endpoint, false, None, timeout).unwrap();
+        assert_eq!(fixture.edge(), "rising");
+    }
+
+    /// The launcher releases a timed hold after the requesting client has left.
+    #[test]
+    fn test_timed_release_runs_after_the_request_finishes() {
+        // Deliver one timed press and observe its edge before the timer expires
+        let mut fixture = Fixture::new();
+        let started = Instant::now();
+        let outcome = button(
+            &fixture.control.endpoint,
+            true,
+            Some(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(outcome.release_after_seconds, Some(1));
+        assert!(outcome.pressed && outcome.cli_pressed && outcome.changed);
+        assert_eq!(fixture.edge(), "falling");
+        assert!(fixture.hardware.snapshot().cli_pressed);
+
+        // No client remains connected while the worker delivers the release
+        fixture
+            .peer
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(fixture.edge(), "rising");
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        wait_for(|| !fixture.hardware.snapshot().cli_pressed);
+        assert!(!fixture.hardware.snapshot().pressed);
+    }
+
+    /// Repeating a timed press resets its deadline without adding another edge.
+    #[test]
+    fn test_a_new_timed_press_replaces_the_deadline() {
+        // Leave enough time to replace the first deadline before it can expire
+        let mut fixture = Fixture::new();
+        button(
+            &fixture.control.endpoint,
+            true,
+            Some(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fixture.edge(), "falling");
+        thread::sleep(Duration::from_millis(100));
+
+        // The next edge must belong to the replacement timer, not the first one
+        let started = Instant::now();
+        let outcome = button(
+            &fixture.control.endpoint,
+            true,
+            Some(2),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(outcome.changed);
+        fixture
+            .peer
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(fixture.edge(), "rising");
+        assert!(started.elapsed() >= Duration::from_secs(2));
+    }
+
+    /// Manual release and a new untimed press both remove the previous timer.
+    #[test]
+    fn test_cancelled_timers_cannot_release_a_later_hold() {
+        for release_first in [false, true] {
+            // Set up a timer and optionally release its hold explicitly
+            let mut fixture = Fixture::new();
+            button(
+                &fixture.control.endpoint,
+                true,
+                Some(1),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(fixture.edge(), "falling");
+            if release_first {
+                button(
+                    &fixture.control.endpoint,
+                    false,
+                    None,
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                assert_eq!(fixture.edge(), "rising");
+            }
+
+            // An untimed press survives the previous deadline in either case
+            let outcome = button(
+                &fixture.control.endpoint,
+                true,
+                None,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert!(outcome.changed);
+            assert!(outcome.release_after_seconds.is_none());
+            if release_first {
+                assert_eq!(fixture.edge(), "falling");
+            }
+            thread::sleep(Duration::from_millis(1200));
+            assert!(fixture.hardware.snapshot().cli_pressed);
+            button(
+                &fixture.control.endpoint,
+                false,
+                None,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(fixture.edge(), "rising");
+        }
+    }
+
+    /// Automatic release clears only the CLI hold while a pointer remains down.
+    #[test]
+    fn test_timed_release_preserves_the_window_hold() {
+        // Establish overlapping holds, then wait for only the CLI hold to expire
+        let mut fixture = Fixture::new();
+        button(
+            &fixture.control.endpoint,
+            true,
+            Some(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fixture.edge(), "falling");
+        let generation = fixture.hardware.snapshot().generation;
+        fixture
+            .hardware
+            .button(ButtonSource::Ui, true, generation, None)
+            .unwrap();
+        wait_for(|| !fixture.hardware.snapshot().cli_pressed);
+        assert!(fixture.hardware.snapshot().pressed);
+
+        // Releasing the remaining holder produces the sole rising edge
+        fixture
+            .hardware
+            .button(ButtonSource::Ui, false, generation, None)
+            .unwrap();
+        assert_eq!(fixture.edge(), "rising");
+    }
+
+    /// Invalid durations cannot turn an untimed hold into a timer or release it.
+    #[test]
+    fn test_invalid_timed_requests_leave_the_hold_unchanged() {
+        // Keep a known untimed hold while submitting malformed timed routes
+        let mut fixture = Fixture::new();
+        button(
+            &fixture.control.endpoint,
+            true,
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fixture.edge(), "falling");
+        let generation = fixture.hardware.snapshot().generation;
+        for delay in ["-1", "1.5", "NaN", "4294967296", "", "/v1/button/press/1"] {
+            let error = request(
+                &fixture.control.endpoint,
+                "POST",
+                &format!("/v1/button/press/{delay}"),
+                Some(generation),
+                Duration::from_secs(1),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, Code::ControlUnreachable, "{delay}");
+        }
+
+        // The original hold still requires an explicit release
+        assert!(fixture.hardware.snapshot().cli_pressed);
+        button(
+            &fixture.control.endpoint,
+            false,
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fixture.edge(), "rising");
+    }
+
+    /// Old launchers reject timed inputs without receiving an untimed fallback.
+    #[test]
+    fn test_an_older_launcher_never_receives_an_untimed_fallback() {
+        // Serve the previous control protocol with no timed route
+        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Endpoint {
+            port: server.server_addr().to_ip().unwrap().port(),
+            id: "1".repeat(64),
+        };
+        let worker = thread::spawn(move || {
+            let get = server
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            assert_eq!(get.method(), &Method::Get);
+            get.respond(Response::from_string(
+                json!({"generation":"1","connected":true,"pressed":false,"cli_pressed":false})
+                    .to_string(),
+            ))
+            .unwrap();
+            let post = server
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            assert_eq!(post.url(), "/v1/button/press/1");
+            post.respond(
+                Response::from_string(r#"{"error":"no such control route"}"#)
+                    .with_status_code(StatusCode(404)),
+            )
+            .unwrap();
+            assert!(
+                server
+                    .recv_timeout(Duration::from_millis(150))
+                    .unwrap()
+                    .is_none()
+            );
+        });
+
+        // Failure reports the missing support without replaying the request
+        let error = button(&endpoint, true, Some(1), Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.code, Code::ControlUnsupported);
+        worker.join().unwrap();
     }
 
     /// A guest restart clears every hold and rejects old connection generations.
@@ -435,12 +781,13 @@ mod tests {
         let mut fixture = Fixture::new();
         let timeout = Duration::from_secs(1);
         let generation = fixture.hardware.snapshot().generation;
-        button(&fixture.control.endpoint, true, timeout).unwrap();
+        // Leave a timer pending across the guest restart
+        button(&fixture.control.endpoint, true, Some(2), timeout).unwrap();
         assert_eq!(fixture.edge(), "falling");
         fixture.peer.close(None).unwrap();
         wait_for(|| !fixture.hardware.snapshot().connected);
         assert_eq!(
-            button(&fixture.control.endpoint, false, timeout)
+            button(&fixture.control.endpoint, false, None, timeout)
                 .unwrap_err()
                 .code,
             Code::ButtonUnavailable
@@ -461,8 +808,14 @@ mod tests {
             .code,
             Code::ButtonUnavailable
         );
-        button(&fixture.control.endpoint, true, timeout).unwrap();
+        button(&fixture.control.endpoint, true, None, timeout).unwrap();
         assert_eq!(fixture.edge(), "falling");
+
+        // A timer from the old connection must not release this new hold
+        thread::sleep(Duration::from_millis(2200));
+        assert!(fixture.hardware.snapshot().cli_pressed);
+        button(&fixture.control.endpoint, false, None, timeout).unwrap();
+        assert_eq!(fixture.edge(), "rising");
     }
 
     /// Raw requests exercise browser rejection, bounded bodies and stale launches.
@@ -515,7 +868,7 @@ mod tests {
         let mut stale = endpoint.clone();
         stale.id = "0".repeat(64);
         assert_eq!(
-            button(&stale, true, Duration::from_secs(1))
+            button(&stale, true, None, Duration::from_secs(1))
                 .unwrap_err()
                 .code,
             Code::ControlUnreachable
@@ -554,7 +907,7 @@ mod tests {
             );
             drop(post);
         });
-        let error = button(&endpoint, true, Duration::from_millis(50)).unwrap_err();
+        let error = button(&endpoint, true, None, Duration::from_millis(50)).unwrap_err();
         assert_eq!(error.code, Code::Timeout);
         assert!(
             error

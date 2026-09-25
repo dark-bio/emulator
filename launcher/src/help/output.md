@@ -89,7 +89,8 @@ object whose one member is `error`. The codes are stable.
   not be read. Exit 3.
 - control-unsupported: the emulator does not advertise button control. Update
   Ark Emulator and restart every running emulator, including the registry
-  host. Exit 3.
+  host. A launcher that predates timed presses also refuses --release-after;
+  update and restart that emulator. Exit 3.
 - control-unreachable: the launcher's control endpoint could not be reached
   or understood. Check `ark-emulator list` and retry against the current
   emulator. An input without a reply has an unknown outcome; use button

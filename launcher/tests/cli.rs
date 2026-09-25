@@ -228,6 +228,41 @@ fn test_button_group_and_invalid_arguments() {
     }
 }
 
+/// Timed release is a press-only option with a bounded nonnegative duration.
+#[test]
+fn test_timed_release_option_validation_and_help() {
+    // Both help forms advertise the option only on the command that accepts it
+    for flag in ["-h", "--help"] {
+        assert!(stdout(&run(&["button", "press", flag])).contains("--release-after"));
+        assert!(!stdout(&run(&["button", "release", flag])).contains("--release-after"));
+    }
+
+    // Both duration limits reach selection, using a port no emulator can hold
+    for seconds in ["0", "4294967295"] {
+        let output = run(&[
+            "button",
+            "press",
+            "emulator:0",
+            "--release-after",
+            seconds,
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(3), "{seconds}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "no-emulator");
+    }
+
+    // Invalid durations fail as usage errors before discovery or hardware access
+    for seconds in ["-1", "1.5", "NaN", "inf", "4294967296", "seconds"] {
+        let output = run(&["button", "press", "--release-after", seconds, "--json"]);
+        assert_eq!(output.status.code(), Some(2), "{seconds}");
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["error"]["code"], "usage");
+    }
+    let output = run(&["button", "release", "--release-after", "1", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
 #[test]
 fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
     let plain = run(&["list", "--bogus"]);

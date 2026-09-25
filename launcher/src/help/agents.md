@@ -35,11 +35,19 @@ Read `ark help agents` before driving the Ark itself.
   `ark-emulator button release` releases that CLI hold. Both accept the same
   selector as stop. They work with a window or headless and wait for hardware
   delivery, without waiting for any resulting firmware operation to finish.
-  Repeating either command sends no extra edge. The hold survives the command
+  Repeating an untimed press or release sends no extra edge. Pass --release-after
+  SECONDS on press to schedule release in the launcher, using whole seconds.
+  With 0 s, the launcher releases immediately after delivering the press and
+  replies with the released CLI state. Positive timers start at delivery and
+  work after the command exits. Each press replaces the timer; a press without
+  the option cancels it. Explicit release,
+  disconnection and shutdown cancel it too. The hold survives the command
   exiting and UI focus changes, but ends when the hardware disconnects.
   A separate window hold keeps the button pressed until the pointer releases.
-  The result reports the physical state, the CLI hold and whether that hold
-  changed. --timeout bounds each reply wait. A timeout or interruption leaves
+  The result reports the physical state, the CLI hold, whether that hold or its
+  timer changed, and release_after_seconds as the accepted delay or null.
+  Success confirms delivery and scheduling, without waiting for a positive delay.
+  --timeout bounds each reply wait. A timeout or interruption leaves
   the outcome unknown; use button release to clear a CLI hold. No input is
   retried automatically or carried into a restarted guest.
 - `ark-emulator wipe --yes` resets the image start would boot to a fresh

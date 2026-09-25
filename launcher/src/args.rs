@@ -280,11 +280,15 @@ pub(crate) enum Command {
 /// Explicit command line holds of the emulated reset button.
 #[derive(clap::Subcommand)]
 pub(crate) enum ButtonAction {
-    /// Hold the reset button until explicitly released
+    /// Hold the reset button, optionally releasing it later
     Press {
         /// Locator, serial, name or image; the only emulator otherwise
         #[arg(value_name = "EMULATOR")]
         emulator: Option<String>,
+
+        /// Release after whole seconds; 0 releases immediately after pressing
+        #[arg(long, value_name = "SECONDS")]
+        release_after: Option<u32>,
     },
     /// Release the command line hold on the reset button
     Release {

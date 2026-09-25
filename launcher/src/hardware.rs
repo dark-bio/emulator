@@ -16,7 +16,7 @@ use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -133,8 +133,11 @@ pub(crate) struct ButtonOutcome {
     pub(crate) pressed: bool,
     /// Whether a CLI hold remains active.
     pub(crate) cli_pressed: bool,
-    /// Whether this request changed its source's hold.
+    /// Whether this request changed its source's hold or release schedule.
     pub(crate) changed: bool,
+    /// Release interval accepted by this request, measured from delivery.
+    #[serde(default)]
+    pub(crate) release_after_seconds: Option<u32>,
 }
 
 /// A button input and the connection on which it was requested.
@@ -145,6 +148,8 @@ struct Button {
     pressed: bool,
     /// Connection generation, preventing delayed inputs reaching a new guest.
     generation: u64,
+    /// Automatic release of this CLI hold, measured from successful delivery.
+    release_after: Option<u32>,
     /// Reports whether the edge was written to the socket.
     reply: mpsc::Sender<Result<ButtonOutcome, String>>,
 }
@@ -227,8 +232,9 @@ impl Controller {
         source: ButtonSource,
         pressed: bool,
         generation: u64,
+        release_after: Option<u32>,
     ) -> Result<ButtonOutcome, String> {
-        self.enqueue_button(source, pressed, generation)?
+        self.enqueue_button(source, pressed, generation, release_after)?
             .recv()
             .unwrap_or_else(|_| {
                 Err("The device disconnected before accepting the input.".to_owned())
@@ -237,7 +243,7 @@ impl Controller {
 
     /// Queue a release on view dismissal without making its event loop wait.
     pub(crate) fn release_button(&self) {
-        let _ = self.enqueue_button(ButtonSource::Ui, false, self.snapshot().generation);
+        let _ = self.enqueue_button(ButtonSource::Ui, false, self.snapshot().generation, None);
     }
 
     /// Validate and queue an input, returning its delivery acknowledgement.
@@ -246,7 +252,14 @@ impl Controller {
         source: ButtonSource,
         pressed: bool,
         generation: u64,
+        release_after: Option<u32>,
     ) -> Result<mpsc::Receiver<Result<ButtonOutcome, String>>, String> {
+        // Only a CLI press can own an automatic release
+        if release_after.is_some() && (!pressed || !matches!(source, ButtonSource::Cli)) {
+            return Err("Automatic release requires a CLI press.".to_owned());
+        }
+
+        // Reject input before enqueueing it for a different connection
         let state = self.snapshot();
         if !state.connected || state.generation != generation {
             return Err("The device is not connected.".to_owned());
@@ -260,6 +273,7 @@ impl Controller {
                 pressed,
                 source,
                 generation,
+                release_after,
                 reply,
             })
             .map_err(|_| "The device cannot accept another button input.".to_owned())?;
@@ -346,47 +360,42 @@ impl Controller {
         buttons: &mpsc::Receiver<Button>,
         generation: u64,
     ) -> Result<()> {
+        // This deadline dies with the connection, so it cannot release a new guest
+        let mut release_at = None;
         while !self.0.stopping.load(Ordering::SeqCst) {
+            // Service deadlines even while inputs or LED frames arrive continuously
+            if release_at.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.apply_button(&mut socket, ButtonSource::Cli, false, None, &mut release_at)?;
+            }
+
+            // Every accepted CLI input replaces the previous release schedule
             if let Ok(button) = buttons.try_recv() {
                 if button.generation != generation {
                     let _ = button.reply.send(Err(
                         "The device restarted before accepting the input.".to_owned(),
                     ));
                 } else {
-                    let mut state = self.snapshot();
-                    let held = match button.source {
-                        ButtonSource::Ui => &mut state.ui_pressed,
-                        ButtonSource::Cli => &mut state.cli_pressed,
-                    };
-                    let changed = *held != button.pressed;
-                    *held = button.pressed;
-                    let pressed = state.ui_pressed || state.cli_pressed;
-                    if state.pressed != pressed {
-                        let frame = json!({
-                            "d": "button", "id": BUTTON_PIN,
-                            "payload": { "edge": if pressed { "falling" } else { "rising" } }
-                        });
-                        if let Err(err) = socket.send(frame.to_string().into()) {
+                    match self.apply_button(
+                        &mut socket,
+                        button.source,
+                        button.pressed,
+                        button.release_after,
+                        &mut release_at,
+                    ) {
+                        Ok(outcome) => {
+                            let _ = button.reply.send(Ok(outcome));
+                        }
+                        Err(err) => {
                             let _ = button
                                 .reply
                                 .send(Err("The button input could not be delivered.".to_owned()));
-                            return Err(err.into());
+                            return Err(err);
                         }
                     }
-                    if changed {
-                        self.update(|current| {
-                            current.pressed = pressed;
-                            current.ui_pressed = state.ui_pressed;
-                            current.cli_pressed = state.cli_pressed;
-                        });
-                    }
-                    let _ = button.reply.send(Ok(ButtonOutcome {
-                        pressed,
-                        cli_pressed: state.cli_pressed,
-                        changed,
-                    }));
                 }
             }
+
+            // Idle reads return frequently enough to deliver button edges and timers
             match socket.read() {
                 Ok(Message::Text(text)) => match self.frame(text.as_str()) {
                     Ok(Some(reply)) => socket.send(reply.into())?,
@@ -402,6 +411,63 @@ impl Controller {
             }
         }
         Ok(())
+    }
+
+    /// Deliver an edge before committing a hold or starting its release timer.
+    fn apply_button(
+        &self,
+        socket: &mut WebSocket<TcpStream>,
+        source: ButtonSource,
+        held: bool,
+        release_after: Option<u32>,
+        release_at: &mut Option<Instant>,
+    ) -> Result<ButtonOutcome> {
+        // Combine independent holders into the physical button state
+        let mut state = self.snapshot();
+        let current = match source {
+            ButtonSource::Ui => &mut state.ui_pressed,
+            ButtonSource::Cli => &mut state.cli_pressed,
+        };
+        let mut changed = *current != held;
+        *current = held;
+        let pressed = state.ui_pressed || state.cli_pressed;
+        if state.pressed != pressed {
+            let frame = json!({
+                "d": "button", "id": BUTTON_PIN,
+                "payload": { "edge": if pressed { "falling" } else { "rising" } }
+            });
+            socket.send(frame.to_string().into())?;
+        }
+
+        // A fresh deadline starts after delivery, including a repeated timed press
+        if matches!(source, ButtonSource::Cli) {
+            changed |= release_at.is_some() || release_after.is_some();
+            *release_at = release_after
+                .map(|seconds| Instant::now() + Duration::from_secs(u64::from(seconds)));
+        }
+        if changed {
+            self.update(|current| {
+                current.pressed = pressed;
+                current.ui_pressed = state.ui_pressed;
+                current.cli_pressed = state.cli_pressed;
+            });
+        }
+
+        // Complete a zero-delay release before replying or reading another frame
+        if release_after == Some(0) {
+            let released = self.apply_button(socket, ButtonSource::Cli, false, None, release_at)?;
+            return Ok(ButtonOutcome {
+                changed: changed || released.changed,
+                release_after_seconds: Some(0),
+                ..released
+            });
+        }
+        Ok(ButtonOutcome {
+            pressed,
+            cli_pressed: state.cli_pressed,
+            changed,
+            release_after_seconds: release_after,
+        })
     }
 
     /// Decode a driver frame, returning only replies the protocol requires.
@@ -463,7 +529,6 @@ struct Frame {
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use std::time::Instant;
 
     /// Start the production controller against a loopback hardware peer.
     fn connect() -> (Controller, TcpListener, WebSocket<TcpStream>) {
@@ -592,7 +657,7 @@ mod tests {
         let (controller, listener, mut socket) = connect();
         let generation = controller.snapshot().generation;
         controller
-            .button(ButtonSource::Ui, true, generation)
+            .button(ButtonSource::Ui, true, generation, None)
             .unwrap();
         assert_eq!(
             read(&mut socket),
@@ -601,10 +666,10 @@ mod tests {
             })
         );
         controller
-            .button(ButtonSource::Ui, true, generation)
+            .button(ButtonSource::Ui, true, generation, None)
             .unwrap();
         controller
-            .button(ButtonSource::Ui, false, generation)
+            .button(ButtonSource::Ui, false, generation, None)
             .unwrap();
         assert_eq!(
             read(&mut socket),
@@ -613,7 +678,7 @@ mod tests {
             })
         );
         controller
-            .button(ButtonSource::Ui, true, generation)
+            .button(ButtonSource::Ui, true, generation, None)
             .unwrap();
         read(&mut socket);
         socket
@@ -628,14 +693,14 @@ mod tests {
         assert!(state.phase == Phase::Booting);
         assert!(
             controller
-                .button(ButtonSource::Ui, true, generation)
+                .button(ButtonSource::Ui, true, generation, None)
                 .is_err()
         );
         let mut socket = tungstenite::accept(accept(&listener)).unwrap();
         wait_for(&controller, |state| state.connected);
         assert!(
             controller
-                .button(ButtonSource::Ui, true, generation)
+                .button(ButtonSource::Ui, true, generation, None)
                 .is_err()
         );
         socket
@@ -693,7 +758,12 @@ mod tests {
         let (controller, _listener, mut socket) = connect();
         thread::sleep(Duration::from_millis(50));
         let reply = controller
-            .enqueue_button(ButtonSource::Ui, true, controller.snapshot().generation)
+            .enqueue_button(
+                ButtonSource::Ui,
+                true,
+                controller.snapshot().generation,
+                None,
+            )
             .unwrap();
         reply
             .recv_timeout(Duration::from_millis(500))
@@ -723,7 +793,12 @@ mod tests {
             .unwrap();
         thread::sleep(Duration::from_millis(50));
         let reply = controller
-            .enqueue_button(ButtonSource::Ui, true, controller.snapshot().generation)
+            .enqueue_button(
+                ButtonSource::Ui,
+                true,
+                controller.snapshot().generation,
+                None,
+            )
             .unwrap();
         reply
             .recv_timeout(Duration::from_millis(500))

@@ -392,9 +392,13 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
 
 /// Set this emulator's CLI hold and report the state after hardware delivery.
 fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), Error> {
-    let (pressed, selector) = match action {
-        ButtonAction::Press { emulator } => (true, emulator),
-        ButtonAction::Release { emulator } => (false, emulator),
+    // Select the same running emulator for either kind of button input
+    let (pressed, selector, release_after) = match action {
+        ButtonAction::Press {
+            emulator,
+            release_after,
+        } => (true, emulator, release_after),
+        ButtonAction::Release { emulator } => (false, emulator, None),
     };
     let targets = pick(&listing()?, selector.as_deref())?;
     let instance = &targets[0];
@@ -405,7 +409,14 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
         )
         .hint("update Ark Emulator and restart all running emulators, including the registry host")
     })?;
-    let outcome = crate::control::button(endpoint, pressed, Duration::from_secs(global.timeout))?;
+
+    // The launcher acknowledges the timer together with the hardware write
+    let outcome = crate::control::button(
+        endpoint,
+        pressed,
+        release_after,
+        Duration::from_secs(global.timeout),
+    )?;
     if !outcome.changed {
         output.event(
             "note",
@@ -416,19 +427,23 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
             },
         );
     }
-    if !pressed && outcome.pressed {
+    if !outcome.cli_pressed && outcome.pressed {
         output.event("note", "the window still holds the button");
     }
+
+    // Report the accepted schedule; the command does not wait for its expiry
     output.block(
         &json!({
             "locator": locator(instance), "pressed": outcome.pressed,
             "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
+            "release_after_seconds": outcome.release_after_seconds,
         }),
         &[
             ("Locator", "locator"),
             ("Pressed", "pressed"),
             ("CLI held", "cli_pressed"),
             ("Changed", "changed"),
+            ("Release after", "release_after_seconds"),
         ],
     )
 }

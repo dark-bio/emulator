@@ -83,7 +83,10 @@ Omit `--headless` to show the device window. For a foreground process, use
 `ark-emulator --headless --image demo.ark`; Ctrl-C stops it. See
 `ark-emulator help start` for readiness, timeouts and image defaults.
 Button commands accept a locator, name, serial or image when several emulators
-are running. See `ark-emulator button press --help` for delivery and hold behavior.
+are running. `ark-emulator button press --release-after 3` schedules release
+after 3 s, even after the command exits. Use `--release-after 0` to release
+immediately after pressing. See `ark-emulator button press --help` for delivery
+and hold behavior.
 
 For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
 `ark-emulator` from the extracted folder. On macOS and Linux, run the

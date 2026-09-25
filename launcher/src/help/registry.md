@@ -86,18 +86,30 @@ keeps it pressed, and both clear on hardware disconnection.
 
 The control endpoint accepts these routes:
 
-    GET  /v1/button           current connection and button state
-    POST /v1/button/press     establish a CLI hold
-    POST /v1/button/release   release the CLI hold
+    GET  /v1/button                 current connection and button state
+    POST /v1/button/press           establish a CLI hold
+    POST /v1/button/press/SECONDS   hold and schedule automatic release
+    POST /v1/button/release         release the CLI hold
 
 Requests carry `X-Ark-Emulator` with the advertised launch id and no body.
 The GET response carries connected, generation as a decimal string, pressed
 and cli_pressed. POST requests also carry `X-Ark-Generation` from that read,
 so inputs cannot carry over into another connection. A 200 response confirms
-hardware delivery or an already applied hold, with pressed, cli_pressed and
-changed. It does not confirm completion of any resulting firmware operation.
+hardware delivery or an already applied hold, with pressed, cli_pressed,
+changed and release_after_seconds. The last field is the accepted interval
+or null. It does not confirm completion of any resulting firmware operation.
+
+The timed route accepts whole seconds from 0 s to 4294967295 s. With 0 s,
+the worker releases immediately after delivering the press, then replies
+with cli_pressed false and release_after_seconds 0. A positive timer starts
+at delivery on the hardware worker. A new CLI press replaces the timer,
+including cancellation when the new press has no duration. Release and
+disconnection cancel it too. Expiry clears only the CLI hold, preserving an
+active window hold. Older launchers reject the timed route with 404 without
+pressing the button; the CLI never falls back to an untimed press.
 
 A POST answers 409 when hardware cannot accept the input. A missing or wrong
 launch id answers 412, and a missing or malformed generation answers 400.
+An invalid release duration also answers 400 without changing the hold.
 Requests with bodies answer 413. Browser origins answer 403, and the endpoint
 permits no cross-origin requests. No command retries an uncertain input.
