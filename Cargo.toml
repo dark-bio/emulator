@@ -5,5 +5,11 @@ default-members = ["launcher"]
 
 [profile.release]
 strip = true
+lto = "off"
+codegen-units = 16
+
+[profile.production]
+inherits = "release"
+strip = true
 lto = true
 codegen-units = 1

@@ -51,6 +51,7 @@ jobs:
     runs-on: ${{ inputs.os }}
     environment: ${{ inputs.signing-environment }}
     env:
+      BUILD_PROFILE: ${{ github.ref_type == 'tag' && 'production' || 'release' }}
       # Hoisted into env because the verify step needs it in the shell as well
       # as in a step `if`, and the smoke job reads the same value. Deliberately
       # not the certificate itself: Tauri's bundler runs a keychain import of
@@ -223,12 +224,13 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             configs+=(--config .github/packaging/windows/tauri.conf.json)
           fi
-          cargo tauri build "${configs[@]}" --bundles ${{ inputs.bundles }} -- --locked
+          cargo tauri build "${configs[@]}" --bundles ${{ inputs.bundles }} \
+            -- --locked --profile "$BUILD_PROFILE"
 
       - name: Test Windows command entry point
         if: runner.os == 'Windows'
         env:
-          ARK_EMULATOR_TEST_EXE: ${{ github.workspace }}/target/release/ark-emulator.exe
+          ARK_EMULATOR_TEST_EXE: ${{ github.workspace }}/target/${{ env.BUILD_PROFILE }}/ark-emulator.exe
         run: cargo test --locked -p cli-tests --features packaged
 
       - name: Notarize and staple the disk image
@@ -239,7 +241,7 @@ jobs:
           key="$APPLE_API_KEY_PATH"
           result="$RUNNER_TEMP/submission.json"
 
-          dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
+          dmg="$(find "target/$BUILD_PROFILE/bundle/dmg" -maxdepth 1 -name '*.dmg')"
 
           # --wait polls until Apple answers. The reported status is what decides
           # the step, not the exit code: a submission that is delivered and then
@@ -274,7 +276,7 @@ jobs:
         # logging.
         if: runner.os == 'macOS'
         run: |
-          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          app="$(find "target/$BUILD_PROFILE/bundle/macos" -maxdepth 1 -name '*.app')"
           codesign --verify --deep --strict --verbose=2 "$app"
           for lib in "$app/Contents/Resources/qemu-libs"/*.dylib; do
             codesign --verify --strict "$lib"
@@ -283,7 +285,7 @@ jobs:
           codesign --display --entitlements - "$app/Contents/MacOS/qemu-system-guest"
 
           if [ "$SIGN_MACOS" = "true" ]; then
-            dmg="$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')"
+            dmg="$(find "target/$BUILD_PROFILE/bundle/dmg" -maxdepth 1 -name '*.dmg')"
             # stapler is the offline half: spctl alone also passes on an
             # unstapled build for as long as this runner can reach Apple.
             xcrun stapler validate "$app"
@@ -326,9 +328,9 @@ jobs:
         # forks. --keepParent so extracting drops the .app, not its contents.
         if: runner.os == 'macOS'
         run: |
-          app="$(find target/release/bundle/macos -maxdepth 1 -name '*.app')"
+          app="$(find "target/$BUILD_PROFILE/bundle/macos" -maxdepth 1 -name '*.app')"
           ditto -c -k --sequesterRsrc --keepParent "$app" \
-            "target/release/bundle/macos/Ark-Emulator.app.zip"
+            "target/$BUILD_PROFILE/bundle/macos/Ark-Emulator.app.zip"
 
       - name: Build portable Windows zip
         # Tauri stages resources only inside the NSIS payload, never as a loose
@@ -337,16 +339,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $portableDir = "target/release/portable/Ark Emulator"
+          $buildDir = "target/$env:BUILD_PROFILE"
+          $portableDir = Join-Path $buildDir "portable/Ark Emulator"
           New-Item -ItemType Directory -Force -Path (Join-Path $portableDir "bin") | Out-Null
-          Copy-Item "target/release/ark-emulator.exe" $portableDir
+          Copy-Item (Join-Path $buildDir "ark-emulator.exe") $portableDir
           Copy-Item ".github/packaging/windows/ark-emulator.cmd" (Join-Path $portableDir "bin")
-          Copy-Item "target/release/qemu-system-guest.exe" $portableDir
-          Copy-Item "target/release/qemu-img.exe" $portableDir
+          Copy-Item (Join-Path $buildDir "qemu-system-guest.exe") $portableDir
+          Copy-Item (Join-Path $buildDir "qemu-img.exe") $portableDir
           Copy-Item "launcher/qemu-libs" (Join-Path $portableDir "qemu-libs") -Recurse
           Copy-Item "launcher/firmware" (Join-Path $portableDir "firmware") -Recurse
           Compress-Archive -Path $portableDir `
-            -DestinationPath "target/release/portable/Ark-Emulator-portable.zip"
+            -DestinationPath (Join-Path $buildDir "portable/Ark-Emulator-portable.zip")
 
       - name: Stage artifacts
         # upload-artifact preserves the directory structure below the least common
@@ -372,12 +375,12 @@ jobs:
           os_name="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
           prefix="dist/ark-emulator-${version}-${os_name}-${ARCH}"
 
-          for f in target/release/bundle/dmg/*.dmg; do cp "$f" "${prefix}.dmg"; done
-          for f in target/release/bundle/macos/*.app.zip; do cp "$f" "${prefix}.zip"; done
-          for f in target/release/bundle/nsis/*.exe; do cp "$f" "${prefix}.exe"; done
-          for f in target/release/portable/*.zip; do cp "$f" "${prefix}.zip"; done
-          for f in target/release/bundle/deb/*.deb; do cp "$f" "${prefix}.deb"; done
-          for f in target/release/bundle/appimage/*.AppImage; do cp "$f" "${prefix}.AppImage"; done
+          for f in "target/$BUILD_PROFILE/bundle/dmg/"*.dmg; do cp "$f" "${prefix}.dmg"; done
+          for f in "target/$BUILD_PROFILE/bundle/macos/"*.app.zip; do cp "$f" "${prefix}.zip"; done
+          for f in "target/$BUILD_PROFILE/bundle/nsis/"*.exe; do cp "$f" "${prefix}.exe"; done
+          for f in "target/$BUILD_PROFILE/portable/"*.zip; do cp "$f" "${prefix}.zip"; done
+          for f in "target/$BUILD_PROFILE/bundle/deb/"*.deb; do cp "$f" "${prefix}.deb"; done
+          for f in "target/$BUILD_PROFILE/bundle/appimage/"*.AppImage; do cp "$f" "${prefix}.AppImage"; done
 
           ls -la dist/
 
