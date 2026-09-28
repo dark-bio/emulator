@@ -1,0 +1,28 @@
+[package]
+name = "cli-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Enable these tests with ARK_EMULATOR_TEST_EXE pointing to a built executable.
+# Sharing the sources keeps packaged and local CLI coverage identical.
+[features]
+packaged = []
+
+[[test]]
+name = "cli"
+path = "../../launcher/tests/cli.rs"
+required-features = ["packaged"]
+
+[[test]]
+name = "windows_cli"
+path = "../../launcher/tests/windows_cli.rs"
+required-features = ["packaged"]
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+semver = "1"
+time = { version = "0.3", features = ["formatting"] }
