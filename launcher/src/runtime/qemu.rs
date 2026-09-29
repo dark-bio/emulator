@@ -39,7 +39,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::bundle::{Firmware, resolve_sidecar};
 use crate::diagnostics::{self, log};
-use crate::orphan;
+use crate::platform::orphan;
 use crate::platform::{
     accel_flags, library_path_var, prepend_library_path, suppress_child_console,
 };

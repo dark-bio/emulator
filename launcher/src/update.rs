@@ -17,8 +17,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::cli::output::Output;
 use crate::diagnostics::log;
-use crate::output::Output;
 
 /// Hidden sole argument that runs the detached lookup and nothing else.
 pub(crate) const ENTRY_POINT: &str = "__update";

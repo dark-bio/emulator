@@ -24,16 +24,15 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tauri::PackageInfo;
 
-use crate::args::{Boot, ButtonAction, Command, Global};
+use super::args::{Boot, ButtonAction, Command, Global};
+use super::output::{self, Output};
 use crate::bundle::{self, Paths};
 use crate::diagnostics::{self, Sink};
-use crate::discovery;
-use crate::disk;
 use crate::error::{Code, Error};
-use crate::output::{self, Output};
+use crate::ipc::{control, discovery, registry::Instance};
 use crate::platform;
-use crate::qemu::{self, GuestArch, HostPort};
-use crate::registry::Instance;
+use crate::runtime::disk;
+use crate::runtime::qemu::{self, GuestArch, HostPort};
 use crate::settings::Settings;
 
 /// How often a wait asks the registry again. Short enough that a boot which
@@ -97,7 +96,7 @@ fn dispatch(
     // Answered before anything is resolved, since a reader asking what a
     // command does may be on a computer where nothing else would work.
     match command {
-        Some(Command::Help { name, all }) => return crate::help::run(name.as_slice(), all, true),
+        Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all, true),
         Some(Command::Completions { shell }) => return completions(shell, output),
         _ => {}
     }
@@ -108,7 +107,7 @@ fn dispatch(
         Some(Command::Stop { emulator, all }) => stop(emulator.as_deref(), all, global, output),
         Some(Command::Button { action }) => button(action, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
-        Some(Command::Doctor) => crate::doctor::doctor(output, &paths, global.timeout),
+        Some(Command::Doctor) => super::doctor::doctor(output, &paths, global.timeout),
         Some(Command::Completions { .. } | Command::Help { .. }) => {
             unreachable!("answered above")
         }
@@ -124,7 +123,7 @@ fn completions(shell: clap_complete::Shell, output: &Output) -> Result<(), Error
     let mut script = Vec::new();
     clap_complete::generate(
         shell,
-        &mut crate::help::parser(),
+        &mut super::help::parser(),
         "ark-emulator",
         &mut script,
     );
@@ -417,7 +416,7 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
     })?;
 
     // The launcher acknowledges the timer together with the hardware write
-    let outcome = crate::control::button(
+    let outcome = control::button(
         endpoint,
         pressed,
         release_after,

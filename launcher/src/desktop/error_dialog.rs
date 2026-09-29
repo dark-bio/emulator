@@ -26,10 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-use crate::MAIN_WINDOW;
+use super::MAIN_WINDOW;
+use crate::cli::output::Output;
 use crate::diagnostics::{self, log};
 use crate::error::{Code, Error};
-use crate::output::Output;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
@@ -53,7 +53,7 @@ pub(crate) const STOPPED: &str = "stopped unexpectedly";
 
 /// Whether a failure exits after printing its report instead of opening a
 /// window. Also what stands for "nobody is here to ask" wherever else the
-/// launcher would put a dialog in front of somebody (see [`crate::disk`]).
+/// launcher would put a dialog in front of somebody (see [`crate::runtime::disk`]).
 static NO_INPUT: AtomicBool = AtomicBool::new(false);
 
 /// The output layer a failure goes through when this run answers in JSON.

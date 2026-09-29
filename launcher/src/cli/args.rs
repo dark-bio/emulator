@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::error::{Code, Error};
-use crate::qemu::GuestArch;
+use crate::runtime::qemu::GuestArch;
 use crate::settings;
 
 /// What the tool is, which opens every help page.

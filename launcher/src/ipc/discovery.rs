@@ -15,7 +15,7 @@
 //! that answers and cannot be read is an error.
 //!
 //! Every launcher tries to host the registry, one wins the port, and the rest
-//! publish themselves to whoever did (see [`crate::registry`]). Takeover rides
+//! publish themselves to whoever did (see [`super::registry`]). Takeover rides
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
 //!
@@ -36,9 +36,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
+use super::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 use crate::diagnostics::{log, trace};
-use crate::hardware::Controller;
-use crate::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
+use crate::runtime::hardware::Controller;
 
 /// How often this emulator re-registers itself. It is the heartbeat keeping
 /// its entry alive, so it has to stay well below the registry's expiry, and it
@@ -134,7 +134,7 @@ pub(crate) fn register(
     port: u16,
     disk: &Path,
     hardware: Controller,
-    control: crate::control::Endpoint,
+    control: super::control::Endpoint,
 ) {
     let instance = Instance {
         port,
@@ -349,7 +349,7 @@ fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Una
 }
 
 /// Pull the body out of a response, failing on any status the registry uses to
-/// say no. The only server on the other end is [`crate::registry`], which
+/// say no. The only server on the other end is [`super::registry`], which
 /// answers with a status line, a few headers and an unencoded body.
 fn split_response(raw: &[u8]) -> Result<Vec<u8>> {
     let split = raw

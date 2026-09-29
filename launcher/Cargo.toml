@@ -39,8 +39,8 @@ tempfile = "3"
 # death pipe + /bin/sh (std only). Windows needs windows-sys for a Job Object,
 # plus CREATE_NO_WINDOW to suppress spawned QEMU consoles, LibraryLoader to
 # probe for WHPX, and Console and FileSystem for the console a command line run
-# borrows from the terminal that started it. See src/platform.rs, src/output.rs
-# and src/orphan.rs.
+# borrows from the terminal that started it. See src/platform/mod.rs,
+# src/cli/output.rs and src/platform/orphan.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 

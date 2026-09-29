@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::args::Global;
+use super::args::Global;
+use super::style::{self, Role, Theme, wrap};
 use crate::error::{Code, Error};
-use crate::style::{self, Role, Theme, wrap};
 
 /// The two streams of one run, shared by everything that prints.
 #[derive(Clone)]
@@ -537,7 +537,7 @@ fn checklist(theme: &Theme, rows: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::Color;
+    use crate::cli::style::Color;
 
     #[test]
     fn test_an_event_carries_its_prefix_and_paints_a_quoted_command() {

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tauri::{Emitter as _, Manager as _};
 
-use crate::hardware::{ButtonSource, Controller, State};
+use crate::runtime::hardware::{ButtonSource, Controller, State};
 
 /// Minimum spacing between presentation updates.
 const FRAME_TIME: Duration = Duration::from_millis(33);
@@ -44,7 +44,7 @@ pub(crate) fn attach(app: &tauri::AppHandle, hardware: Controller) {
             std::thread::sleep(FRAME_TIME);
             let revision = hardware.snapshot().revision;
             if revision != sent && !pending.swap(true, Ordering::SeqCst) {
-                if app.emit_to(crate::MAIN_WINDOW, STATE_EVENT, ()).is_err() {
+                if app.emit_to(super::MAIN_WINDOW, STATE_EVENT, ()).is_err() {
                     pending.store(false, Ordering::SeqCst);
                 } else {
                     sent = revision;

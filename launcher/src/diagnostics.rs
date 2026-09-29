@@ -76,7 +76,7 @@ pub(crate) enum Sink {
     Stderr,
 
     /// Through a command's output layer, as `log` events.
-    Events(crate::output::Output),
+    Events(crate::cli::output::Output),
 
     /// Nowhere, which is a command that was not asked for diagnostics.
     Quiet,
@@ -92,9 +92,9 @@ pub(crate) fn log_sink(sink: Sink) {
 
 /// Choose how much this run logs. Trace adds one line per registry request,
 /// which is more than anybody wants unless they asked.
-pub(crate) fn level(level: Option<crate::args::Log>) {
+pub(crate) fn level(level: Option<crate::cli::args::Log>) {
     if let Ok(mut state) = STATE.lock() {
-        state.trace = level == Some(crate::args::Log::Trace);
+        state.trace = level == Some(crate::cli::args::Log::Trace);
     }
 }
 

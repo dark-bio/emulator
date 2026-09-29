@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::error::{Code, Error};
-use crate::hardware::{ButtonOutcome, ButtonSource, Controller};
+use crate::runtime::hardware::{ButtonOutcome, ButtonSource, Controller};
 
 /// A button reply is a small JSON object, even when it carries an error.
 const MAX_RESPONSE: u64 = 4096;
