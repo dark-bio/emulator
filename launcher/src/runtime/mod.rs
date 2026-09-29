@@ -10,6 +10,10 @@
 //! requests, signals and window closure share shutdown, and orphan protection
 //! takes QEMU down even when the launcher cannot run cleanup.
 
+pub(crate) mod disk;
+pub(crate) mod hardware;
+pub(crate) mod qemu;
+
 use std::io::{BufRead as _, BufReader};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -19,14 +23,15 @@ use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::args::Boot;
 use crate::bundle::{Firmware, Paths, resolve_firmware, resolve_qemu_libs};
+use crate::cli::args::Boot;
 use crate::diagnostics::{self, log};
-use crate::disk::{self, Resolved};
-use crate::hardware::Controller;
-use crate::qemu::{GuestArch, HostPort, spawn_qemu};
+use crate::ipc::{control, discovery, registry};
+use crate::platform;
 use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY, Settings};
-use crate::{discovery, platform, registry};
+use disk::Resolved;
+use hardware::Controller;
+use qemu::{GuestArch, HostPort, spawn_qemu};
 
 /// Prevents a requested shutdown from being reported as a QEMU crash.
 static STOPPING: AtomicBool = AtomicBool::new(false);
@@ -160,7 +165,7 @@ impl Runtime {
         exited: impl FnOnce(Result<ExitStatus>) + Send + 'static,
     ) -> Result<()> {
         diagnostics::record_path("Disk", disk);
-        let control = crate::control::Control::start(self.hardware.clone())?;
+        let control = control::Control::start(self.hardware.clone())?;
         let mut child = spawn_qemu(
             pending.arch,
             &pending.firmware,

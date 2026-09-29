@@ -22,7 +22,7 @@
 //! on three platforms, a reason to shut down, and a place in the packaging.
 //!
 //! When the host exits, the port frees and the next launcher whose heartbeat
-//! fails takes over (see [`crate::discovery`]). Its registry starts empty and
+//! fails takes over (see [`super::discovery`]). Its registry starts empty and
 //! refills, since every launcher keeps republishing its own entry. Entries live
 //! only as long as they are refreshed, so an emulator killed outright drops out
 //! on its own, with no liveness probing, of which there is no portable kind.
@@ -56,7 +56,7 @@ pub(crate) const REGISTRY_PORT: u16 = 18180;
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// How long an entry survives without being refreshed. Comfortably more than
-/// the heartbeat interval in [`crate::discovery`], so a launcher that is busy
+/// the heartbeat interval in [`super::discovery`], so a launcher that is busy
 /// or beating slowly is not dropped between two of its beats.
 const ENTRY_TTL: Duration = Duration::from_secs(15);
 
@@ -78,7 +78,7 @@ pub(crate) struct Instance {
 
     /// Direct launcher control, absent on builds that only support discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) control: Option<crate::control::Endpoint>,
+    pub(crate) control: Option<super::control::Endpoint>,
 
     /// File name of the backing disk image, which tells two emulators apart
     /// while neither is named or onboarded. Never the path: see the module

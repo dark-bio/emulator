@@ -18,9 +18,9 @@
 
 use clap::CommandFactory as _;
 
-use crate::args::Cli;
+use super::args::Cli;
+use super::style::{self, Color, Role, Theme};
 use crate::error::{Code, Error};
-use crate::style::{self, Color, Role, Theme};
 
 /// The topics this build carries, in the order the manual prints them.
 const TOPICS: [&str; 4] = ["agents", "output", "images", "registry"];

@@ -105,8 +105,8 @@ address that gives it an attested one, valid for 30 days; after that,
 
 `ark-emulator --help` lists every command and option, and `ark-emulator help`
 names the reference topics, whose sources in
-[`launcher/src/help`](launcher/src/help) read the same on GitHub. AI agents
-should read [`ark-emulator help agents`](launcher/src/help/agents.md) first,
+[`launcher/src/cli/help`](launcher/src/cli/help) read the same on GitHub. AI agents
+should read [`ark-emulator help agents`](launcher/src/cli/help/agents.md) first,
 then `ark help agents` before driving the Ark itself. Apps to run on an
 emulator, in Rust, Go, C and Python, are at
 [examples](https://github.com/dark-bio/examples). Pairing and unlocking happen

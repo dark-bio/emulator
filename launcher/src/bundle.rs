@@ -25,10 +25,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use tauri::PackageInfo;
 
-use crate::Boot;
+use crate::cli::args::Boot;
 use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
-use crate::qemu::GuestArch;
+use crate::runtime::qemu::GuestArch;
 
 /// Where this build keeps its files, resolved without a window so that a
 /// command line run never has to start one.

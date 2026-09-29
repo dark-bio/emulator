@@ -26,8 +26,6 @@
 //!     Windows, each behind a runtime probe, falling back to TCG emulation.
 //!   - **Opening a URL**: `xdg-open`, `open` and `cmd /c start`, none of which
 //!     share a name across platforms.
-//!   - **Application menu**: macOS has an app-menu action for starting another
-//!     emulator explicitly.
 //!   - **Detaching a child**: a process group of its own, so a Ctrl-C meant
 //!     for a command's wait does not reach the emulator it started, and on
 //!     Windows the flags and handles that keep it off the console.
@@ -40,9 +38,7 @@ use std::process::{Command, Stdio};
 
 use crate::diagnostics::{self, log};
 
-#[cfg(target_os = "macos")]
-#[path = "macos_menu.rs"]
-mod macos_menu;
+pub(crate) mod orphan;
 
 /// Recognize a terminal interrupt also delivered directly to QEMU.
 #[cfg(unix)]
@@ -101,17 +97,6 @@ pub(crate) fn install_shutdown() -> std::io::Result<()> {
     if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(())
-}
-
-/// Install the platform's native actions for starting another emulator.
-#[cfg(target_os = "macos")]
-pub(crate) fn install_menus(app: &tauri::App) -> anyhow::Result<()> {
-    macos_menu::install(app)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn install_menus(_app: &tauri::App) -> anyhow::Result<()> {
     Ok(())
 }
 

@@ -26,13 +26,7 @@
 //!
 //! [`decide`] never puts anything on screen. It answers either with an image to
 //! boot or with a suggestion and the reason it cannot proceed, and the launcher
-//! turns the second into the settings panel's startup form. The picker below is
-//! then raised by that panel, from a button the user pressed, rather than as a
-//! modal appearing out of nowhere before the app has drawn anything.
-//!
-//! Open selects an existing image. New uses a save dialog and creates the
-//! image immediately, replacing existing contents only after the native
-//! dialog confirms that choice. Starting from the panel never creates an image.
+//! turns the second into the settings panel's startup form.
 //!
 //! [`select`] is the same precedence for the command line, which never asks:
 //! the named image, then the remembered one, then the launcher's own. Both
@@ -40,15 +34,13 @@
 //! start agree on which file is which.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, bail};
-use serde::Serialize;
 
 use crate::diagnostics::log;
-use crate::discovery;
+use crate::ipc::{discovery, registry::Instance};
 use crate::platform::strip_verbatim_prefix;
-use crate::registry::Instance;
 
 /// Name used when an unattended launch needs to allocate an image.
 pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
@@ -56,12 +48,9 @@ pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
 /// The image this run settled on, so that the device face can name it.
 static BOOTED: OnceLock<PathBuf> = OnceLock::new();
 
-/// Full path of the disk image backing the emulated device, for the info tray
-/// on the device face. `None` until the guest has been started, which is the
-/// whole time the settings panel's startup form is up.
-#[tauri::command]
-pub(crate) fn disk_path() -> Option<String> {
-    BOOTED.get().map(|disk| disk.display().to_string())
+/// Return the backing image's path, or `None` until the guest has started.
+pub(crate) fn booted() -> Option<&'static Path> {
+    BOOTED.get().map(PathBuf::as_path)
 }
 
 /// Publish the image the guest was started on. Called once, as QEMU is spawned.
@@ -236,85 +225,6 @@ pub(crate) fn settle(image: &Path) -> Result<PathBuf> {
         Ok(parent) => strip_verbatim_prefix(&parent.join(name)),
         Err(_) => image,
     })
-}
-
-/// An image the user chose in the picker, as the settings panel needs it.
-#[derive(Serialize)]
-pub(crate) struct Picked {
-    /// Full path, which is what goes back to the launcher on start.
-    path: String,
-    /// File name, which is what the panel shows.
-    name: String,
-}
-
-/// Select an existing image, or create one immediately through a save dialog.
-/// `None` means the user dismissed the dialog.
-#[tauri::command]
-pub(crate) async fn pick_disk(
-    app: tauri::AppHandle,
-    launcher: tauri::State<'_, Mutex<crate::panel::Launcher>>,
-    current: String,
-    create: bool,
-) -> Result<Option<Picked>, String> {
-    let qemu_libs = launcher.lock().unwrap().qemu_libs().map(Path::to_path_buf);
-    let picked = choose_disk(&app, Path::new(&current), create).await?;
-    let Some(path) = picked else {
-        return Ok(None);
-    };
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = settle(&path).map_err(|e| format!("That location cannot be used: {e}"))?;
-        if create {
-            require_available(&path).map_err(|e| format!("{e:#}"))?;
-            crate::qemu::create_disk(&path, qemu_libs.as_deref())
-                .map_err(|e| format!("Could not create {}: {e:#}", name_of(&path)))?;
-        } else {
-            require_existing(&path).map_err(|e| format!("{e:#}"))?;
-        }
-        Ok(Some(Picked {
-            name: name_of(&path),
-            path: path.display().to_string(),
-        }))
-    })
-    .await
-    .map_err(|e| format!("Could not prepare the image: {e}"))?
-}
-
-/// Run native dialogs on the main thread, as required by macOS, while the
-/// command awaits their result without blocking the event loop.
-async fn choose_disk(
-    app: &tauri::AppHandle,
-    current: &Path,
-    create: bool,
-) -> Result<Option<PathBuf>, String> {
-    let dir = current.parent().unwrap_or(Path::new("")).to_path_buf();
-    let name = name_of(current);
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.run_on_main_thread(move || {
-        let mut dialog = rfd::FileDialog::new().add_filter("Ark emulator", &["ark"]);
-        if !dir.as_os_str().is_empty() {
-            dialog = dialog.set_directory(dir);
-        }
-        if !name.is_empty() {
-            dialog = dialog.set_file_name(name);
-        }
-        let picked = if create {
-            dialog
-                .set_file_name("emulator.ark")
-                .set_title("Create a new emulator")
-                .save_file()
-        } else {
-            dialog
-                .add_filter("All files", &["*"])
-                .set_title("Open an existing emulator")
-                .pick_file()
-        };
-        let _ = tx.send(picked);
-    })
-    .map_err(|e| format!("Could not open the file picker: {e}"))?;
-    tauri::async_runtime::spawn_blocking(move || rx.recv())
-        .await
-        .map_err(|e| format!("Could not read the file picker result: {e}"))?
-        .map_err(|e| format!("The file picker closed unexpectedly: {e}"))
 }
 
 /// Require an existing image so a panel start cannot silently recreate one.

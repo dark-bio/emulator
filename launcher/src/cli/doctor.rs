@@ -14,13 +14,12 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use super::output::{self, Output};
 use crate::bundle::{self, Paths};
 use crate::diagnostics;
-use crate::discovery;
 use crate::error::{Code, Error};
-use crate::output::{self, Output};
-use crate::qemu::{self, GuestArch, HostPort};
-use crate::registry::REGISTRY_PORT;
+use crate::ipc::{discovery, registry::REGISTRY_PORT};
+use crate::runtime::qemu::{self, GuestArch, HostPort};
 use crate::settings::Settings;
 use crate::update;
 

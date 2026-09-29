@@ -27,8 +27,9 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::disk::{self, Reason};
+use super::error_dialog;
 use crate::runtime::Pending;
+use crate::runtime::disk::{self, Reason};
 use crate::settings::{ENVS, MIN_MEMORY, Settings};
 
 /// What the panel reads and writes, behind one lock.
@@ -235,8 +236,8 @@ pub(crate) fn start_emulator(
     // Past this point the ingredients are spent: a failure is QEMU's, and the
     // error window replaces the device face rather than the panel offering a
     // retry that has nothing left to retry with.
-    if let Err(err) = crate::launch(&app, pending, &disk, memory, &env) {
-        crate::error_dialog::show_from_thread(&app, crate::error_dialog::COULD_NOT_START, err);
+    if let Err(err) = super::launch(&app, pending, &disk, memory, &env) {
+        error_dialog::show_from_thread(&app, error_dialog::COULD_NOT_START, err);
     }
     Ok(())
 }
@@ -259,9 +260,9 @@ fn check(memory: u32, env: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Boot;
     use crate::bundle::Firmware;
-    use crate::qemu::{GuestArch, HostPort};
+    use crate::cli::args::Boot;
+    use crate::runtime::qemu::{GuestArch, HostPort};
     use crate::settings::{DEFAULT_ENV, DEFAULT_MEMORY};
     use std::net::SocketAddr;
     use std::path::Path;
