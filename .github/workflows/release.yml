@@ -1,6 +1,7 @@
 name: Build and Release (Tag)
 
-# Attaches the installers to a GitHub Release. The build itself is build.yml,
+# Publishes vX.Y.Z releases and vX.Y.Z-rc.N prereleases. Numeric components
+# have no leading zeros. The build itself is build.yml,
 # the same pipeline pull requests run, so a release is cut from a path that
 # has already been exercised. build.yml smoke tests each portable artifact
 # before this workflow's release job runs, and a `uses:` job only succeeds
@@ -9,10 +10,35 @@ name: Build and Release (Tag)
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
 
 jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    permissions: {}
+    outputs:
+      prerelease: ${{ steps.validate.outputs.prerelease }}
+    steps:
+      - name: Validate release tag
+        id: validate
+        shell: bash
+        run: |
+          number='(0|[1-9][0-9]*)'
+          pattern="^v$number\.$number\.$number(-rc\.$number)?$"
+          if [[ ! "$GITHUB_REF_NAME" =~ $pattern ]]; then
+            echo "error: expected vX.Y.Z or vX.Y.Z-rc.N with no leading zeros" >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
+            prerelease=true
+          fi
+          printf 'prerelease=%s\n' "$prerelease" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: tag
     uses: ./.github/workflows/build.yml
     # Only a tag signs and notarizes. build-and-smoke.yml names no environment,
     # so pull requests keep building ad-hoc: notarization is a round trip to
@@ -27,7 +53,7 @@ jobs:
     secrets: inherit
 
   release:
-    needs: build
+    needs: [tag, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -39,18 +65,24 @@ jobs:
           merge-multiple: true
 
       - name: Create release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.tag.outputs.prerelease }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/* \
-            --repo "${{ github.repository }}" \
-            --generate-notes
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes "${flags[@]}"
 
   homebrew:
-    needs: release
+    needs: [tag, release]
     # A prerelease tag still gets its GitHub Release, but only a stable version
     # replaces the cask in the public tap.
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: needs.tag.outputs.prerelease == 'false'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
