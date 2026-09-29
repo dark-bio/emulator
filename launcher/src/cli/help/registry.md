@@ -16,9 +16,17 @@ service. The contract below is for a tool that reads it directly.
     DELETE /v1/instances/<port>   a launcher withdrawing itself
     POST   /v1/instances/<port>/stop   ask that emulator to shut down
 
-Every answer carries permissive cross-origin headers, so a page in a browser
-can read the listing. A stop request answers 204 when the registry knows that
-port and 404 when it does not.
+Any page in a browser can read the listing. Publishing, withdrawing and
+stopping require `X-Ark-Registry: 1`. A missing, incorrect or repeated header
+answers 403, as does a write carrying `Origin`. Preflight permits GET and
+OPTIONS and never allows the write header. The fixed value prevents browser
+writes; it does not authenticate local processes. A declared write body larger
+than 8 KiB answers 413 before these checks.
+
+A stop request answers 204 when the registry knows that port and 404 when it
+does not. Older launchers without the header cannot publish to a current
+registry host. Restart all running launchers after updating, since an older
+host still accepts unguarded writes.
 
 ## The listing
 
