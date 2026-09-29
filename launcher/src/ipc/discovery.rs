@@ -70,7 +70,7 @@ fn registry_addr() -> SocketAddrV4 {
 /// this build does not know, a host that stops answering, is reported, since
 /// something is there and it is not a registry this build can trust.
 pub(crate) fn list() -> Result<Vec<Instance>> {
-    let body = match request("GET", "/v1/instances", None) {
+    let body = match request(registry_addr(), "GET", "/v1/instances", None) {
         Ok(body) => body,
         Err(Refused) => return Ok(Vec::new()),
         Err(Failed(err)) => return Err(err),
@@ -124,7 +124,12 @@ pub(crate) fn answering(port: u16) -> bool {
 /// Ask the emulator on `port` to shut down. The request waits in the registry
 /// until that emulator's next heartbeat collects it.
 pub(crate) fn request_stop(port: u16) -> Result<()> {
-    request("POST", &format!("/v1/instances/{port}/stop"), None)?;
+    request(
+        registry_addr(),
+        "POST",
+        &format!("/v1/instances/{port}/stop"),
+        None,
+    )?;
     Ok(())
 }
 
@@ -190,7 +195,7 @@ fn publish(hardware: &Controller) {
         }
     };
 
-    if let Ok(answer) = request("POST", "/v1/instances", Some(&body)) {
+    if let Ok(answer) = request(registry_addr(), "POST", "/v1/instances", Some(&body)) {
         drop(publishing);
         obey(&answer);
         return;
@@ -201,7 +206,7 @@ fn publish(hardware: &Controller) {
     if registry::host() {
         log!("[discovery] the registry had no host, taking it over");
     }
-    let answer = request("POST", "/v1/instances", Some(&body));
+    let answer = request(registry_addr(), "POST", "/v1/instances", Some(&body));
     drop(publishing);
     match answer {
         Ok(answer) => obey(&answer),
@@ -230,7 +235,12 @@ pub(crate) fn deregister() {
         return;
     };
     let port = entry.lock().unwrap().port;
-    if let Err(e) = request("DELETE", &format!("/v1/instances/{port}"), None) {
+    if let Err(e) = request(
+        registry_addr(),
+        "DELETE",
+        &format!("/v1/instances/{port}"),
+        None,
+    ) {
         log!("[discovery] could not deregister: {e}");
     }
 }
@@ -310,8 +320,12 @@ impl From<Unanswered> for anyhow::Error {
 /// for. Spoken as HTTP/1.0, so the answer ends at end of file and carries no
 /// chunked framing, and bounded, so a server that is not a registry cannot
 /// feed this forever.
-fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Unanswered> {
-    let addr = registry_addr();
+fn request(
+    addr: SocketAddrV4,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<Vec<u8>, Unanswered> {
     let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT).map_err(|_| Refused)?;
     let mut exchange = || -> Result<Vec<u8>> {
         stream.set_read_timeout(Some(TIMEOUT))?;
@@ -324,6 +338,14 @@ fn request(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Una
         );
         if body.is_some() {
             head.push_str("Content-Type: application/json\r\n");
+        }
+        if matches!(method, "POST" | "DELETE") {
+            write!(
+                head,
+                "{}: {}\r\n",
+                registry::WRITE_HEADER,
+                registry::WRITE_HEADER_VALUE
+            )?;
         }
         head.push_str("\r\n");
 
@@ -372,6 +394,63 @@ fn split_response(raw: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Native clients send the browser guard for every write and leave reads open.
+    #[test]
+    fn test_registry_requests_carry_the_write_guard() {
+        // Inspect actual HTTP requests on a private port without a running emulator
+        let server = tiny_http::Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            server.server_addr().to_ip().unwrap().port(),
+        );
+        let worker = thread::spawn(move || {
+            for method in ["GET", "POST", "POST", "DELETE"] {
+                let incoming = server
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(incoming.method().as_str(), method);
+                let guards: Vec<_> = incoming
+                    .headers()
+                    .iter()
+                    .filter(|header| header.field.equiv("X-Ark-Registry"))
+                    .map(|header| header.value.as_str())
+                    .collect();
+                if method == "GET" {
+                    assert!(guards.is_empty());
+                } else {
+                    assert_eq!(guards, ["1"]);
+                }
+                assert!(
+                    !incoming
+                        .headers()
+                        .iter()
+                        .any(|header| header.field.equiv("Origin"))
+                );
+                incoming.respond(tiny_http::Response::empty(204)).unwrap();
+            }
+        });
+
+        // Cover listing, publication, stop and withdrawal through the shared client
+        for (method, path, body) in [
+            ("GET", "/v1/instances", None),
+            (
+                "POST",
+                "/v1/instances",
+                Some(
+                    br#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":true}"#
+                        .as_slice(),
+                ),
+            ),
+            ("POST", "/v1/instances/18181/stop", None),
+            ("DELETE", "/v1/instances/18181", None),
+        ] {
+            request(address, method, path, body)
+                .unwrap_or_else(|err| panic!("{method} {path}: {err}"));
+        }
+        worker.join().unwrap();
+    }
 
     #[test]
     fn test_a_body_is_split_off_the_headers() {
