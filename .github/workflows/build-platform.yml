@@ -52,6 +52,9 @@ jobs:
     environment: ${{ inputs.signing-environment }}
     env:
       BUILD_PROFILE: ${{ github.ref_type == 'tag' && 'production' || 'release' }}
+      # Keep the runner's package metadata for Intel-compatible bottles.
+      # Revisit Intel package sourcing by 2026-12-01.
+      HOMEBREW_NO_AUTO_UPDATE: "1"
       # Hoisted into env because the verify step needs it in the shell as well
       # as in a step `if`, and the smoke job reads the same value. Deliberately
       # not the certificate itself: Tauri's bundler runs a keychain import of
@@ -119,11 +122,6 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort > "$packages"
           else
-            # Keep the formula metadata fixed between the cache lookup and install
-            brew update
-            export HOMEBREW_NO_AUTO_UPDATE=1
-            echo "HOMEBREW_NO_AUTO_UPDATE=1" >> "$GITHUB_ENV"
-
             formulae=(qemu)
             brew deps --formula qemu > "$RUNNER_TEMP/qemu-dependencies"
             while IFS= read -r formula; do
