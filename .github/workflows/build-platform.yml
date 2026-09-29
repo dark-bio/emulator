@@ -108,8 +108,53 @@ jobs:
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
             qemu-system-x86 qemu-utils ipxe-qemu
 
+      - name: Identify QEMU package versions
+        # Unix bundles include package-manager dependencies that can change
+        # without a QEMU version bump. Windows pins its installer in the script.
+        if: github.ref_type != 'tag' && runner.os != 'Windows'
+        id: qemu-packages
+        shell: bash
+        run: |
+          packages="$RUNNER_TEMP/qemu-packages"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort > "$packages"
+          else
+            # Keep the formula metadata fixed between the cache lookup and install
+            brew update
+            export HOMEBREW_NO_AUTO_UPDATE=1
+            echo "HOMEBREW_NO_AUTO_UPDATE=1" >> "$GITHUB_ENV"
+
+            formulae=(qemu)
+            brew deps --formula qemu > "$RUNNER_TEMP/qemu-dependencies"
+            while IFS= read -r formula; do
+              formulae+=("$formula")
+            done < "$RUNNER_TEMP/qemu-dependencies"
+            brew info --json=v2 "${formulae[@]}" | jq -Sc '
+              [.formulae[] | {full_name, versions, revision, bottle}]
+              | sort_by(.full_name)
+            ' > "$packages"
+
+            # An installed QEMU can still link older kegs than the current formula
+            brew info --json=v2 --installed | jq -Sc '
+              [.formulae[] | {full_name, linked_keg, installed: [.installed[].version]}]
+              | sort_by(.full_name)
+            ' >> "$packages"
+          fi
+          digest=$(shasum -a 256 "$packages" | cut -d ' ' -f 1)
+          echo "hash=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Cache bundled QEMU
+        if: github.ref_type != 'tag'
+        id: qemu-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            launcher/binaries
+            launcher/qemu-libs
+          key: qemu-v1-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
+
       - name: Fetch bundled QEMU (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.qemu-cache.outputs.cache-hit != 'true'
         run: .github/scripts/fetch-qemu-linux.sh
 
       - name: Import the Apple signing credentials
@@ -191,11 +236,11 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Fetch bundled QEMU (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.qemu-cache.outputs.cache-hit != 'true'
         run: .github/scripts/fetch-qemu-macos.sh
 
       - name: Fetch bundled QEMU (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.qemu-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: .github/scripts/fetch-qemu-windows.ps1
 
@@ -223,6 +268,9 @@ jobs:
           configs=(--config launcher/tauri.release.conf.json)
           if [ "$RUNNER_OS" = "Windows" ]; then
             configs+=(--config .github/packaging/windows/tauri.conf.json)
+            if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+              configs+=(--config .github/packaging/windows/tauri.ci.conf.json)
+            fi
           fi
           cargo tauri build "${configs[@]}" --bundles ${{ inputs.bundles }} \
             -- --locked --profile "$BUILD_PROFILE"
