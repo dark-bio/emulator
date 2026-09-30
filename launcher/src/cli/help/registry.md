@@ -15,7 +15,7 @@ service. The contract below is for a tool that reads it directly.
     GET    /v1/instances          the listing
     POST   /v1/instances          a launcher publishing itself
     DELETE /v1/instances/<port>   a launcher withdrawing itself
-    POST   /v1/instances/<port>/stop   ask that emulator to shut down
+    POST   /v1/instances/<port>/stop   compatibility stop for older clients
 
 Any page in a browser can read the listing. Publishing, withdrawing and
 stopping require `X-Ark-Registry: 1`. A missing, incorrect or repeated header
@@ -24,10 +24,10 @@ OPTIONS and never allows the write header. The fixed value prevents browser
 writes; it does not authenticate local processes. A declared write body larger
 than 8 KiB answers 413 before these checks.
 
-A stop request answers 204 when the registry knows that port and 404 when it
-does not. Older launchers without the header cannot publish to a current
-registry host. Restart all running launchers after updating, since an older
-host still accepts unguarded writes.
+The compatibility stop route answers 204 when the registry knows that port
+and 404 when it does not. Older launchers without the header cannot publish
+to a current registry host. Restart all running launchers after updating,
+since an older host still accepts unguarded writes.
 
 ## The listing
 
@@ -62,7 +62,7 @@ can read a loopback port.
 The Rust launcher owns the hardware connection in both window modes.
 New launchers also publish an optional `control` object with a loopback HTTP
 `port` and an opaque launch `id`. Older registry hosts may omit this field;
-restart all emulators with the current build to enable button commands.
+restart all emulators with the current build to enable direct control.
 
 `ready` becomes true on the first nameplate and false when the hardware
 connection drops. `env`, `name`, `serial` and
@@ -72,7 +72,7 @@ handshake with the device is. The tool prints these under the names `ark
 devices` uses, `image`, `environment` and `expires`, and the wire keeps its
 own, since the listing is versioned on its own.
 
-## Heartbeats and stopping
+## Heartbeats
 
 Every launcher republishes itself once a second, and an entry that has not
 been refreshed for 15 s is dropped, so an emulator that was killed outright
@@ -85,17 +85,41 @@ guest, with the cause reported in the window or terminal. A failed child
 launch is reported by `start` with the launcher's log, without waiting for
 the readiness timeout.
 
-A stop rides on the same heartbeat. The request is recorded against the entry,
-the launcher's next heartbeat is answered with `{"stop": true}`, and it shuts
-down the way closing its window does. Nothing signals a process or looks up a
-pid, so a stop that is never collected gives up after --timeout. Close the
-device window or interrupt a foreground headless process when it cannot
-collect the request.
+The compatibility stop route records a request against the entry and returns
+`{"stop": true}` on its next heartbeat. This route serves older clients;
+the current CLI sends stops directly to the selected launcher.
 
-The stop command retries lost connections and a 404 for an entry awaiting
-republication after host takeover. Other HTTP refusals and invalid listings
-fail promptly, with the server's status and explanation where available.
-Confirmed stops remain in the partial result if a later operation fails.
+## Direct shutdown
+
+`ark-emulator stop [EMULATOR]` selects its targets from one listing, then uses
+their advertised control endpoints without reading the registry again. With
+--all it stops the selected launches in port order, waiting for each to exit
+before asking the next. A registry host exiting cannot lose the remaining
+requests. A missing endpoint or an unsupported route fails with an update
+and restart hint, without falling back to the compatibility route.
+
+The control endpoint serves two lifecycle routes:
+
+    GET  /v1/status   whether this launcher has accepted shutdown
+    POST /v1/stop     accept shutdown and exit
+
+Both carry `X-Ark-Emulator` with the advertised launch id and no body. Status
+returns 200 with `{"stopping":false}` or `{"stopping":true}`. Stop returns
+202 with `{"stopping":true}` before scheduling shutdown, even if the guest
+is booting or disconnected. It needs no hardware connection generation.
+Repeated requests acknowledge the same shutdown. The launch id prevents a
+stale request stopping a replacement on a reused port.
+
+The CLI sends the stop once and waits for the selected control endpoint to
+disappear and the guest port to refuse connections. A lost or truncated
+acknowledgement is checked through status without replaying the request.
+An HTTP refusal or an invalid response fails with its explanation. The
+remaining --timeout budget bounds every control request and guest probe;
+confirmed stops remain in the partial result on failure or timeout.
+
+Shutdown withdraws the entry best-effort and exits the launcher. Its orphan
+protection terminates QEMU; no guest-level shutdown handshake takes place.
+The entry can remain until its heartbeat expires if withdrawal failed.
 
 ## Button control
 
@@ -128,8 +152,9 @@ disconnection cancel it too. Expiry clears only the CLI hold, preserving an
 active window hold. Older launchers reject the timed route with 404 without
 pressing the button; the CLI never falls back to an untimed press.
 
-A POST answers 409 when hardware cannot accept the input. A missing or wrong
-launch id answers 412, and a missing or malformed generation answers 400.
+A button POST answers 409 when hardware cannot accept the input or the
+launcher is stopping. A missing, wrong or repeated launch id answers 412,
+and a missing or malformed button generation answers 400.
 An invalid release duration also answers 400 without changing the hold.
 Requests with bodies answer 413. Browser origins answer 403, and the endpoint
 permits no cross-origin requests. No command retries an uncertain input.

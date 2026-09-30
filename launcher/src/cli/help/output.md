@@ -89,25 +89,26 @@ object whose one member is `error`. The codes are stable.
 - registry-unreachable: the registry could not be read or refused a command.
   HTTP refusals include the status and server explanation. Update Ark Emulator
   and restart all launchers when the refusal is caused by mixed versions. Exit 3.
-- control-unsupported: the emulator does not advertise button control. Update
-  Ark Emulator and restart every running emulator, including the registry
-  host. A launcher that predates timed presses also refuses --release-after;
-  update and restart that emulator. Exit 3.
+- control-unsupported: the emulator does not advertise direct control or
+  does not support the requested stop or button route. Update Ark Emulator
+  and restart every running emulator, including the registry host. Exit 3.
 - control-unreachable: the launcher's control endpoint could not be reached
   or understood. Check `ark-emulator list` and retry against the current
-  emulator. An input without a reply has an unknown outcome; use button
-  release to clear a CLI hold. Exit 3.
+  emulator. A failed stop can still be shutting down; inspect its window or
+  log. A button input without a reply has an unknown outcome; use button
+  release to clear a CLI hold. HTTP refusals include their status and reason.
+  Exit 3.
 - button-unavailable: hardware is disconnected, has restarted or could not
   accept the input. Wait for boot and retry against the current emulator.
   Inputs never carry into a restarted guest. Exit 3.
-- timeout: the device was not ready, or did not stop, within --timeout. The
-  emulator is still running; watch `ark-emulator list`. For button commands,
-  a reply did not arrive within --timeout and the outcome is unknown. Use
+- timeout: readiness or shutdown was not confirmed within --timeout. A start
+  keeps booting, and an accepted stop can still be shutting down. Check the
+  emulator's window or log. For button commands, a reply did not arrive
+  within --timeout and the outcome is unknown. Use
   button release to clear a CLI hold. Exit 7.
 
 ## Exit codes
 
-0 done, 1 a local file or a confirmation, 2 usage, 3 no such emulator, an
-ambiguous one or an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143
-SIGTERM. Ctrl-C during a start ends the wait only; the emulator carries on
-booting.
+0 done, 1 a local file or a confirmation, 2 usage, 3 selection, discovery or
+control failed, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. Ctrl-C during a
+start ends the wait only; the emulator carries on booting.

@@ -17,11 +17,9 @@
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
 //!
-//! The heartbeat is also how a shutdown arrives. The registry answers a beat
-//! with whatever has been left for this emulator, and a stop waiting there
-//! takes it down the way closing its window does. A launcher that hosts the
-//! registry beats to itself over the loopback like every other one, so it
-//! reads its own mailbox on the same path.
+//! Older clients deliver stops through the heartbeat. The registry answers
+//! a beat with any pending stop, including for its own host. Current clients
+//! use the launcher's direct [`super::control`] endpoint instead.
 
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
@@ -37,9 +35,8 @@ use super::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 use crate::diagnostics::{log, trace};
 use crate::runtime::hardware::Controller;
 
-/// How often this emulator re-registers itself. It is the heartbeat keeping
-/// its entry alive, so it has to stay well below the registry's expiry, and it
-/// is also how long a stop takes to arrive.
+/// How often this emulator re-registers itself and receives compatibility stops.
+/// This stays well below the registry's expiry to keep the entry alive.
 pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// Limit for each registry I/O operation. Windows gets time to finish its
@@ -81,7 +78,8 @@ impl Client {
         parse_listing(&body).map_err(Failure::Invalid)
     }
 
-    /// Queue a stop for the launcher's next heartbeat, preserving HTTP refusals.
+    /// Exercise the compatibility stop route used by older clients.
+    #[cfg(test)]
     pub(crate) fn request_stop(self, port: u16) -> Result<(), Failure> {
         request(
             self.address,

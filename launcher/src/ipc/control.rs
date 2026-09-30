@@ -4,20 +4,22 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Direct, synchronous button control for one running launcher.
+//! Direct lifecycle and button control for one running launcher.
 //!
 //! Discovery advertises a loopback port and a launch identifier. Commands
 //! read the current connection generation before sending an input, and wait
 //! for its hardware write. Neither launcher replacement nor guest reconnection
 //! replays a pending input. The identifier distinguishes launches, not users;
 //! a required custom header and refused browser origins keep web pages out.
+//! Stop requests acknowledge acceptance before scheduling shutdown. Status
+//! remains available during shutdown without consulting the hardware worker.
 
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -27,8 +29,10 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::error::{Code, Error};
 use crate::runtime::hardware::{ButtonOutcome, ButtonSource, Controller};
 
-/// A button reply is a small JSON object, even when it carries an error.
+/// A control reply is a small JSON object, even when it carries an error.
 const MAX_RESPONSE: u64 = 4096;
+/// Delay between direct shutdown status checks.
+const STOP_POLL: Duration = Duration::from_millis(100);
 /// Header required on every request, including reads.
 const INSTANCE_HEADER: &str = "X-Ark-Emulator";
 /// Connection generation observed before a button input was requested.
@@ -56,6 +60,13 @@ struct Snapshot {
     cli_pressed: bool,
 }
 
+/// Launcher lifecycle state, independent of the guest's hardware connection.
+#[derive(Debug, Deserialize, Serialize)]
+struct Status {
+    /// Whether this launch has accepted a direct stop request.
+    stopping: bool,
+}
+
 /// One listener and worker, stopped with the guest that owns them.
 pub(crate) struct Control {
     /// Published location and identity of this listener.
@@ -70,7 +81,10 @@ pub(crate) struct Control {
 
 impl Control {
     /// Bind a private loopback listener before the guest is started.
-    pub(crate) fn start(hardware: Controller) -> Result<Self> {
+    pub(crate) fn start(
+        hardware: Controller,
+        shutdown: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .context("could not bind the emulator control port")?;
         let port = listener.local_addr()?.port();
@@ -92,10 +106,16 @@ impl Control {
             thread::Builder::new()
                 .name("control".to_owned())
                 .spawn(move || {
+                    let mut shutdown = Some(shutdown);
                     while !stopping.load(Ordering::SeqCst) {
                         match server.recv() {
                             Ok(request) if !stopping.load(Ordering::SeqCst) => {
-                                handle(request, &endpoint, &hardware);
+                                if handle(request, &endpoint, &hardware, shutdown.is_none())
+                                    && let Some(shutdown) = shutdown.take()
+                                {
+                                    // Keep status available while withdrawal or guest exit waits
+                                    thread::spawn(shutdown);
+                                }
                             }
                             _ => break,
                         }
@@ -122,7 +142,7 @@ impl Drop for Control {
 }
 
 /// Answer one request without accepting bodies or cross-origin browser access.
-fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
+fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller, stopping: bool) -> bool {
     // Read headers without consuming a request body
     let header = |name: &str| {
         request
@@ -143,7 +163,13 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
             403,
             serde_json::json!({"error": "browser requests are not accepted"}),
         )
-    } else if header(INSTANCE_HEADER) != Some(endpoint.id.as_str()) {
+    } else if !request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv(INSTANCE_HEADER))
+        .map(|header| header.value.as_str())
+        .eq([endpoint.id.as_str()])
+    {
         (
             412,
             serde_json::json!({"error": "the launcher no longer matches discovery"}),
@@ -165,6 +191,17 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
             ),
         };
         match (request.method(), request.url()) {
+            (&Method::Get, "/v1/status") => {
+                (200, serde_json::to_value(Status { stopping }).unwrap())
+            }
+            (&Method::Post, "/v1/stop") => (
+                202,
+                serde_json::to_value(Status { stopping: true }).unwrap(),
+            ),
+            (&Method::Post, _) if stopping => (
+                409,
+                serde_json::json!({"error": "the launcher is stopping"}),
+            ),
             (&Method::Get, "/v1/button") => {
                 let state = hardware.snapshot();
                 (
@@ -204,6 +241,7 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller) {
         .with_status_code(StatusCode(status))
         .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
     let _ = request.respond(response);
+    status == 202
 }
 
 /// Apply a CLI hold to the connection observed immediately before the request.
@@ -282,7 +320,153 @@ pub(crate) fn button(
     Ok(outcome)
 }
 
-/// Exchange one bounded HTTP/1.0 request, without retrying an uncertain input.
+/// Stop one selected launch and confirm its control and guest ports have gone.
+pub(crate) fn stop(endpoint: &Endpoint, guest_port: u16, deadline: Instant) -> Result<(), Error> {
+    // An uncertain delivery is observed through status, never sent a second time
+    let uncertain = match exchange(endpoint, "POST", "/v1/stop", None, deadline) {
+        Ok(reply) => {
+            if reply.status != 202 || !decode_status(&reply.body)?.stopping {
+                return Err(Failure::Invalid("the launcher did not accept shutdown").error());
+            }
+            None
+        }
+        Err(err) if err.connection_lost() => Some(err),
+        Err(err) => return Err(err.error()),
+    };
+
+    // Discovery can disappear with its host while the selected launch exits
+    loop {
+        match exchange(endpoint, "GET", "/v1/status", None, deadline) {
+            Ok(reply) => {
+                if reply.status != 200 || !decode_status(&reply.body)?.stopping {
+                    return Err(uncertain
+                        .unwrap_or(Failure::Invalid("the launcher has not accepted shutdown"))
+                        .error());
+                }
+            }
+            Err(Failure::Transport(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                if guest_gone(guest_port, deadline)? {
+                    return Ok(());
+                }
+            }
+            Err(Failure::Http { status: 412, .. }) => {
+                // A replacement launcher must never receive another stop from this command
+                if guest_gone(guest_port, deadline)? {
+                    return Ok(());
+                }
+            }
+            Err(err) if err.connection_lost() => {}
+            Err(err) => return Err(err.error()),
+        }
+        thread::sleep(STOP_POLL.min(remaining(deadline).map_err(Failure::error)?));
+    }
+}
+
+/// Decode a lifecycle reply without relying on any hardware state.
+fn decode_status(body: &[u8]) -> Result<Status, Error> {
+    serde_json::from_slice(body).map_err(|err| {
+        Error::new(
+            Code::ControlUnreachable,
+            format!("invalid launcher status: {err}"),
+        )
+    })
+}
+
+/// Confirm guest exit only on connection refusal, keeping timeouts as failures.
+fn guest_gone(port: u16, deadline: Instant) -> Result<bool, Error> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    match TcpStream::connect_timeout(&address, remaining(deadline).map_err(Failure::error)?) {
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => Ok(true),
+        Err(err) => Err(Failure::Transport(err).error()),
+    }
+}
+
+/// A complete HTTP reply from the selected launcher.
+struct Reply {
+    /// Successful HTTP status code, interpreted by the caller's route.
+    status: u16,
+    /// Bounded, unencoded response body.
+    body: Vec<u8>,
+}
+
+/// Control failures retaining connection loss for shutdown confirmation.
+#[derive(Debug)]
+enum Failure {
+    /// Failed socket operation, including the overall request deadline.
+    Transport(io::Error),
+    /// HTTP refusal with the launcher's explanation.
+    Http {
+        /// Status returned by the launcher.
+        status: u16,
+        /// Error extracted from JSON or a plain-text response.
+        reason: String,
+    },
+    /// Invalid endpoint metadata or response framing.
+    Invalid(&'static str),
+}
+
+impl Failure {
+    /// Whether the connection could have disappeared during launcher exit.
+    fn connection_lost(&self) -> bool {
+        matches!(self, Self::Transport(err) if matches!(err.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted))
+    }
+
+    /// Preserve the refusal and map it into the command line's exit classes.
+    fn error(self) -> Error {
+        let (code, message) = match self {
+            Self::Transport(err) => {
+                let code = if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) {
+                    Code::Timeout
+                } else {
+                    Code::ControlUnreachable
+                };
+                (code, format!("emulator control did not answer: {err}"))
+            }
+            Self::Http { status, reason } => (
+                if status == 404 {
+                    Code::ControlUnsupported
+                } else {
+                    Code::ControlUnreachable
+                },
+                format!("emulator control answered HTTP {status}: {reason}"),
+            ),
+            Self::Invalid(message) => (Code::ControlUnreachable, message.to_owned()),
+        };
+        Error::new(code, message).hint(if code == Code::ControlUnsupported {
+            "update Ark Emulator and restart the selected emulator"
+        } else {
+            "check the selected emulator's window or log; shutdown may still be in progress"
+        })
+    }
+}
+
+impl From<io::Error> for Failure {
+    fn from(err: io::Error) -> Self {
+        Self::Transport(err)
+    }
+}
+
+/// Give each socket operation only the time left in its caller's budget.
+fn remaining(deadline: Instant) -> Result<Duration, Failure> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| {
+            Failure::Transport(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "control deadline expired",
+            ))
+        })
+}
+
+/// Exchange one button request without retrying an uncertain hardware input.
 fn request(
     endpoint: &Endpoint,
     method: &str,
@@ -290,100 +474,426 @@ fn request(
     generation: Option<u64>,
     timeout: Duration,
 ) -> Result<Vec<u8>, Error> {
+    let result =
+        exchange(endpoint, method, path, generation, Instant::now() + timeout).and_then(|reply| {
+            match reply.status {
+                200 => Ok(reply),
+                _ => Err(Failure::Invalid("unexpected button response status")),
+            }
+        });
+    let reply = result.map_err(|err| {
+        let unavailable = matches!(err, Failure::Http { status: 409, .. });
+        let uncertain = matches!(err, Failure::Transport(_) | Failure::Invalid(_));
+        let mut error = err.error();
+        if unavailable {
+            error.code = Code::ButtonUnavailable;
+        }
+        if error.code != Code::ControlUnsupported {
+            error.hints.clear();
+            error = error.hint(if uncertain {
+                "the button state is unknown; use `ark-emulator button release` to clear a CLI hold"
+            } else {
+                "check `ark-emulator list` and retry against the current emulator"
+            });
+        }
+        error
+    })?;
+    Ok(reply.body)
+}
+
+/// Exchange one HTTP/1.0 request within a single deadline and response size limit.
+fn exchange(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    generation: Option<u64>,
+    deadline: Instant,
+) -> Result<Reply, Failure> {
+    // Validate discovered values before copying them into a socket or HTTP header
     if endpoint.port == 0
         || endpoint.id.len() != 64
         || !endpoint.id.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(Error::new(
-            Code::ControlUnreachable,
-            "invalid emulator control endpoint",
-        )
-        .hint("restart the emulator using the current build"));
+        return Err(Failure::Invalid("invalid emulator control endpoint"));
     }
-    let exchange = || -> std::io::Result<Vec<u8>> {
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
-        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        let mut head = format!(
-            "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: 0\r\n{INSTANCE_HEADER}: {}\r\n",
-            endpoint.id
-        );
-        if let Some(generation) = generation {
-            head.push_str(&format!("{GENERATION_HEADER}: {generation}\r\n"));
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
+    let mut stream = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
+    let mut head = format!(
+        "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: 0\r\n{INSTANCE_HEADER}: {}\r\n",
+        endpoint.id
+    );
+    if let Some(generation) = generation {
+        head.push_str(&format!("{GENERATION_HEADER}: {generation}\r\n"));
+    }
+    head.push_str("\r\n");
+
+    // Partial writes and reads share the deadline instead of restarting it
+    let mut unwritten = head.as_bytes();
+    while !unwritten.is_empty() {
+        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        let written = stream.write(unwritten)?;
+        if written == 0 {
+            return Err(io::Error::from(io::ErrorKind::WriteZero).into());
         }
-        head.push_str("\r\n");
-        stream.write_all(head.as_bytes())?;
-        let mut response = Vec::new();
-        stream.take(MAX_RESPONSE + 1).read_to_end(&mut response)?;
-        Ok(response)
-    };
-    let raw = exchange().map_err(|err| {
-        let code = if matches!(
-            err.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ) {
-            Code::Timeout
-        } else {
-            Code::ControlUnreachable
-        };
-        Error::new(code, format!("emulator control did not answer: {err}")).hint(
-            "the button state is unknown; use `ark-emulator button release` to clear a CLI hold",
-        )
-    })?;
-    if raw.len() as u64 > MAX_RESPONSE {
-        return Err(Error::new(
-            Code::ControlUnreachable,
-            "emulator control returned too much data",
-        ));
+        unwritten = &unwritten[written..];
     }
-    let split = raw
-        .windows(4)
-        .position(|bytes| bytes == b"\r\n\r\n")
-        .ok_or_else(|| {
-            Error::new(
-                Code::ControlUnreachable,
+    let mut raw = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buffer[..count]);
+        if raw.len() as u64 > MAX_RESPONSE {
+            return Err(Failure::Invalid("emulator control returned too much data"));
+        }
+    }
+
+    // An absent reply is uncertain delivery; malformed replies remain errors
+    if raw.is_empty() {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+    }
+    let split = match raw.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+        Some(split) => split,
+        None if raw.starts_with(b"HTTP/1.") => {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        }
+        None => {
+            return Err(Failure::Invalid(
                 "emulator control returned no HTTP headers",
-            )
-        })?;
+            ));
+        }
+    };
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok());
+        .and_then(|code| code.parse::<u16>().ok())
+        .filter(|status| (100..=599).contains(status))
+        .ok_or(Failure::Invalid(
+            "emulator control returned no valid HTTP status",
+        ))?;
     let body = &raw[split + 4..];
-    if status == Some(200) {
-        return Ok(body.to_vec());
+    if (200..300).contains(&status) {
+        if let Some(length) = head.lines().skip(1).find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("Content-Length")
+                .then_some(value.trim())
+        }) {
+            let length = length
+                .parse::<usize>()
+                .map_err(|_| Failure::Invalid("invalid control response length"))?;
+            if body.len() < length {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            if body.len() != length {
+                return Err(Failure::Invalid("incorrect control response length"));
+            }
+        }
+        return Ok(Reply {
+            status,
+            body: body.to_vec(),
+        });
     }
-    let error = serde_json::from_slice::<serde_json::Value>(body)
+    let reason = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|body| body["error"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "emulator control returned an invalid response".to_owned());
-    if status == Some(404) {
-        return Err(Error::new(
-            Code::ControlUnsupported,
-            "the launcher does not support this button request",
-        )
-        .hint("update Ark Emulator and restart the selected emulator"));
-    }
-    let code = if status == Some(409) {
-        Code::ButtonUnavailable
-    } else {
-        Code::ControlUnreachable
-    };
-    Err(Error::new(code, error)
-        .hint("check `ark-emulator list` and retry against the current emulator"))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_owned());
+    Err(Failure::Http { status, reason })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::testing::response;
     use serde_json::{Value, json};
     use std::net::Shutdown;
     use std::sync::mpsc;
     use std::time::Instant;
     use tungstenite::WebSocket;
+
+    /// Serve direct control replies and release an optional guest at the end.
+    fn stop_peer(
+        replies: Vec<(&'static str, String)>,
+        guest: Option<TcpListener>,
+    ) -> (Endpoint, JoinHandle<()>) {
+        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Endpoint {
+            port: server.server_addr().to_ip().unwrap().port(),
+            id: "1".repeat(64),
+        };
+        let id = endpoint.id.clone();
+        let worker = thread::spawn(move || {
+            for (path, reply) in replies {
+                let request = server
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request.url(), path);
+                assert_eq!(
+                    request.method().as_str(),
+                    if path == "/v1/stop" { "POST" } else { "GET" }
+                );
+                assert!(
+                    request
+                        .headers()
+                        .iter()
+                        .any(|header| header.field.equiv("X-Ark-Emulator")
+                            && header.value.as_str() == id)
+                );
+                assert!(
+                    !request
+                        .headers()
+                        .iter()
+                        .any(|header| header.field.equiv("X-Ark-Generation"))
+                );
+                request.into_writer().write_all(reply.as_bytes()).unwrap();
+            }
+            drop(guest);
+        });
+        (endpoint, worker)
+    }
+
+    /// Direct stop accepts a disconnected guest and schedules shutdown only once.
+    #[test]
+    fn test_direct_stop_acknowledges_before_shutdown_and_keeps_status_available() {
+        // Hold shutdown open to observe the endpoint after its acknowledgement
+        let (called, received) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let control = Control::start(Controller::default(), move || {
+            called.send(()).unwrap();
+            held.recv().unwrap();
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let before = exchange(&control.endpoint, "GET", "/v1/status", None, deadline).unwrap();
+        assert!(!decode_status(&before.body).unwrap().stopping);
+        let reply = exchange(&control.endpoint, "POST", "/v1/stop", None, deadline).unwrap();
+        assert_eq!(reply.status, 202);
+        assert!(decode_status(&reply.body).unwrap().stopping);
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        // Duplicate requests acknowledge the same shutdown without invoking it again
+        let state = exchange(&control.endpoint, "GET", "/v1/status", None, deadline).unwrap();
+        assert!(decode_status(&state.body).unwrap().stopping);
+        assert_eq!(
+            exchange(&control.endpoint, "POST", "/v1/stop", None, deadline)
+                .unwrap()
+                .status,
+            202
+        );
+        assert!(received.try_recv().is_err());
+
+        // Once shutdown is accepted, new button inputs must not reach hardware
+        assert!(matches!(
+            exchange(
+                &control.endpoint,
+                "POST",
+                "/v1/button/press",
+                Some(0),
+                deadline
+            ),
+            Err(Failure::Http { status: 409, .. })
+        ));
+        release.send(()).unwrap();
+    }
+
+    /// Direct stop rejects browsers, bodies, duplicate guards and stale launch ids.
+    #[test]
+    fn test_direct_stop_enforces_the_control_guards() {
+        let (called, received) = mpsc::channel();
+        let control =
+            Control::start(Controller::default(), move || called.send(()).unwrap()).unwrap();
+        let id = &control.endpoint.id;
+        for (headers, body, expected) in [
+            (String::new(), "", 412),
+            (format!("X-Ark-Emulator: {}\r\n", "0".repeat(64)), "", 412),
+            (
+                format!("X-Ark-Emulator: {id}\r\nX-Ark-Emulator: {id}\r\n"),
+                "",
+                412,
+            ),
+            (
+                format!("X-Ark-Emulator: {id}\r\nOrigin: https://example.com\r\n"),
+                "",
+                403,
+            ),
+            (format!("X-Ark-Emulator: {id}\r\n"), "x", 413),
+        ] {
+            let mut stream =
+                TcpStream::connect((Ipv4Addr::LOCALHOST, control.endpoint.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            write!(stream, "POST /v1/stop HTTP/1.0\r\nHost: localhost\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            assert_eq!(
+                reply
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap(),
+                expected
+            );
+            assert!(
+                !reply
+                    .to_ascii_lowercase()
+                    .contains("access-control-allow-origin")
+            );
+        }
+        assert!(received.try_recv().is_err());
+    }
+
+    /// Refused stop requests preserve their HTTP explanation and are not retried.
+    #[test]
+    fn test_direct_stop_reports_refusals_and_unsupported_launchers() {
+        for status in [400, 403, 404, 412, 500] {
+            let (endpoint, worker) = stop_peer(
+                vec![("/v1/stop", response(status, r#"{"error":"stop denied"}"#))],
+                None,
+            );
+            let err = stop(&endpoint, 18181, Instant::now() + Duration::from_secs(3)).unwrap_err();
+            assert_eq!(
+                err.code,
+                if status == 404 {
+                    Code::ControlUnsupported
+                } else {
+                    Code::ControlUnreachable
+                }
+            );
+            assert!(err.message.contains(&format!("HTTP {status}: stop denied")));
+            assert!(!err.hints.iter().any(|hint| hint.contains("button")));
+            worker.join().unwrap();
+        }
+    }
+
+    /// Losing an accepted stop reply is resolved by status and port closure.
+    #[test]
+    fn test_direct_stop_confirms_a_lost_acknowledgement_without_replaying() {
+        for lost in [
+            "",
+            "HTTP/1.0 202 Accepted\r\n",
+            "HTTP/1.0 202 Accepted\r\nContent-Length: 17\r\n\r\n{\"stop",
+        ] {
+            let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guest.local_addr().unwrap().port();
+            let (endpoint, worker) = stop_peer(
+                vec![
+                    ("/v1/stop", lost.to_owned()),
+                    ("/v1/status", response(200, r#"{"stopping":true}"#)),
+                ],
+                Some(guest),
+            );
+            stop(&endpoint, port, Instant::now() + Duration::from_secs(5)).unwrap();
+            worker.join().unwrap();
+        }
+    }
+
+    /// A launcher that never accepted a lost request is reported without replay.
+    #[test]
+    fn test_direct_stop_reports_an_unaccepted_lost_request() {
+        let (endpoint, worker) = stop_peer(
+            vec![
+                ("/v1/stop", String::new()),
+                ("/v1/status", response(200, r#"{"stopping":false}"#)),
+            ],
+            None,
+        );
+        let err = stop(&endpoint, 18181, Instant::now() + Duration::from_secs(3)).unwrap_err();
+        assert_eq!(err.code, Code::ControlUnreachable);
+        worker.join().unwrap();
+    }
+
+    /// A closed control port alone cannot confirm a guest that is still running.
+    #[test]
+    fn test_direct_stop_waits_for_guest_exit_within_the_deadline() {
+        let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = guest.local_addr().unwrap().port();
+        let (endpoint, worker) = stop_peer(
+            vec![("/v1/stop", response(202, r#"{"stopping":true}"#))],
+            None,
+        );
+        let err = stop(&endpoint, port, Instant::now() + Duration::from_millis(250)).unwrap_err();
+        assert_eq!(err.code, Code::Timeout);
+        worker.join().unwrap();
+    }
+
+    /// Reusing a control port cannot make the client stop a replacement launcher.
+    #[test]
+    fn test_direct_stop_observes_a_replacement_without_controlling_it() {
+        let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = guest.local_addr().unwrap().port();
+        let (endpoint, worker) = stop_peer(
+            vec![
+                ("/v1/stop", response(202, r#"{"stopping":true}"#)),
+                (
+                    "/v1/status",
+                    response(412, r#"{"error":"different launch"}"#),
+                ),
+            ],
+            Some(guest),
+        );
+        stop(&endpoint, port, Instant::now() + Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+    }
+
+    /// A slow response cannot extend shutdown's deadline with each received byte.
+    #[test]
+    fn test_direct_stop_bounds_a_fragmented_reply() {
+        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Endpoint {
+            port: server.server_addr().to_ip().unwrap().port(),
+            id: "1".repeat(64),
+        };
+        let worker = thread::spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.url(), "/v1/stop");
+            let mut stream = request.into_writer();
+            for byte in response(202, r#"{"stopping":true}"#).bytes() {
+                if stream
+                    .write_all(&[byte])
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let err = stop(&endpoint, 18181, started + Duration::from_millis(200)).unwrap_err();
+        assert_eq!(err.code, Code::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+
+    /// Malformed and refused status replies remain failures after a stop is accepted.
+    #[test]
+    fn test_direct_stop_keeps_status_failures_visible() {
+        for reply in [
+            response(200, "not json"),
+            response(503, "status unavailable"),
+        ] {
+            let (endpoint, worker) = stop_peer(
+                vec![
+                    ("/v1/stop", response(202, r#"{"stopping":true}"#)),
+                    ("/v1/status", reply.clone()),
+                ],
+                None,
+            );
+            let err = stop(&endpoint, 18181, Instant::now() + Duration::from_secs(3)).unwrap_err();
+            assert_eq!(err.code, Code::ControlUnreachable, "{reply}");
+            worker.join().unwrap();
+        }
+    }
 
     /// A real controller, control listener and loopback guest for protocol tests.
     struct Fixture {
@@ -405,7 +915,8 @@ mod tests {
             hardware.start(listener.local_addr().unwrap());
             let peer = accept(&listener);
             wait_for(|| hardware.snapshot().connected);
-            let control = Control::start(hardware.clone()).unwrap();
+            let control =
+                Control::start(hardware.clone(), || panic!("unexpected shutdown")).unwrap();
             Self {
                 hardware,
                 listener,

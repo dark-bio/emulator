@@ -35,10 +35,9 @@
 //! browser origins. This keeps web pages from changing the registry while
 //! local processes can still publish, withdraw and stop emulators.
 //!
-//! The registry is also the mailbox a shutdown travels through. A request to
-//! stop an emulator is recorded against its entry, and the next heartbeat from
-//! that launcher is answered with it. Nothing here signals, reaches for a pid
-//! or opens a second channel, so no launcher has to be special.
+//! Older clients can record a stop against an entry for delivery on its next
+//! heartbeat. This compatibility mailbox needs no process signalling. Current
+//! clients send stops directly through [`super::control`] after discovery.
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read as _};
