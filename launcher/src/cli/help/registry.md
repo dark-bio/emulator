@@ -15,19 +15,17 @@ service. The contract below is for a tool that reads it directly.
     GET    /v1/instances          the listing
     POST   /v1/instances          a launcher publishing itself
     DELETE /v1/instances/<port>   a launcher withdrawing itself
-    POST   /v1/instances/<port>/stop   compatibility stop for older clients
 
-Any page in a browser can read the listing. Publishing, withdrawing and
-stopping require `X-Ark-Registry: 1`. A missing, incorrect or repeated header
+Any page in a browser can read the listing. Publishing and withdrawing
+require `X-Ark-Registry: 1`. A missing, incorrect or repeated header
 answers 403, as does a write carrying `Origin`. Preflight permits GET and
 OPTIONS and never allows the write header. The fixed value prevents browser
 writes; it does not authenticate local processes. A declared write body larger
 than 8 KiB answers 413 before these checks.
 
-The compatibility stop route answers 204 when the registry knows that port
-and 404 when it does not. Older launchers without the header cannot publish
-to a current registry host. Restart all running launchers after updating,
-since an older host still accepts unguarded writes.
+Publishing and withdrawing answer 204 with no body. Older launchers without
+the header cannot publish to a current registry host. Restart all running
+launchers after updating, since an older host still accepts unguarded writes.
 
 ## The listing
 
@@ -85,10 +83,6 @@ guest, with the cause reported in the window or terminal. A failed child
 launch is reported by `start` with the launcher's log, without waiting for
 the readiness timeout.
 
-The compatibility stop route records a request against the entry and returns
-`{"stop": true}` on its next heartbeat. This route serves older clients;
-the current CLI sends stops directly to the selected launcher.
-
 ## Direct shutdown
 
 `ark-emulator stop [EMULATOR]` selects its targets from one listing, then uses
@@ -96,7 +90,7 @@ their advertised control endpoints without reading the registry again. With
 --all it stops the selected launches in port order, waiting for each to exit
 before asking the next. A registry host exiting cannot lose the remaining
 requests. A missing endpoint or an unsupported route fails with an update
-and restart hint, without falling back to the compatibility route.
+and restart hint.
 
 The control endpoint serves two lifecycle routes:
 

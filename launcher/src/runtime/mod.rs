@@ -6,8 +6,8 @@
 
 //! Prepares and runs one emulator without depending on a window system.
 //!
-//! The runtime owns hardware I/O while QEMU owns the disk lock. Control and
-//! compatibility registry stops, signals and window closure share shutdown.
+//! The runtime owns hardware I/O while QEMU owns the disk lock. Direct control,
+//! signals and window closure share shutdown.
 //! Orphan protection takes QEMU down even when the launcher cannot run cleanup.
 
 pub(crate) mod disk;

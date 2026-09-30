@@ -16,10 +16,6 @@
 //! publish themselves to whoever did (see [`super::registry`]). Takeover rides
 //! on the heartbeat: one that cannot be delivered means the host is gone, so
 //! the launcher tries to become the host and republishes itself either way.
-//!
-//! Older clients deliver stops through the heartbeat. The registry answers
-//! a beat with any pending stop, including for its own host. Current clients
-//! use the launcher's direct [`super::control`] endpoint instead.
 
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
@@ -31,11 +27,11 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
-use super::registry::{self, Beat, Instance, REGISTRY_PORT, SCHEMA_VERSION};
+use super::registry::{self, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 use crate::diagnostics::{log, trace};
 use crate::runtime::hardware::Controller;
 
-/// How often this emulator re-registers itself and receives compatibility stops.
+/// How often this emulator re-registers itself.
 /// This stays well below the registry's expiry to keep the entry alive.
 pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
@@ -78,20 +74,8 @@ impl Client {
         parse_listing(&body).map_err(Failure::Invalid)
     }
 
-    /// Exercise the compatibility stop route used by older clients.
-    #[cfg(test)]
-    pub(crate) fn request_stop(self, port: u16) -> Result<(), Failure> {
-        request(
-            self.address,
-            "POST",
-            &format!("/v1/instances/{port}/stop"),
-            None,
-        )?;
-        Ok(())
-    }
-
     /// Publish an entry, attempting host takeover only after a lost connection.
-    fn publish(self, instance: &Instance) -> Result<Beat, Failure> {
+    fn publish(self, instance: &Instance) -> Result<(), Failure> {
         let body = serde_json::to_vec(instance)
             .context("could not encode this emulator's entry")
             .map_err(Failure::Invalid)?;
@@ -105,12 +89,12 @@ impl Client {
             }
             answer => answer?,
         };
-        if answer.is_empty() {
-            return Ok(Beat { stop: false });
+        if !answer.is_empty() {
+            return Err(Failure::Invalid(anyhow::anyhow!(
+                "the registry's publication reply must be empty"
+            )));
         }
-        serde_json::from_slice(&answer)
-            .context("could not read the registry's heartbeat reply")
-            .map_err(Failure::Invalid)
+        Ok(())
     }
 }
 
@@ -206,11 +190,7 @@ pub(crate) fn publish(hardware: &Controller) -> Result<()> {
     };
     drop(publishing);
     match answer {
-        Ok(Beat { stop: true }) => {
-            log!("[discovery] asked to shut down");
-            crate::runtime::shut_down(0);
-        }
-        Ok(_) => Ok(()),
+        Ok(()) => Ok(()),
         Err(err) if err.retryable() => {
             log!("[discovery] waiting for a registry host: {err}");
             Ok(())
@@ -448,21 +428,23 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// Invalid heartbeat replies fail publication instead of silently losing a stop.
+    /// Unexpected publication bodies fail without being interpreted as commands.
     #[test]
-    fn test_registration_rejects_an_invalid_heartbeat_reply() {
-        let (client, worker) = peer(vec![("POST", response(200, "not a heartbeat"))]);
+    fn test_registration_rejects_nonempty_publication_replies() {
         let instance: Instance = serde_json::from_str(
             r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
         )
         .unwrap();
-        let err = client.publish(&instance).unwrap_err();
-        assert!(matches!(err, Failure::Invalid(_)));
-        assert!(!err.retryable());
-        worker.join().unwrap();
+        for body in ["unexpected reply", r#"{"stop":true}"#] {
+            let (client, worker) = peer(vec![("POST", response(200, body))]);
+            let err = client.publish(&instance).unwrap_err();
+            assert!(matches!(err, Failure::Invalid(_)), "{body}");
+            assert!(!err.retryable(), "{body}");
+            worker.join().unwrap();
+        }
     }
 
-    /// Publication takes over a departed host and keeps stop delivery working.
+    /// Publication takes over a departed host and restores the discoverable entry.
     #[test]
     fn test_publication_takes_over_after_the_registry_host_exits() {
         // Reserve an isolated registry address, then let its previous host go
@@ -478,12 +460,10 @@ mod tests {
             r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
         )
         .unwrap();
-        assert!(!client.publish(&instance).unwrap().stop);
+        client.publish(&instance).unwrap();
         let listing = client.list().unwrap();
         assert_eq!(listing.len(), 1);
         assert_eq!(listing[0].disk, "demo.ark");
-        client.request_stop(18181).unwrap();
-        assert!(client.publish(&instance).unwrap().stop);
     }
 
     /// Discovery keeps HTTP failures, invalid JSON and unsupported versions visible.
@@ -537,7 +517,7 @@ mod tests {
             server.server_addr().to_ip().unwrap().port(),
         );
         let worker = thread::spawn(move || {
-            for method in ["GET", "POST", "POST", "DELETE"] {
+            for method in ["GET", "POST", "DELETE"] {
                 let incoming = server
                     .recv_timeout(Duration::from_secs(2))
                     .unwrap()
@@ -564,7 +544,7 @@ mod tests {
             }
         });
 
-        // Cover listing, publication, stop and withdrawal through the shared client
+        // Cover listing, publication and withdrawal through the shared client
         for (method, path, body) in [
             ("GET", "/v1/instances", None),
             (
@@ -575,7 +555,6 @@ mod tests {
                         .as_slice(),
                 ),
             ),
-            ("POST", "/v1/instances/18181/stop", None),
             ("DELETE", "/v1/instances/18181", None),
         ] {
             request(address, method, path, body)

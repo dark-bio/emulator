@@ -32,7 +32,7 @@ Read `ark help agents` before driving the Ark itself.
   its window does. With several running, name one as `ark -d` would, by its
   locator, serial, name or image, or pass --all for every one. It sends a
   direct request and waits for launcher and guest exit. Older launchers need
-  an update and restart; the command never falls back to heartbeat delivery.
+  an update and restart to support direct control.
 - `ark-emulator button press` holds the only emulator's reset button, and
   `ark-emulator button release` releases that CLI hold. Both accept the same
   selector as stop. They work with a window or headless and wait for hardware
