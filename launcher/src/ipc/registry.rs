@@ -41,8 +41,8 @@
 //! or opens a second channel, so no launcher has to be special.
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read as _};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+use std::io::{self, Cursor, Read as _};
+use std::net::{SocketAddrV4, TcpListener};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -221,41 +221,33 @@ impl Registry {
     }
 }
 
-/// Serve the registry from this process, if nobody else already is. Returns
-/// whether this process is now the host.
-///
-/// Losing the race for the port is the ordinary outcome rather than a failure,
-/// and any other failure is treated the same way: discovery is never worth
-/// refusing to boot over.
+/// Serve the registry if nobody else holds the port, reporting other failures.
+/// Returns whether this process became the host.
 ///
 /// Loopback only. The registry describes what is running on this machine and
 /// has no business being reachable from off it.
-pub(crate) fn host() -> bool {
-    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT);
+pub(crate) fn host(addr: SocketAddrV4) -> io::Result<bool> {
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return false,
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => return Ok(false),
         Err(e) => {
-            log!("[registry] could not bind {addr}: {e}");
-            return false;
+            return Err(io::Error::new(
+                e.kind(),
+                format!("could not bind {addr}: {e}"),
+            ));
         }
     };
 
     // tiny_http takes an already-bound listener, so the bind above is what
     // decides the race.
-    let server = match Server::from_listener(listener, None::<tiny_http::SslConfig>) {
-        Ok(server) => server,
-        Err(e) => {
-            log!("[registry] could not serve on {addr}: {e}");
-            return false;
-        }
-    };
+    let server = Server::from_listener(listener, None::<tiny_http::SslConfig>)
+        .map_err(|e| io::Error::other(format!("could not serve on {addr}: {e}")))?;
     log!("[registry] hosting the registry on {addr}");
 
     // Runs for the life of the process. This launcher exiting is what hands
     // the port to the next one.
     thread::spawn(move || serve(&server, &mut Registry::new()));
-    true
+    Ok(true)
 }
 
 /// The serve loop, waking on [`TICK`] even with nothing to answer so that
@@ -461,7 +453,7 @@ fn respond(request: Request, mut response: Response<Cursor<Vec<u8>>>) {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::net::TcpStream;
+    use std::net::{Ipv4Addr, TcpStream};
 
     use super::*;
 
@@ -883,11 +875,11 @@ mod tests {
     fn test_hosting_twice_from_one_process_is_refused() {
         // The second call is the one a heartbeat makes after a failed publish.
         // A launcher already hosting must not stack a second server on its own.
-        if !host() {
+        if !host(super::super::discovery::CLIENT.address).unwrap() {
             // The port is held by something else, which the test below covers.
             return;
         }
-        assert!(!host());
+        assert!(!host(super::super::discovery::CLIENT.address).unwrap());
     }
 
     #[test]
@@ -898,10 +890,10 @@ mod tests {
         else {
             // Something on this machine is already holding the port, which is
             // the case being asserted anyway.
-            assert!(!host());
+            assert!(!host(super::super::discovery::CLIENT.address).unwrap());
             return;
         };
-        assert!(!host());
+        assert!(!host(super::super::discovery::CLIENT.address).unwrap());
         drop(held);
     }
 }

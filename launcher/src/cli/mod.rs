@@ -16,6 +16,7 @@ mod style;
 use anyhow::Result;
 
 use crate::bundle::Paths;
+use crate::diagnostics::log;
 use crate::error::{Code, Error};
 use crate::platform;
 use crate::runtime::disk::Resolved;
@@ -38,6 +39,8 @@ pub(crate) fn headless(paths: &Paths, boot: Boot, output: Output) -> Result<()> 
             runtime::shut_down(platform::interrupted(status).or(status.code()).unwrap_or(0))
         }
         Err(err) => {
+            // The parent start command reads this log after the launcher exits
+            log!("[launcher] stopped unexpectedly: {err:#}");
             output.error(&Error::new(Code::StoppedUnexpectedly, format!("{err:#}")));
             runtime::shut_down(1);
         }
