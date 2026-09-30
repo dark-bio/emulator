@@ -244,12 +244,13 @@ pub(crate) fn require_existing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check current usage again after the dialog, since it may have stayed open
-/// while another emulator started. The local image is checked even if the
-/// registry is unavailable.
+/// Check image usage after the dialog, preserving registry failures.
 pub(crate) fn require_available(path: &Path) -> Result<()> {
-    let booted = discovery::list().unwrap_or_default();
-    check_available(path, BOOTED.get().map(PathBuf::as_path), &booted)
+    check_available(path, BOOTED.get().map(PathBuf::as_path), &[])?;
+    let booted = discovery::CLIENT
+        .list()
+        .context("could not check which images are running")?;
+    check_available(path, None, &booted)
 }
 
 /// Reject both this window's image and images reported by other launchers.

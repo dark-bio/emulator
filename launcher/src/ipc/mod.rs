@@ -9,3 +9,6 @@
 pub(crate) mod control;
 pub(crate) mod discovery;
 pub(crate) mod registry;
+
+#[cfg(test)]
+pub(crate) mod testing;

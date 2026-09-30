@@ -4,7 +4,8 @@ Anything that wants to find an emulator on this computer reads one loopback
 service. There is no daemon: whichever launcher binds 127.0.0.1:18180 serves
 it, every other launcher publishes itself into it, and when the host goes the
 next launcher takes the port over. A refused connection means no emulator is
-running, and it is an empty list rather than an error.
+running, and it is an empty list rather than an error. A timeout, HTTP refusal
+or malformed listing is reported as a discovery failure.
 
 Most callers want `ark-emulator list`, or `ark devices`, which reads the same
 service. The contract below is for a tool that reads it directly.
@@ -75,8 +76,14 @@ own, since the listing is versioned on its own.
 
 Every launcher republishes itself once a second, and an entry that has not
 been refreshed for 15 s is dropped, so an emulator that was killed outright
-leaves the listing on its own. A launcher that exits normally withdraws itself
-at once.
+leaves the listing on its own. Shutdown attempts to withdraw the entry and
+logs any failure without delaying shutdown for retries.
+
+A lost registry connection triggers host takeover and republication. HTTP
+refusals, timeouts and invalid replies fail the launch or stop the running
+guest, with the cause reported in the window or terminal. A failed child
+launch is reported by `start` with the launcher's log, without waiting for
+the readiness timeout.
 
 A stop rides on the same heartbeat. The request is recorded against the entry,
 the launcher's next heartbeat is answered with `{"stop": true}`, and it shuts
@@ -84,6 +91,11 @@ down the way closing its window does. Nothing signals a process or looks up a
 pid, so a stop that is never collected gives up after --timeout. Close the
 device window or interrupt a foreground headless process when it cannot
 collect the request.
+
+The stop command retries lost connections and a 404 for an entry awaiting
+republication after host takeover. Other HTTP refusals and invalid listings
+fail promptly, with the server's status and explanation where available.
+Confirmed stops remain in the partial result if a later operation fails.
 
 ## Button control
 

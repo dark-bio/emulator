@@ -17,9 +17,10 @@ pub(crate) mod qemu;
 use std::io::{BufRead as _, BufReader};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
@@ -35,6 +36,9 @@ use qemu::{GuestArch, HostPort, spawn_qemu};
 
 /// Prevents a requested shutdown from being reported as a QEMU crash.
 static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Maximum delay before noticing that QEMU exited between heartbeats.
+const CHILD_POLL: Duration = Duration::from_millis(100);
 
 /// Whether shutdown has been requested.
 pub(crate) fn stopping() -> bool {
@@ -106,8 +110,10 @@ pub(crate) fn prepare(
     }
     let settings = Settings::load(data_dir)?;
     diagnostics::record_path("Settings", settings.path());
-    registry::host();
-    let booted = discovery::list().unwrap_or_default();
+    registry::host(discovery::CLIENT.address).context("could not host the emulator registry")?;
+    let booted = discovery::CLIENT
+        .list()
+        .context("could not discover running emulators")?;
     let firmware = resolve_firmware(paths.resources.as_deref(), &boot, arch)?;
     diagnostics::record_path("Kernel", &firmware.kernel);
     diagnostics::record_path("Initrd", &firmware.initrd);
@@ -177,12 +183,18 @@ impl Runtime {
         )?;
         disk::mark_booted(disk);
         self.hardware.start(pending.host_port.addr());
-        discovery::register(
+        if let Err(err) = discovery::register(
             pending.host_port.port(),
             disk,
             self.hardware.clone(),
             control.endpoint.clone(),
-        );
+        ) {
+            // A refused registration must not leave an undiscoverable guest running
+            stop_child(&mut child);
+            self.hardware.stop();
+            discovery::deregister();
+            return Err(err);
+        }
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {
@@ -195,7 +207,10 @@ impl Runtime {
         }
         let hardware = self.hardware.clone();
         thread::spawn(move || {
-            let result = child.wait().context("lost track of the QEMU process");
+            let result = wait(&mut child, &hardware);
+            if result.is_err() {
+                stop_child(&mut child);
+            }
             hardware.stop();
             drop(control);
             discovery::deregister();
@@ -212,5 +227,34 @@ impl Runtime {
             exited(result);
         });
         Ok(())
+    }
+}
+
+/// Wait for QEMU while publishing heartbeats and surfacing registry failures.
+fn wait(child: &mut Child, hardware: &Controller) -> Result<ExitStatus> {
+    let mut next_beat = Instant::now() + discovery::HEARTBEAT;
+    loop {
+        // Notice guest exit without waiting for another heartbeat interval
+        if let Some(status) = child.try_wait().context("lost track of the QEMU process")? {
+            return Ok(status);
+        }
+
+        // Publication retries connection loss but returns permanent refusals
+        if Instant::now() >= next_beat {
+            discovery::publish(hardware)?;
+            next_beat = Instant::now() + discovery::HEARTBEAT;
+        }
+        thread::sleep(CHILD_POLL);
+    }
+}
+
+/// Stop and reap the guest after a launcher failure, preserving the original error.
+fn stop_child(child: &mut Child) {
+    if let Err(err) = child.kill() {
+        log!("[launcher] could not stop QEMU after a failure: {err}");
+        return;
+    }
+    if let Err(err) = child.wait() {
+        log!("[launcher] could not reap QEMU after a failure: {err}");
     }
 }

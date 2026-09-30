@@ -7,12 +7,10 @@
 //! The launcher's side of the registry: reading it, keeping this emulator's
 //! entry in it up to date, and the small HTTP transport both need.
 //!
-//! Nothing here is allowed to stop an emulator from booting. Publishing is
-//! best-effort and logs rather than fails. CI launches a packaged build with no
-//! flags and expects it to boot unattended, with no registry, a wedged one, or
-//! a machine where binding a port is not allowed at all. Reading is strict
-//! where a command needs it to be: no registry is an empty list, while one
-//! that answers and cannot be read is an error.
+//! A refused connection means no registry is running. Connection loss can
+//! recover through host takeover; HTTP refusals, timeouts and malformed replies
+//! reach the caller. Publication failures reach the launcher's error handler,
+//! while withdrawal stays best-effort so shutdown never depends on discovery.
 //!
 //! Every launcher tries to host the registry, one wins the port, and the rest
 //! publish themselves to whoever did (see [`super::registry`]). Takeover rides
@@ -26,11 +24,10 @@
 //! reads its own mailbox on the same path.
 
 use std::fmt::Write as _;
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -45,9 +42,9 @@ use crate::runtime::hardware::Controller;
 /// is also how long a stop takes to arrive.
 pub(crate) const HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// How long any single request to the registry may take, bounded so a wedged
-/// one cannot hold up a boot.
-const TIMEOUT: Duration = Duration::from_secs(2);
+/// Limit for each registry I/O operation. Windows gets time to finish its
+/// loopback connection-refusal retries before a timeout becomes a failure.
+const TIMEOUT: Duration = Duration::from_secs(if cfg!(windows) { 5 } else { 2 });
 
 /// The most a registry answer may be. A hundred entries are a few kilobytes;
 /// anything near this is not a registry.
@@ -59,23 +56,64 @@ static ENTRY: OnceLock<Mutex<Instance>> = OnceLock::new();
 /// Serializes publication with withdrawal and prevents a stopped guest returning.
 static PUBLISHING: Mutex<bool> = Mutex::new(true);
 
-/// Address the registry is served on.
-fn registry_addr() -> SocketAddrV4 {
-    SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT)
+/// Client for the registry shared by all launchers on this computer.
+pub(crate) const CLIENT: Client = Client {
+    address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT),
+};
+
+/// Registry operations with transport loss distinguished from permanent failures.
+#[derive(Clone, Copy)]
+pub(crate) struct Client {
+    /// Loopback listener serving this registry.
+    pub(crate) address: SocketAddrV4,
 }
 
-/// Ask the registry what is running. Nothing serving one is a computer with no
-/// emulators on it, so a connection that cannot be made answers with an empty
-/// list. Any failure after that, an answer that cannot be read, a version
-/// this build does not know, a host that stops answering, is reported, since
-/// something is there and it is not a registry this build can trust.
-pub(crate) fn list() -> Result<Vec<Instance>> {
-    let body = match request(registry_addr(), "GET", "/v1/instances", None) {
-        Ok(body) => body,
-        Err(Refused) => return Ok(Vec::new()),
-        Err(Failed(err)) => return Err(err),
-    };
-    parse_listing(&body)
+impl Client {
+    /// List running emulators, returning an empty list only on connection refusal.
+    pub(crate) fn list(self) -> Result<Vec<Instance>, Failure> {
+        let body = match request(self.address, "GET", "/v1/instances", None) {
+            Ok(body) => body,
+            Err(Failure::Transport(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(err),
+        };
+        parse_listing(&body).map_err(Failure::Invalid)
+    }
+
+    /// Queue a stop for the launcher's next heartbeat, preserving HTTP refusals.
+    pub(crate) fn request_stop(self, port: u16) -> Result<(), Failure> {
+        request(
+            self.address,
+            "POST",
+            &format!("/v1/instances/{port}/stop"),
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Publish an entry, attempting host takeover only after a lost connection.
+    fn publish(self, instance: &Instance) -> Result<Beat, Failure> {
+        let body = serde_json::to_vec(instance)
+            .context("could not encode this emulator's entry")
+            .map_err(Failure::Invalid)?;
+        let answer = match request(self.address, "POST", "/v1/instances", Some(&body)) {
+            Err(err) if err.retryable() => {
+                // A disappearing host frees its port for one of the other launchers
+                if registry::host(self.address)? {
+                    log!("[discovery] the registry had no host, taking it over");
+                }
+                request(self.address, "POST", "/v1/instances", Some(&body))?
+            }
+            answer => answer?,
+        };
+        if answer.is_empty() {
+            return Ok(Beat { stop: false });
+        }
+        serde_json::from_slice(&answer)
+            .context("could not read the registry's heartbeat reply")
+            .map_err(Failure::Invalid)
+    }
 }
 
 /// The instances in a listing. Each entry is read on its own, so one this
@@ -121,26 +159,13 @@ pub(crate) fn answering(port: u16) -> bool {
     TcpStream::connect_timeout(&address.into(), TIMEOUT).is_ok()
 }
 
-/// Ask the emulator on `port` to shut down. The request waits in the registry
-/// until that emulator's next heartbeat collects it.
-pub(crate) fn request_stop(port: u16) -> Result<()> {
-    request(
-        registry_addr(),
-        "POST",
-        &format!("/v1/instances/{port}/stop"),
-        None,
-    )?;
-    Ok(())
-}
-
-/// Publish this emulator, and start the heartbeat that keeps it published.
-/// Each heartbeat takes readiness and identity from the latest hardware state.
+/// Publish this emulator before the runtime starts its periodic heartbeats.
 pub(crate) fn register(
     port: u16,
     disk: &Path,
     hardware: Controller,
     control: super::control::Endpoint,
-) {
+) -> Result<()> {
     let instance = Instance {
         port,
         control: Some(control),
@@ -156,28 +181,22 @@ pub(crate) fn register(
         expiry: None,
     };
     if ENTRY.set(Mutex::new(instance)).is_err() {
-        return;
+        bail!("this launcher already registered an emulator");
     }
 
-    publish(&hardware);
-    thread::spawn(move || {
-        loop {
-            thread::sleep(HEARTBEAT);
-            publish(&hardware);
-        }
-    });
+    publish(&hardware)
 }
 
-/// Send the current entry to the registry, and act on whatever comes back.
-fn publish(hardware: &Controller) {
+/// Refresh the current entry, returning permanent failures to the runtime.
+pub(crate) fn publish(hardware: &Controller) -> Result<()> {
     let publishing = PUBLISHING.lock().unwrap();
     if !*publishing || crate::runtime::stopping() {
-        return;
+        return Ok(());
     }
     let Some(entry) = ENTRY.get() else {
-        return;
+        return Ok(());
     };
-    let body = {
+    let answer = {
         let state = hardware.snapshot();
         let mut entry = entry.lock().unwrap();
         entry.ready = state.connected && state.nameplate.known;
@@ -185,41 +204,20 @@ fn publish(hardware: &Controller) {
         entry.name = state.nameplate.name;
         entry.serial = state.nameplate.serial;
         entry.expiry = state.nameplate.expiry;
-        serde_json::to_vec(&*entry)
+        CLIENT.publish(&entry)
     };
-    let body = match body {
-        Ok(body) => body,
-        Err(e) => {
-            log!("[discovery] could not encode this emulator's entry: {e}");
-            return;
-        }
-    };
-
-    if let Ok(answer) = request(registry_addr(), "POST", "/v1/instances", Some(&body)) {
-        drop(publishing);
-        obey(&answer);
-        return;
-    }
-
-    // Undeliverable means whoever hosted the registry is gone, so try to take
-    // it over. Republished either way, to whichever registry now exists.
-    if registry::host() {
-        log!("[discovery] the registry had no host, taking it over");
-    }
-    let answer = request(registry_addr(), "POST", "/v1/instances", Some(&body));
     drop(publishing);
     match answer {
-        Ok(answer) => obey(&answer),
-        Err(err) => log!("[discovery] could not register: {err}"),
-    }
-}
-
-/// Act on what the registry answered a heartbeat with. A stop waiting there is
-/// the only thing it can carry, and an answer with no body carries nothing.
-fn obey(answer: &[u8]) {
-    if serde_json::from_slice::<Beat>(answer).is_ok_and(|beat| beat.stop) {
-        log!("[discovery] asked to shut down");
-        crate::runtime::shut_down(0);
+        Ok(Beat { stop: true }) => {
+            log!("[discovery] asked to shut down");
+            crate::runtime::shut_down(0);
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.retryable() => {
+            log!("[discovery] waiting for a registry host: {err}");
+            Ok(())
+        }
+        Err(err) => Err(err).context("could not publish this emulator to the registry"),
     }
 }
 
@@ -236,7 +234,7 @@ pub(crate) fn deregister() {
     };
     let port = entry.lock().unwrap().port;
     if let Err(e) = request(
-        registry_addr(),
+        CLIENT.address,
         "DELETE",
         &format!("/v1/instances/{port}"),
         None,
@@ -282,36 +280,52 @@ pub(crate) fn disk_id(disk: &Path) -> String {
     })
 }
 
-/// Why a request got no answer: nobody is serving the registry, or something
-/// is and the exchange failed.
-enum Unanswered {
-    /// No connection could be made, which is a computer with no registry. A
-    /// closed loopback port is refused on Unix and left to time out on
-    /// Windows, so the kind of the error does not matter, only that nothing
-    /// ever answered.
-    Refused,
-    /// Anything after a connection was made, which is a registry that could
-    /// not be used.
-    Failed(anyhow::Error),
+/// A registry failure retaining whether host handover can recover it.
+#[derive(Debug)]
+pub(crate) enum Failure {
+    /// An operating system error opening or using the loopback connection.
+    Transport(io::Error),
+    /// An HTTP refusal whose status and explanation came from the registry.
+    Http {
+        /// HTTP status code returned by the server.
+        status: u16,
+        /// Plain-text explanation, bounded by the response size limit.
+        reason: String,
+    },
+    /// An invalid response, unsupported listing version or encoding failure.
+    Invalid(anyhow::Error),
 }
 
-use Unanswered::{Failed, Refused};
+impl Failure {
+    /// Whether losing a registry host can account for this connection failure.
+    pub(crate) fn retryable(&self) -> bool {
+        matches!(self, Self::Transport(err) if matches!(err.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted))
+    }
+}
 
-impl std::fmt::Display for Unanswered {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refused => write!(f, "nothing is serving the registry"),
-            Failed(err) => write!(f, "{err:#}"),
+            Self::Transport(err) => write!(f, "registry I/O failed: {err}"),
+            Self::Http { status, reason } if reason.is_empty() => {
+                write!(f, "the registry answered HTTP {status}")
+            }
+            Self::Http { status, reason } => {
+                write!(f, "the registry answered HTTP {status}: {reason}")
+            }
+            Self::Invalid(err) => write!(f, "{err:#}"),
         }
     }
 }
 
-impl From<Unanswered> for anyhow::Error {
-    fn from(unanswered: Unanswered) -> Self {
-        match unanswered {
-            Refused => anyhow::anyhow!("nothing is serving the registry"),
-            Failed(err) => err,
-        }
+impl std::error::Error for Failure {}
+
+impl From<io::Error> for Failure {
+    fn from(err: io::Error) -> Self {
+        Self::Transport(err)
     }
 }
 
@@ -325,9 +339,9 @@ fn request(
     method: &str,
     path: &str,
     body: Option<&[u8]>,
-) -> Result<Vec<u8>, Unanswered> {
-    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT).map_err(|_| Refused)?;
-    let mut exchange = || -> Result<Vec<u8>> {
+) -> Result<Vec<u8>, Failure> {
+    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT)?;
+    let mut exchange = || -> Result<Vec<u8>, Failure> {
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
 
@@ -340,12 +354,11 @@ fn request(
             head.push_str("Content-Type: application/json\r\n");
         }
         if matches!(method, "POST" | "DELETE") {
-            write!(
-                head,
+            head.push_str(&format!(
                 "{}: {}\r\n",
                 registry::WRITE_HEADER,
                 registry::WRITE_HEADER_VALUE
-            )?;
+            ));
         }
         head.push_str("\r\n");
 
@@ -356,7 +369,12 @@ fn request(
         stream.flush()?;
 
         let mut raw = Vec::new();
-        (&mut stream).take(MAX_RESPONSE).read_to_end(&mut raw)?;
+        (&mut stream).take(MAX_RESPONSE + 1).read_to_end(&mut raw)?;
+        if raw.len() as u64 > MAX_RESPONSE {
+            return Err(Failure::Invalid(anyhow::anyhow!(
+                "the registry's answer was too large"
+            )));
+        }
         let answer = split_response(&raw);
         trace!(
             "[discovery] {method} {path}: {}",
@@ -367,26 +385,40 @@ fn request(
         );
         answer
     };
-    exchange().map_err(Failed)
+    exchange()
 }
 
 /// Pull the body out of a response, failing on any status the registry uses to
 /// say no. The only server on the other end is [`super::registry`], which
 /// answers with a status line, a few headers and an unencoded body.
-fn split_response(raw: &[u8]) -> Result<Vec<u8>> {
+fn split_response(raw: &[u8]) -> Result<Vec<u8>, Failure> {
+    // A host disappearing before its reply can be retried after takeover
+    if raw.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the registry closed before replying",
+        )
+        .into());
+    }
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .context("the registry's answer had no header block")?;
+        .context("the registry's answer had no header block")
+        .map_err(Failure::Invalid)?;
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
-        .context("the registry's answer had no status")?;
+        .filter(|status| (100..=599).contains(status))
+        .context("the registry's answer had no valid status")
+        .map_err(Failure::Invalid)?;
     if !(200..300).contains(&status) {
-        bail!("the registry answered {status}");
+        return Err(Failure::Http {
+            status,
+            reason: String::from_utf8_lossy(&raw[split + 4..]).trim().to_owned(),
+        });
     }
     Ok(raw[split + 4..].to_vec())
 }
@@ -394,6 +426,108 @@ fn split_response(raw: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::testing::{registry as peer, response};
+    use std::thread;
+
+    /// A publish refusal reaches the launcher with the status and server explanation.
+    #[test]
+    fn test_registration_refusal_is_permanent_and_preserves_the_reason() {
+        let (client, worker) = peer(vec![(
+            "POST",
+            response(403, "registry writes require X-Ark-Registry: 1"),
+        )]);
+        let instance: Instance = serde_json::from_str(
+            r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
+        )
+        .unwrap();
+        let err = client.publish(&instance).unwrap_err();
+        assert!(!err.retryable());
+        assert!(
+            matches!(&err, Failure::Http { status: 403, reason } if reason == "registry writes require X-Ark-Registry: 1")
+        );
+        assert!(err.to_string().contains("403"));
+        assert!(err.to_string().contains("X-Ark-Registry: 1"));
+        worker.join().unwrap();
+    }
+
+    /// Invalid heartbeat replies fail publication instead of silently losing a stop.
+    #[test]
+    fn test_registration_rejects_an_invalid_heartbeat_reply() {
+        let (client, worker) = peer(vec![("POST", response(200, "not a heartbeat"))]);
+        let instance: Instance = serde_json::from_str(
+            r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
+        )
+        .unwrap();
+        let err = client.publish(&instance).unwrap_err();
+        assert!(matches!(err, Failure::Invalid(_)));
+        assert!(!err.retryable());
+        worker.join().unwrap();
+    }
+
+    /// Publication takes over a departed host and keeps stop delivery working.
+    #[test]
+    fn test_publication_takes_over_after_the_registry_host_exits() {
+        // Reserve an isolated registry address, then let its previous host go
+        let old_host = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = Client {
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, old_host.local_addr().unwrap().port()),
+        };
+        drop(old_host);
+        assert!(client.list().unwrap().is_empty());
+
+        // The next publication creates a registry and registers through HTTP
+        let instance: Instance = serde_json::from_str(
+            r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
+        )
+        .unwrap();
+        assert!(!client.publish(&instance).unwrap().stop);
+        let listing = client.list().unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].disk, "demo.ark");
+        client.request_stop(18181).unwrap();
+        assert!(client.publish(&instance).unwrap().stop);
+    }
+
+    /// Discovery keeps HTTP failures, invalid JSON and unsupported versions visible.
+    #[test]
+    fn test_discovery_failures_are_not_empty_listings() {
+        for reply in [
+            response(503, "registry unavailable"),
+            response(200, "not json"),
+            response(200, r#"{"version":999,"instances":[]}"#),
+        ] {
+            let (client, worker) = peer(vec![("GET", reply.clone())]);
+            let err = client.list().unwrap_err();
+            assert!(!err.retryable(), "{reply}");
+            worker.join().unwrap();
+        }
+    }
+
+    /// A registry that accepts a connection but never replies is a discovery failure.
+    #[test]
+    fn test_a_stalled_registry_is_not_an_empty_listing_or_a_handover() {
+        let server = tiny_http::Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = Client {
+            address: SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                server.server_addr().to_ip().unwrap().port(),
+            ),
+        };
+        let (release, held) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            held.recv().unwrap();
+            drop(request);
+        });
+
+        // Hold the reply until the client reports its own I/O timeout
+        let err = client.list().unwrap_err();
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(matches!(&err, Failure::Transport(cause)
+            if matches!(cause.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)));
+        assert!(!err.retryable());
+    }
 
     /// Native clients send the browser guard for every write and leave reads open.
     #[test]

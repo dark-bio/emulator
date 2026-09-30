@@ -77,8 +77,8 @@ object whose one member is `error`. The codes are stable.
   names the platform's fix. Exit 1.
 - port-exhausted: every port in the range is taken. Pass --port to name one,
   or stop an emulator. Exit 1.
-- stopped-unexpectedly: QEMU died while the emulator was starting. The
-  message carries the tail of the launcher's log. Exit 1.
+- stopped-unexpectedly: the launcher or guest failed, including a refused
+  registration. A start failure carries the tail of the launcher's log. Exit 1.
 - could-not-start: a bare run could not bring the emulator up. The message is
   the report the error window would have shown. Exit 1.
 - disk-busy: an emulator holds that image. Stop it first. Exit 3.
@@ -86,8 +86,9 @@ object whose one member is `error`. The codes are stable.
   `ark-emulator list` shows what is. Exit 3.
 - ambiguous-emulator: several emulators match, or several run and none was
   named. Name one by its locator, or pass --all to stop. Exit 3.
-- registry-unreachable: something answered on the registry's port and could
-  not be read. Exit 3.
+- registry-unreachable: the registry could not be read or refused a command.
+  HTTP refusals include the status and server explanation. Update Ark Emulator
+  and restart all launchers when the refusal is caused by mixed versions. Exit 3.
 - control-unsupported: the emulator does not advertise button control. Update
   Ark Emulator and restart every running emulator, including the registry
   host. A launcher that predates timed presses also refuses --release-after;

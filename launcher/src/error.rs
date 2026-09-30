@@ -28,7 +28,7 @@ pub(crate) enum Code {
     NoAcceleration,
     /// Every port in the range is taken.
     PortExhausted,
-    /// QEMU died while the emulator was starting.
+    /// The launcher or guest failed during startup or while running.
     StoppedUnexpectedly,
     /// A bare run could not bring the emulator up.
     CouldNotStart,
@@ -39,7 +39,7 @@ pub(crate) enum Code {
     /// Several running emulators match the selector, or none was named
     /// while several run.
     AmbiguousEmulator,
-    /// Something answered on the registry's port and could not be read.
+    /// The registry could not be read or refused a command.
     RegistryUnreachable,
     /// The launcher does not support the requested button control.
     ControlUnsupported,

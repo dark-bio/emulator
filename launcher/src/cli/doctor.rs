@@ -146,7 +146,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         },
     }
 
-    let registry = discovery::list();
+    let registry = discovery::CLIENT.list();
     match &registry {
         Ok(instances) if instances.is_empty() => checks.ok("registry", "no emulator running"),
         Ok(instances) => checks.ok("registry", &format!("{} running", instances.len())),

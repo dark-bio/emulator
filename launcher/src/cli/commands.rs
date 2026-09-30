@@ -330,8 +330,8 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
 
 /// Shut one emulator down, or every one of them. The emulator is named the
 /// way `ark -d` names it, and the only one running needs no name. The
-/// locators that went are the result, and on a timeout they are the partial
-/// result before the failure.
+/// locators that went are the result, preserved as a partial result if a later
+/// operation fails or the wait times out.
 fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> Result<(), Error> {
     let running = listing()?;
     let mut targets = if all {
@@ -347,52 +347,86 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
         output.event("step", format!("asking {} to stop", locator(instance)));
     }
 
-    let mut pending: Vec<u16> = targets.iter().map(|instance| instance.port).collect();
-    let mut done: Vec<u16> = Vec::new();
+    let mut progress = Stopping {
+        pending: targets.iter().map(|instance| instance.port).collect(),
+        done: Vec::new(),
+        asked: None,
+    };
     let deadline = Instant::now() + Duration::from_secs(global.timeout);
-    let mut asked: Option<Instant> = None;
-    while !pending.is_empty() {
-        // The registry moves to another launcher when the one hosting it goes,
-        // and the new host's registry starts out empty, so a request left in
-        // the old one has to be left again. A round that cannot be delivered
-        // at all is one the next round covers.
-        if asked.is_none_or(|at| at.elapsed() >= discovery::HEARTBEAT) {
-            for port in &pending {
-                let _ = discovery::request_stop(*port);
+    while !progress.pending.is_empty() {
+        // Preserve confirmed stops when a later request or listing is refused
+        match progress.poll(discovery::CLIENT, Instant::now()) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(err) => {
+                if !progress.done.is_empty() {
+                    output.block(&stopped(&progress.done), &[("Stopped", "stopped")])?;
+                }
+                return Err(registry_error(err));
             }
-            asked = Some(Instant::now());
-        }
-
-        // An emulator withdraws from the registry as it goes, and QEMU lets go
-        // of its port with it; the two together say it has gone. Either alone
-        // misleads: the listing empties for a moment when the registry changes
-        // hosts, and on Windows a closed port times out the way a busy one
-        // does. A registry that cannot be read this round settles nothing.
-        let listed: Option<Vec<u16>> = listing()
-            .ok()
-            .map(|instances| instances.iter().map(|instance| instance.port).collect());
-        let (gone, held): (Vec<u16>, Vec<u16>) = pending.iter().partition(|port| {
-            listed.as_ref().is_some_and(|listed| !listed.contains(port)) && !answering(**port)
-        });
-        done.extend(gone);
-        pending = held;
-        if pending.is_empty() {
-            break;
         }
         if Instant::now() >= deadline {
-            output.block(&stopped(&done), &[("Stopped", "stopped")])?;
+            output.block(&stopped(&progress.done), &[("Stopped", "stopped")])?;
             return Err(Error::new(
                 Code::Timeout,
                 format!(
                     "emulator:{} was still up after {} s",
-                    pending[0], global.timeout
+                    progress.pending[0], global.timeout
                 ),
             )
             .hint("close its window, or interrupt its foreground headless process"));
         }
         std::thread::sleep(POLL);
     }
-    output.block(&stopped(&done), &[("Stopped", "stopped")])
+    output.block(&stopped(&progress.done), &[("Stopped", "stopped")])
+}
+
+/// Confirmed and pending stops across registry-host handovers.
+struct Stopping {
+    /// Emulator ports whose shutdown has not yet been confirmed.
+    pending: Vec<u16>,
+    /// Emulator ports absent from both discovery and the loopback listener.
+    done: Vec<u16>,
+    /// Last round of stop requests, limiting retries to the heartbeat interval.
+    asked: Option<Instant>,
+}
+
+impl Stopping {
+    /// Advance shutdown once, retaining partial progress on a permanent failure.
+    fn poll(
+        &mut self,
+        client: discovery::Client,
+        now: Instant,
+    ) -> Result<bool, discovery::Failure> {
+        // A replacement host can lose queued stops until launchers republish
+        if self
+            .asked
+            .is_none_or(|at| now.duration_since(at) >= discovery::HEARTBEAT)
+        {
+            for port in &self.pending {
+                match client.request_stop(*port) {
+                    Ok(()) => {}
+                    Err(err) if err.retryable() => {}
+                    Err(discovery::Failure::Http { status: 404, .. }) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            self.asked = Some(now);
+        }
+
+        // Only a valid listing and a closed guest port together confirm shutdown
+        let listed = match client.list() {
+            Ok(instances) => instances,
+            Err(err) if err.retryable() => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let (gone, held): (Vec<u16>, Vec<u16>) = self.pending.iter().partition(|port| {
+            !listed.iter().any(|instance| instance.port == **port) && !answering(**port)
+        });
+        self.done.extend(gone);
+        self.pending = held;
+        Ok(self.pending.is_empty())
+    }
 }
 
 /// Set this emulator's CLI hold and report the state after hardware delivery.
@@ -519,10 +553,17 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
 /// What the emulators running on this computer look like. A registry that
 /// answers and cannot be read is a failure; none at all is an empty list.
 fn listing() -> Result<Vec<Instance>, Error> {
-    discovery::list().map_err(|err| {
-        Error::new(Code::RegistryUnreachable, format!("{err:#}"))
-            .hint("another program may be holding the emulator registry's port")
-    })
+    discovery::CLIENT.list().map_err(registry_error)
+}
+
+/// Report a registry failure with its server explanation and a recovery hint.
+fn registry_error(err: discovery::Failure) -> Error {
+    let hint = if matches!(err, discovery::Failure::Http { status: 403, .. }) {
+        "update Ark Emulator and restart all running launchers"
+    } else {
+        "check `ark-emulator list`; another program may be holding the registry's port"
+    };
+    Error::new(Code::RegistryUnreachable, err.to_string()).hint(hint)
 }
 
 /// Whether something accepts connections on a loopback port, which QEMU does
@@ -792,7 +833,135 @@ fn iso8601(seconds: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::testing::{registry as peer, response};
+    use std::net::TcpListener;
     use tempfile::TempDir;
+
+    /// Permanent stop refusals return on the first poll with the server's reason.
+    #[test]
+    fn test_stop_reports_a_permanent_refusal_without_retrying() {
+        for status in [400, 403, 500] {
+            let (client, worker) = peer(vec![(
+                "POST",
+                response(status, "request refused by test registry"),
+            )]);
+            let mut progress = Stopping {
+                pending: vec![18181],
+                done: Vec::new(),
+                asked: None,
+            };
+            let err = progress.poll(client, Instant::now()).unwrap_err();
+            assert!(
+                matches!(&err, discovery::Failure::Http { status: actual, .. } if *actual == status)
+            );
+            let err = registry_error(err);
+            assert_eq!(err.code, Code::RegistryUnreachable);
+            assert_eq!(err.exit(), 3);
+            assert!(err.message.contains("request refused by test registry"));
+            assert_eq!(progress.pending, [18181]);
+            assert!(progress.done.is_empty());
+            worker.join().unwrap();
+        }
+    }
+
+    /// A later refusal preserves shutdowns confirmed by an earlier poll.
+    #[test]
+    fn test_stop_keeps_confirmed_partial_progress_on_refusal() {
+        // One guest exits while the second keeps its loopback port open
+        let first = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let second_port = second.local_addr().unwrap().port();
+        let listing = json!({"version":1,"instances":[{"port":second_port,"disk":"second.ark","disk_id":"02","ready":true}]}).to_string();
+        let (client, worker) = peer(vec![
+            ("POST", response(204, "")),
+            ("POST", response(204, "")),
+            ("GET", response(200, &listing)),
+            ("POST", response(403, "stop requests are refused")),
+        ]);
+        drop(first);
+        let now = Instant::now();
+        let mut progress = Stopping {
+            pending: vec![first_port, second_port],
+            done: Vec::new(),
+            asked: None,
+        };
+        assert!(!progress.poll(client, now).unwrap());
+        assert_eq!(progress.done, [first_port]);
+
+        // The next heartbeat fails permanently without erasing the confirmed result
+        assert!(progress.poll(client, now + Duration::from_secs(1)).is_err());
+        assert_eq!(progress.done, [first_port]);
+        assert_eq!(progress.pending, [second_port]);
+        assert_eq!(
+            stopped(&progress.done),
+            json!({"stopped":[format!("emulator:{first_port}")]})
+        );
+        worker.join().unwrap();
+    }
+
+    /// Refused or malformed listing polls end a stop rather than running to timeout.
+    #[test]
+    fn test_stop_surfaces_listing_failures() {
+        for reply in [
+            response(403, "listing refused"),
+            response(200, "not json"),
+            response(200, r#"{"version":999,"instances":[]}"#),
+        ] {
+            let (client, worker) = peer(vec![("POST", response(204, "")), ("GET", reply.clone())]);
+            let mut progress = Stopping {
+                pending: vec![18181],
+                done: Vec::new(),
+                asked: None,
+            };
+            let err = progress.poll(client, Instant::now()).unwrap_err();
+            assert!(!err.retryable(), "{reply}");
+            assert!(progress.done.is_empty());
+            assert_eq!(progress.pending, [18181]);
+            worker.join().unwrap();
+        }
+    }
+
+    /// Lost replies and a replacement host's missing entries recover on later beats.
+    #[test]
+    fn test_stop_recovers_from_host_handover_and_republication() {
+        // Keep the guest alive while the replacement registry starts empty
+        let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = guest.local_addr().unwrap().port();
+        let empty = response(200, r#"{"version":1,"instances":[]}"#);
+        let listed = response(200, &json!({"version":1,"instances":[{"port":port,"disk":"demo.ark","disk_id":"01","ready":true}]}).to_string());
+        let (client, worker) = peer(vec![
+            ("POST", String::new()),
+            ("GET", String::new()),
+            ("POST", response(404, "no emulator on that port")),
+            ("GET", empty.clone()),
+            ("POST", response(204, "")),
+            ("GET", listed),
+            ("POST", response(404, "no emulator on that port")),
+            ("GET", empty),
+        ]);
+        let mut progress = Stopping {
+            pending: vec![port],
+            done: Vec::new(),
+            asked: None,
+        };
+        let now = Instant::now();
+        for seconds in 0..3 {
+            assert!(
+                !progress
+                    .poll(client, now + Duration::from_secs(seconds))
+                    .unwrap(),
+                "{seconds}"
+            );
+            assert!(progress.done.is_empty(), "{seconds}");
+        }
+
+        // A missing entry counts as stopped only once the guest port closes too
+        drop(guest);
+        assert!(progress.poll(client, now + Duration::from_secs(3)).unwrap());
+        assert_eq!(progress.done, [port]);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn test_a_timestamp_reads_as_a_utc_instant() {

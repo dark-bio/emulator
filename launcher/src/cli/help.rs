@@ -220,7 +220,7 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "a free loopback port from 18181 up, or --port; a source build needs --kernel and --initrd",
             "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; a separate process opens the device window unless --headless is set; an already running image keeps its current mode",
             "locator, image, created, started, environment, ready, expires; JSON adds port, path, name, serial and log",
-            "0 ready; 1 image, firmware or QEMU problem; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
+            "0 ready; 1 image, firmware or launcher failure; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
             "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
         ),
         "list" => (
@@ -233,8 +233,8 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
         "stop" => (
             "a running emulator, named as ark -d names it, or the only one running; --all stops every one",
             "about a second to deliver, then seconds for the device to go; --timeout bounds the whole wait",
-            "stopped, the locators that went, which is the partial result on a timeout",
-            "0 done; 2 usage; 3 none matches, or several do; 7 one did not go in time; 130/143 interrupted",
+            "stopped, the locators that went; confirmed stops remain in the partial result on a later failure or timeout",
+            "0 done; 2 usage; 3 selection or registry failure; 7 one did not go in time; 130/143 interrupted",
             "ark-emulator stop\nark-emulator stop emulator:18181 --json",
         ),
         "button press" => (
@@ -283,7 +283,7 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "nothing on a packaged build; a source build needs --kernel and --initrd and a QEMU on PATH",
             "runs in the foreground; --headless opens no window and never prompts; the device accepts clients after about 10 s with hardware acceleration, minutes without; --timeout does not limit this run",
             "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
-            "0 stopped; 1 startup or QEMU failure; 2 usage; 130/143 interrupted, device stopped",
+            "0 stopped; 1 launcher or QEMU failure; 2 usage; 130/143 interrupted, device stopped",
             "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
         ),
     };
