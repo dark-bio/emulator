@@ -231,10 +231,10 @@ fn contract(path: &str) -> [(&'static str, &'static str); 5] {
             "ark-emulator list\nark-emulator list --json",
         ),
         "stop" => (
-            "a running emulator, named as ark -d names it, or the only one running; --all stops every one",
-            "about a second to deliver, then seconds for the device to go; --timeout bounds the whole wait",
+            "a running emulator with direct control, named as ark -d names it, or the only one running; --all stops every one",
+            "a direct request, then seconds for launcher and guest exit; --all stops in port order; --timeout bounds the whole wait",
             "stopped, the locators that went; confirmed stops remain in the partial result on a later failure or timeout",
-            "0 done; 2 usage; 3 selection or registry failure; 7 one did not go in time; 130/143 interrupted",
+            "0 done; 2 usage; 3 selection, discovery or control failure; 7 shutdown not confirmed in time; 130/143 interrupted",
             "ark-emulator stop\nark-emulator stop emulator:18181 --json",
         ),
         "button press" => (

@@ -30,7 +30,9 @@ Read `ark help agents` before driving the Ark itself.
   naming a second image; each runs on its own port from 18181 up.
 - `ark-emulator stop` shuts the only running emulator down the way closing
   its window does. With several running, name one as `ark -d` would, by its
-  locator, serial, name or image, or pass --all for every one.
+  locator, serial, name or image, or pass --all for every one. It sends a
+  direct request and waits for launcher and guest exit. Older launchers need
+  an update and restart to support direct control.
 - `ark-emulator button press` holds the only emulator's reset button, and
   `ark-emulator button release` releases that CLI hold. Both accept the same
   selector as stop. They work with a window or headless and wait for hardware
@@ -65,8 +67,8 @@ Read `ark help agents` before driving the Ark itself.
 
 stdout carries the result, stderr carries events, and error[code]: lines are
 stable. `ark-emulator help output` lists the codes with next steps. Exit
-codes: 0 done, 1 local file or confirmation, 2 usage, 3 no such emulator or
-an unreadable registry, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
+codes: 0 done, 1 local file or confirmation, 2 usage, 3 selection, discovery or
+control failed, 7 a wait ran out, 130 Ctrl-C, 143 SIGTERM. When you
 cannot keep the two streams apart, drop the lines that start with
 `{"event":` under --json; what remains is the document.
 

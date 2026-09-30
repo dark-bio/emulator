@@ -6,9 +6,9 @@
 
 //! Prepares and runs one emulator without depending on a window system.
 //!
-//! The runtime owns hardware I/O while QEMU owns the disk lock. Registry stop
-//! requests, signals and window closure share shutdown, and orphan protection
-//! takes QEMU down even when the launcher cannot run cleanup.
+//! The runtime owns hardware I/O while QEMU owns the disk lock. Direct control,
+//! signals and window closure share shutdown.
+//! Orphan protection takes QEMU down even when the launcher cannot run cleanup.
 
 pub(crate) mod disk;
 pub(crate) mod hardware;
@@ -171,7 +171,7 @@ impl Runtime {
         exited: impl FnOnce(Result<ExitStatus>) + Send + 'static,
     ) -> Result<()> {
         diagnostics::record_path("Disk", disk);
-        let control = control::Control::start(self.hardware.clone())?;
+        let control = control::Control::start(self.hardware.clone(), || shut_down(0))?;
         let mut child = spawn_qemu(
             pending.arch,
             &pending.firmware,
