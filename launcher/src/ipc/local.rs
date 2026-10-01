@@ -212,28 +212,32 @@ impl Server {
         #[cfg(unix)]
         let lock = prepare(&path)?;
         let options = ListenerOptions::new()
-            .name(path.to_fs_name::<GenericFilePath>()?)
+            .name(path.as_path().to_fs_name::<GenericFilePath>()?)
             .nonblocking(ListenerNonblockingMode::Both)
             .reclaim_name(false);
-        #[cfg(unix)]
-        let options = {
-            use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
-            options.mode(0o600)
-        };
         #[cfg(windows)]
         let options = {
             use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
             options.security_descriptor(windows_identity()?.1)
         };
         let listener = options.create_sync()?;
-        Ok(Self {
+        let server = Self {
             listener,
             #[cfg(any(unix, test))]
             name: name.to_owned(),
             stopped: AtomicBool::new(false),
             #[cfg(unix)]
             _lock: lock,
-        })
+        };
+
+        // macOS cannot set a socket's mode before bind. The private directory
+        // protects it until chmod, and Server cleans up if chmod fails.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(server)
     }
 
     /// Return the protocol name a native client uses to connect.
