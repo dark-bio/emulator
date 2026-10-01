@@ -6,26 +6,26 @@
 
 //! Direct lifecycle and button control for one running launcher.
 //!
-//! Discovery advertises a loopback port and a launch identifier. Commands
-//! read the current connection generation before sending an input, and wait
+//! Discovery advertises a launch identifier naming a private local endpoint.
+//! Commands read the current connection generation before sending an input, and wait
 //! for its hardware write. Neither launcher replacement nor guest reconnection
 //! replays a pending input. The identifier distinguishes launches, not users;
-//! a required custom header and refused browser origins keep web pages out.
+//! the native transport keeps web pages out.
 //! Stop requests acknowledge acceptance before scheduling shutdown. Status
 //! remains available during shutdown without consulting the hardware worker.
 
 use std::io::{self, Read as _, Write as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Response, StatusCode};
 
+use super::local::{self, Request, Server, Stream};
 use crate::error::{Code, Error};
 use crate::runtime::hardware::{ButtonOutcome, ButtonSource, Controller};
 
@@ -41,10 +41,15 @@ const GENERATION_HEADER: &str = "X-Ark-Generation";
 /// The direct endpoint published in a registry entry.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Endpoint {
-    /// Loopback HTTP port, distinct from the guest's forwarded port.
-    pub(crate) port: u16,
     /// Opaque identifier preventing a stale entry controlling a later launch.
     pub(crate) id: String,
+}
+
+impl Endpoint {
+    /// Resolve this launch within the caller's private IPC namespace.
+    fn name(&self) -> String {
+        format!("c-{}", self.id)
+    }
 }
 
 /// Connection and button state returned before an input is submitted.
@@ -80,23 +85,17 @@ pub(crate) struct Control {
 }
 
 impl Control {
-    /// Bind a private loopback listener before the guest is started.
+    /// Bind a user-owned local listener before the guest is started.
     pub(crate) fn start(
         hardware: Controller,
         shutdown: impl FnOnce() + Send + 'static,
     ) -> Result<Self> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .context("could not bind the emulator control port")?;
-        let port = listener.local_addr()?.port();
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let id = format!(
-            "{:x}",
-            Sha256::digest(format!("{}:{stamp}:{port}", std::process::id()))
-        );
-        let endpoint = Endpoint { port, id };
+        let endpoint = Endpoint {
+            id: local::identity(),
+        };
         let server = Arc::new(
-            Server::from_listener(listener, None)
-                .map_err(|err| anyhow::anyhow!("could not serve emulator control: {err}"))?,
+            Server::bind(&endpoint.name())
+                .context("could not bind the emulator control endpoint")?,
         );
         let stopping = Arc::new(AtomicBool::new(false));
         let worker = {
@@ -117,6 +116,7 @@ impl Control {
                                     thread::spawn(shutdown);
                                 }
                             }
+                            Err(_) if !stopping.load(Ordering::SeqCst) => continue,
                             _ => break,
                         }
                     }
@@ -320,7 +320,7 @@ pub(crate) fn button(
     Ok(outcome)
 }
 
-/// Stop one selected launch and confirm its control and guest ports have gone.
+/// Stop one launch and confirm its native endpoint and guest port have gone.
 pub(crate) fn stop(endpoint: &Endpoint, guest_port: u16, deadline: Instant) -> Result<(), Error> {
     // An uncertain delivery is observed through status, never sent a second time
     let uncertain = match exchange(endpoint, "POST", "/v1/stop", None, deadline) {
@@ -344,7 +344,12 @@ pub(crate) fn stop(endpoint: &Endpoint, guest_port: u16, deadline: Instant) -> R
                         .error());
                 }
             }
-            Err(Failure::Transport(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+            Err(Failure::Transport(err))
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
                 if guest_gone(guest_port, deadline)? {
                     return Ok(());
                 }
@@ -410,7 +415,7 @@ impl Failure {
     /// Whether the connection could have disappeared during launcher exit.
     fn connection_lost(&self) -> bool {
         matches!(self, Self::Transport(err) if matches!(err.kind(),
-            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
             | io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted))
     }
@@ -510,16 +515,12 @@ fn exchange(
     deadline: Instant,
 ) -> Result<Reply, Failure> {
     // Validate discovered values before copying them into a socket or HTTP header
-    if endpoint.port == 0
-        || endpoint.id.len() != 64
-        || !endpoint.id.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if endpoint.id.len() != 64 || !endpoint.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Failure::Invalid("invalid emulator control endpoint"));
     }
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
-    let mut stream = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
+    let mut stream = Stream::connect(&endpoint.name(), remaining(deadline)?)?;
     let mut head = format!(
-        "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: 0\r\n{INSTANCE_HEADER}: {}\r\n",
+        "{method} {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n{INSTANCE_HEADER}: {}\r\n",
         endpoint.id
     );
     if let Some(generation) = generation {
@@ -610,7 +611,7 @@ mod tests {
     use super::*;
     use crate::ipc::testing::response;
     use serde_json::{Value, json};
-    use std::net::Shutdown;
+    use std::net::TcpListener;
     use std::sync::mpsc;
     use std::time::Instant;
     use tungstenite::WebSocket;
@@ -620,11 +621,10 @@ mod tests {
         replies: Vec<(&'static str, String)>,
         guest: Option<TcpListener>,
     ) -> (Endpoint, JoinHandle<()>) {
-        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint = Endpoint {
-            port: server.server_addr().to_ip().unwrap().port(),
-            id: "1".repeat(64),
+            id: local::identity(),
         };
+        let server = Server::bind(&endpoint.name()).unwrap();
         let id = endpoint.id.clone();
         let worker = thread::spawn(move || {
             for (path, reply) in replies {
@@ -724,7 +724,7 @@ mod tests {
             (format!("X-Ark-Emulator: {id}\r\n"), "x", 413),
         ] {
             let mut stream =
-                TcpStream::connect((Ipv4Addr::LOCALHOST, control.endpoint.port)).unwrap();
+                Stream::connect(&control.endpoint.name(), Duration::from_secs(1)).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
@@ -809,7 +809,7 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// A closed control port alone cannot confirm a guest that is still running.
+    /// A closed control endpoint cannot confirm a guest that is still running.
     #[test]
     fn test_direct_stop_waits_for_guest_exit_within_the_deadline() {
         let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -823,7 +823,7 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// Reusing a control port cannot make the client stop a replacement launcher.
+    /// Reusing a control endpoint cannot make the client stop a replacement launcher.
     #[test]
     fn test_direct_stop_observes_a_replacement_without_controlling_it() {
         let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -845,11 +845,10 @@ mod tests {
     /// A slow response cannot extend shutdown's deadline with each received byte.
     #[test]
     fn test_direct_stop_bounds_a_fragmented_reply() {
-        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint = Endpoint {
-            port: server.server_addr().to_ip().unwrap().port(),
-            id: "1".repeat(64),
+            id: local::identity(),
         };
+        let server = Server::bind(&endpoint.name()).unwrap();
         let worker = thread::spawn(move || {
             let request = server
                 .recv_timeout(Duration::from_secs(5))
@@ -1246,11 +1245,10 @@ mod tests {
     #[test]
     fn test_an_older_launcher_never_receives_an_untimed_fallback() {
         // Serve the previous control protocol with no timed route
-        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint = Endpoint {
-            port: server.server_addr().to_ip().unwrap().port(),
-            id: "1".repeat(64),
+            id: local::identity(),
         };
+        let server = Server::bind(&endpoint.name()).unwrap();
         let worker = thread::spawn(move || {
             let get = server
                 .recv_timeout(Duration::from_secs(2))
@@ -1352,12 +1350,11 @@ mod tests {
             (format!("{INSTANCE_HEADER}: {}\r\n", endpoint.id), "x", 413),
             (format!("{INSTANCE_HEADER}: {}\r\n", endpoint.id), "", 400),
         ] {
-            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port)).unwrap();
+            let mut stream = Stream::connect(&endpoint.name(), Duration::from_secs(1)).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
             write!(stream, "POST /v1/button/press HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
-            stream.shutdown(Shutdown::Write).unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
             assert_eq!(
@@ -1389,11 +1386,10 @@ mod tests {
     /// Losing a POST reply times out with an unknown outcome and no replay.
     #[test]
     fn test_a_missing_delivery_reply_is_not_retried() {
-        let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint = Endpoint {
-            port: server.server_addr().to_ip().unwrap().port(),
-            id: "1".repeat(64),
+            id: local::identity(),
         };
+        let server = Server::bind(&endpoint.name()).unwrap();
         let worker = thread::spawn(move || {
             let get = server
                 .recv_timeout(Duration::from_secs(2))

@@ -5,7 +5,7 @@
 // license that can be found in the LICENSE file.
 
 //! The launcher's side of the registry: reading it, keeping this emulator's
-//! entry in it up to date, and the small HTTP transport both need.
+//! entry in it up to date, and bounded HTTP framing over private local IPC.
 //!
 //! A refused connection means no registry is running. Connection loss can
 //! recover through host takeover; HTTP refusals, timeouts and malformed replies
@@ -22,11 +22,12 @@ use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
+use super::local;
 use super::registry::{self, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 use crate::diagnostics::{log, trace};
 use crate::runtime::hardware::Controller;
@@ -66,7 +67,12 @@ impl Client {
     pub(crate) fn list(self) -> Result<Vec<Instance>, Failure> {
         let body = match request(self.address, "GET", "/v1/instances", None) {
             Ok(body) => body,
-            Err(Failure::Transport(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+            Err(Failure::Transport(err))
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
                 return Ok(Vec::new());
             }
             Err(err) => return Err(err),
@@ -261,7 +267,7 @@ pub(crate) fn disk_id(disk: &Path) -> String {
 /// A registry failure retaining whether host handover can recover it.
 #[derive(Debug)]
 pub(crate) enum Failure {
-    /// An operating system error opening or using the loopback connection.
+    /// An operating system error opening or using the local connection.
     Transport(io::Error),
     /// An HTTP refusal whose status and explanation came from the registry.
     Http {
@@ -278,7 +284,7 @@ impl Failure {
     /// Whether losing a registry host can account for this connection failure.
     pub(crate) fn retryable(&self) -> bool {
         matches!(self, Self::Transport(err) if matches!(err.kind(),
-            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
             | io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted))
     }
@@ -307,21 +313,19 @@ impl From<io::Error> for Failure {
     }
 }
 
-/// One request to the registry, spoken directly over TCP. Four fixed routes
-/// against a loopback server is well short of what an HTTP client crate is
-/// for. Spoken as HTTP/1.0, so the answer ends at end of file and carries no
-/// chunked framing, and bounded, so a server that is not a registry cannot
-/// feed this forever.
+/// Exchange one native registry request under a fixed I/O deadline.
 fn request(
     addr: SocketAddrV4,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, Failure> {
-    let mut stream = TcpStream::connect_timeout(&addr.into(), TIMEOUT)?;
+    let deadline = Instant::now() + TIMEOUT;
+    let mut stream = connect(addr, deadline)?;
     let mut exchange = || -> Result<Vec<u8>, Failure> {
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        stream.set_read_timeout(Some(remaining))?;
+        stream.set_write_timeout(Some(remaining))?;
 
         let mut head = format!(
             "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\
@@ -364,6 +368,35 @@ fn request(
         answer
     };
     exchange()
+}
+
+/// Wait for a winning launcher's local bind without falling back to HTTP writes.
+fn connect(addr: SocketAddrV4, deadline: Instant) -> Result<local::Stream, Failure> {
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or_else(|| {
+            Failure::Invalid(anyhow::anyhow!(
+                "the browser registry has no local endpoint for this user; close emulators owned by other users, then update and restart all emulators"
+            ))
+        })?;
+        match local::Stream::connect(&registry::local_name(addr.port()), remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                match TcpStream::connect_timeout(&addr.into(), remaining) {
+                    Ok(_) => std::thread::sleep(Duration::from_millis(10).min(remaining)),
+                    Err(cause) if cause.kind() == io::ErrorKind::ConnectionRefused => {
+                        return Err(err.into());
+                    }
+                    Err(cause) => return Err(cause.into()),
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 /// Pull the body out of a response, failing on any status the registry uses to
@@ -455,7 +488,7 @@ mod tests {
         drop(old_host);
         assert!(client.list().unwrap().is_empty());
 
-        // The next publication creates a registry and registers through HTTP
+        // The next publication creates a registry and registers through native IPC
         let instance: Instance = serde_json::from_str(
             r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
         )
@@ -464,6 +497,38 @@ mod tests {
         let listing = client.list().unwrap();
         assert_eq!(listing.len(), 1);
         assert_eq!(listing[0].disk, "demo.ark");
+
+        // Browser discovery reflects the same entry written through native IPC
+        let mut browser = TcpStream::connect(client.address).unwrap();
+        browser.set_read_timeout(Some(TIMEOUT)).unwrap();
+        write!(
+            browser,
+            "GET /v1/instances HTTP/1.0\r\nHost: {}\r\n\r\n",
+            client.address
+        )
+        .unwrap();
+        let mut reply = Vec::new();
+        browser.read_to_end(&mut reply).unwrap();
+        let public = parse_listing(&split_response(&reply).unwrap()).unwrap();
+        assert_eq!(public.len(), 1);
+        assert_eq!(public[0].disk, listing[0].disk);
+    }
+
+    /// A browser listener alone cannot receive a fallback registry request.
+    #[test]
+    fn test_missing_native_endpoint_does_not_fall_back_to_http() {
+        let browser = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, browser.local_addr().unwrap().port());
+        browser.set_nonblocking(true).unwrap();
+        let err = connect(addr, Instant::now() + Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(!err.retryable());
+        assert!(err.to_string().contains("update and restart"), "{err}");
+        while let Ok((mut probe, _)) = browser.accept() {
+            probe.set_read_timeout(Some(TIMEOUT)).unwrap();
+            assert_eq!(probe.read(&mut [0]).unwrap(), 0);
+        }
     }
 
     /// Discovery keeps HTTP failures, invalid JSON and unsupported versions visible.
@@ -484,13 +549,7 @@ mod tests {
     /// A registry that accepts a connection but never replies is a discovery failure.
     #[test]
     fn test_a_stalled_registry_is_not_an_empty_listing_or_a_handover() {
-        let server = tiny_http::Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let client = Client {
-            address: SocketAddrV4::new(
-                Ipv4Addr::LOCALHOST,
-                server.server_addr().to_ip().unwrap().port(),
-            ),
-        };
+        let (client, server, _reservation) = crate::ipc::testing::server();
         let (release, held) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
             let request = server.recv().unwrap();
@@ -507,15 +566,12 @@ mod tests {
         assert!(!err.retryable());
     }
 
-    /// Native clients send the browser guard for every write and leave reads open.
+    /// Native clients send the protocol marker for every write and leave reads open.
     #[test]
     fn test_registry_requests_carry_the_write_guard() {
-        // Inspect actual HTTP requests on a private port without a running emulator
-        let server = tiny_http::Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            server.server_addr().to_ip().unwrap().port(),
-        );
+        // Inspect native requests without a running emulator
+        let (client, server, _reservation) = crate::ipc::testing::server();
+        let address = client.address;
         let worker = thread::spawn(move || {
             for method in ["GET", "POST", "DELETE"] {
                 let incoming = server

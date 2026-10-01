@@ -18,6 +18,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "../src/ipc/local.rs"]
+#[allow(dead_code)] // Scripted peers use the production transport without every client helper.
+mod local;
+
 /// Serializes scenarios that own the public discovery port within this test process.
 static REGISTRY_TEST: Mutex<()> = Mutex::new(());
 
@@ -34,7 +38,8 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let server = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let server = local::Server::bind("registry-18180").unwrap();
 
     // An isolated executable resolves only this fixture's guest and state
     let directory = tempfile::TempDir::new().unwrap();
@@ -150,7 +155,8 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let server = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let server = local::Server::bind("registry-18180").unwrap();
 
     // Publish both launches, then remove discovery as soon as the CLI selects them
     let (published, ready) = mpsc::channel();
@@ -313,7 +319,8 @@ fn test_direct_stop_all_preserves_partial_output_on_refusal() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let registry = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let registry = local::Server::bind("registry-18180").unwrap();
 
     // The lower guest port stops; the other control endpoint refuses the request
     let mut guests = vec![
@@ -325,10 +332,11 @@ fn test_direct_stop_all_preserves_partial_output_on_refusal() {
     let mut instances = Vec::new();
     let mut workers = Vec::new();
     for (index, guest) in guests.into_iter().enumerate() {
-        let control = tiny_http::Server::http(("127.0.0.1", 0)).unwrap();
+        let id = local::identity();
+        let control = local::Server::bind(&format!("c-{id}")).unwrap();
         instances.push(serde_json::json!({
             "port":guest.local_addr().unwrap().port(),"disk":format!("{index}.ark"),"disk_id":format!("{index}"),"ready":false,
-            "control":{"port":control.server_addr().to_ip().unwrap().port(),"id":"1".repeat(64)}
+            "control":{"id":id}
         }));
         workers.push(thread::spawn(move || {
             let request = control

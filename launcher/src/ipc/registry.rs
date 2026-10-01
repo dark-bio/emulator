@@ -4,46 +4,36 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! The registry of emulators running on this machine, served over HTTP on a
-//! fixed loopback port so that anything wanting to talk to an emulator can find
-//! one without guessing ports.
+//! Running emulators, published through native IPC and discoverable over HTTP.
 //!
-//! There is no separate daemon. The registry is hosted by whichever launcher
-//! currently holds the port, and every launcher tries to take it:
+//! The launcher holding the browser port also owns the private registry name.
+//! Both listeners share one registry; only the native listener can mutate it.
 //!
-//!   launcher A ── binds :18180 ──▶ [registry thread]
-//!   launcher B ── bind fails ────▶ POST /v1/instances ──▶ ─┤
-//!   launcher C ── bind fails ────▶ POST /v1/instances ──▶ ─┤
-//!                                                          │
-//!   consumers  ───────────────── GET  /v1/instances ──▶ ───┘
+//! ```text
+//!   launchers ------ native IPC ------> [registry]
+//!   native CLI ----- native IPC ------> [        ]
+//!   browsers ------- HTTP GET --------> [        ]
+//! ```
 //!
-//! That gives the registry a lifetime independent of any one emulator, which
-//! is all it needed. A process of its own would have needed spawning detached
-//! on three platforms, a reason to shut down, and a place in the packaging.
+//! On host exit, the next publisher claims the port and native name. Every
+//! launcher republishes once a second, and entries expire after 15 s without
+//! a heartbeat. See [`super::discovery`] for takeover and failure handling.
 //!
-//! When the host exits, the port frees and the next launcher whose heartbeat
-//! fails takes over (see [`super::discovery`]). Its registry starts empty and
-//! refills, since every launcher keeps republishing its own entry. Entries live
-//! only as long as they are refreshed, so an emulator killed outright drops out
-//! on its own, with no liveness probing, of which there is no portable kind.
-//!
-//! Any page in any browser can read a loopback port, and the allowed origin
-//! here has to be `*`, so the registry publishes a disk image's file name but
-//! never its path.
-//!
-//! Writes require a fixed header that CORS preflights never allow, and reject
-//! browser origins. This keeps web pages from changing the registry while
-//! local processes can publish and withdraw entries. Lifecycle commands go
-//! directly through [`super::control`] after discovery.
+//! Browser discovery allows every origin and publishes basenames, never paths.
+//! Lifecycle commands use [`super::control`] without consulting the registry
+//! again after selecting targets.
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read as _};
 use std::net::{SocketAddrV4, TcpListener};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+use super::local::{self, Request};
 
 use crate::diagnostics::log;
 
@@ -51,14 +41,13 @@ use crate::diagnostics::log;
 /// so the whole emulator range reads as one contiguous block.
 pub(crate) const REGISTRY_PORT: u16 = 18180;
 
-/// Schema version of the registry's responses, so a consumer meeting an older
-/// registry can tell rather than guess. Bumped only for a breaking change.
+/// Schema version of registry responses.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
-/// Header required on registry writes and excluded from CORS preflight grants.
+/// Protocol marker required on native registry writes.
 pub(super) const WRITE_HEADER: &str = "X-Ark-Registry";
 
-/// Fixed browser guard, with no authentication of local processes.
+/// Fixed protocol value; access control belongs to the native transport.
 pub(super) const WRITE_HEADER_VALUE: &str = "1";
 
 /// How long an entry survives without being refreshed. Comfortably more than
@@ -209,32 +198,75 @@ pub(crate) fn host(addr: SocketAddrV4) -> io::Result<bool> {
     // decides the race.
     let server = Server::from_listener(listener, None::<tiny_http::SslConfig>)
         .map_err(|e| io::Error::other(format!("could not serve on {addr}: {e}")))?;
+    let native = local::Server::bind(&local_name(addr.port()))?;
+    let registry = Arc::new(Mutex::new(Registry::new()));
+    let public_registry = registry.clone();
     log!("[registry] hosting the registry on {addr}");
 
     // Runs for the life of the process. This launcher exiting is what hands
     // the port to the next one.
-    thread::spawn(move || serve(&server, &mut Registry::new()));
+    thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let listing = {
+                let mut registry = public_registry.lock().unwrap();
+                registry.expire(Instant::now());
+                registry.listing()
+            };
+            handle_public(request, &listing, addr);
+        }
+    });
+    thread::spawn(move || serve(&native, &registry));
     Ok(true)
 }
 
-/// The serve loop, waking on [`TICK`] even with nothing to answer so that
-/// entries expire on time rather than only when somebody asks. One thread
-/// owns the registry, so nothing here needs a lock.
-fn serve(server: &Server, registry: &mut Registry) {
+/// Name the private publication endpoint paired with a browser discovery port.
+pub(super) fn local_name(port: u16) -> String {
+    format!("registry-{port}")
+}
+
+/// Serve only browser discovery; no request can reach a native mutation route.
+fn handle_public(request: tiny_http::Request, listing: &Listing, addr: SocketAddrV4) {
+    let hosts: Vec<_> = request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv("Host"))
+        .map(|header| header.value.as_str())
+        .collect();
+    let expected = addr.to_string();
+    let localhost = format!("localhost:{}", addr.port());
+    let mut response = if hosts.len() != 1 || (hosts[0] != expected && hosts[0] != localhost) {
+        text(StatusCode(403), "unexpected discovery host")
+    } else {
+        match (
+            request.method(),
+            request.url().split('?').next().unwrap_or(""),
+        ) {
+            (Method::Options, "/v1/instances") => empty(StatusCode(204)),
+            (Method::Get, "/v1/instances") => json(serde_json::to_vec(listing).unwrap()),
+            _ => text(StatusCode(404), "no such route"),
+        }
+    };
+    for header in cors() {
+        response.add_header(header);
+    }
+    let _ = request.respond(response);
+}
+
+/// Serve native requests and expire entries under the shared registry lock.
+fn serve(server: &local::Server, registry: &Mutex<Registry>) {
     loop {
         match server.recv_timeout(TICK) {
-            Ok(Some(request)) => handle(request, registry),
+            Ok(Some(request)) => handle(request, &mut registry.lock().unwrap()),
             Ok(None) => {}
             // A failed accept says nothing about the other clients, so keep
             // serving.
             Err(e) => log!("[registry] could not accept a request: {e}"),
         }
-        registry.expire(Instant::now());
+        registry.lock().unwrap().expire(Instant::now());
     }
 }
 
-/// Route one request. Every answer carries the CORS headers, including the
-/// error ones, so a browser can read the reason rather than an opaque failure.
+/// Route a native request without exposing mutations on the browser listener.
 fn handle(mut request: Request, registry: &mut Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
@@ -337,12 +369,12 @@ fn read_body(request: &mut Request) -> Result<Vec<u8>, Response<Cursor<Vec<u8>>>
     }
 }
 
-/// Headers every response carries.
+/// Cross-origin grants carried only by browser discovery responses.
 ///
 /// The allowed origin is `*` because an allowlist would mean baking somebody's
 /// hostnames in here. What keeps that acceptable is the shape of an
 /// [`Instance`]: ports and file names, never paths.
-/// Writes need [`WRITE_HEADER`], which this preflight never permits.
+/// This listener has no write routes, regardless of the request's headers.
 ///
 /// `Access-Control-Allow-Private-Network` is for Chromium's private network
 /// access rules, under which a page on a public origin reaching a loopback
@@ -379,12 +411,8 @@ fn empty(status: StatusCode) -> Response<Cursor<Vec<u8>>> {
     Response::from_data(Vec::new()).with_status_code(status)
 }
 
-/// Answer `request`, attaching the CORS headers on the way out. A client that
-/// has already hung up is not worth reporting.
-fn respond(request: Request, mut response: Response<Cursor<Vec<u8>>>) {
-    for header in cors() {
-        response.add_header(header);
-    }
+/// Answer a native request without granting browser access.
+fn respond(request: Request, response: Response<Cursor<Vec<u8>>>) {
     let _ = request.respond(response);
 }
 
@@ -409,33 +437,39 @@ mod tests {
         body: String,
     }
 
-    /// Send a raw HTTP request through an isolated registry listener.
-    fn exchange(
-        registry: &mut Registry,
+    /// Exercise the actual TCP route table, including Host validation.
+    fn public_exchange(
+        registry: &Registry,
         method: &str,
         path: &str,
         headers: &str,
-        body: &str,
+        host: Option<&str>,
     ) -> Reply {
-        // Use a private port so these tests cannot touch a running emulator
         let server = Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = server.server_addr().to_ip().unwrap();
-        let timeout = Duration::from_secs(2);
-        let mut stream = TcpStream::connect_timeout(&address, timeout).unwrap();
-        stream.set_read_timeout(Some(timeout)).unwrap();
-        stream.set_write_timeout(Some(timeout)).unwrap();
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         write!(
             stream,
-            "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
-            body.len()
+            "{method} {path} HTTP/1.0\r\nHost: {}\r\nContent-Length: 0\r\n{headers}\r\n",
+            host.unwrap_or(&address.to_string())
         )
         .unwrap();
-
-        // Exercise routing and header parsing before inspecting the reply
-        let request = server.recv_timeout(timeout).unwrap().unwrap();
-        handle(request, registry);
+        let request = server.recv().unwrap();
+        handle_public(
+            request,
+            &registry.listing(),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, address.port()),
+        );
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
+        parse_reply(&response)
+    }
+
+    /// Decode the status, headers and complete body returned by a test peer.
+    fn parse_reply(response: &str) -> Reply {
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         let mut lines = head.lines();
         let status = lines.next().unwrap().split_whitespace().nth(1).unwrap();
@@ -449,6 +483,42 @@ mod tests {
                 .collect(),
             body: body.to_owned(),
         }
+    }
+
+    /// Send a raw HTTP request through an isolated registry listener.
+    fn exchange(
+        registry: &mut Registry,
+        method: &str,
+        path: &str,
+        headers: &str,
+        body: &str,
+    ) -> Reply {
+        // Use a unique local name so these tests cannot touch a running emulator
+        let server = local::Server::bind(&format!("t-{}", local::identity())).unwrap();
+        let address = "localhost";
+        let timeout = Duration::from_secs(2);
+        let mut stream = local::Stream::connect(server.name(), timeout).unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        stream.set_write_timeout(Some(timeout)).unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+
+        // Exercise routing and header parsing before inspecting the reply
+        match server.recv_timeout(timeout) {
+            Ok(Some(request)) => handle(request, registry),
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => {}
+            result => panic!("request was not received: {}", result.err().unwrap()),
+        }
+        let mut response = String::new();
+        if let Err(err) = stream.read_to_string(&mut response) {
+            assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+            assert!(response.contains("\r\n\r\n"));
+        }
+        parse_reply(&response)
     }
 
     /// Missing guards and browser origins cannot publish or withdraw entries.
@@ -614,12 +684,12 @@ mod tests {
             .status,
             204
         );
-        let listing = exchange(
-            &mut registry,
+        let listing = public_exchange(
+            &registry,
             "GET",
             "/v1/instances",
             "Origin: https://example.com\r\n",
-            "",
+            None,
         );
         assert_eq!(listing.status, 200);
         assert_eq!(listing.headers["access-control-allow-origin"], "*");
@@ -637,8 +707,12 @@ mod tests {
             let headers = format!(
                 "Origin: https://example.com\r\nAccess-Control-Request-Method: {method}\r\nAccess-Control-Request-Headers: {requested_headers}\r\nAccess-Control-Request-Private-Network: true\r\n"
             );
-            let reply = exchange(&mut registry, "OPTIONS", path, &headers, "");
-            assert_eq!(reply.status, 204, "{method} {path}");
+            let reply = public_exchange(&registry, "OPTIONS", path, &headers, None);
+            assert_eq!(
+                reply.status,
+                if path == "/v1/instances" { 204 } else { 404 },
+                "{method} {path}"
+            );
             assert_eq!(
                 reply.headers["access-control-allow-origin"], "*",
                 "{method} {path}"
@@ -670,6 +744,42 @@ mod tests {
             )
             .status,
             204
+        );
+    }
+
+    /// TCP accepts discovery only, even with native headers and a known launch id.
+    #[test]
+    fn test_browser_listener_has_no_mutation_routes() {
+        let mut registry = Registry::new();
+        registry.upsert(instance(18181));
+        for (method, path) in [
+            ("POST", "/v1/instances"),
+            ("DELETE", "/v1/instances/18181"),
+            ("POST", "/v1/stop"),
+            ("GET", "/v1/status"),
+            ("GET", "/v1/button"),
+            ("POST", "/v1/button/press"),
+        ] {
+            let response = public_exchange(
+                &registry,
+                method,
+                path,
+                "X-Ark-Registry: 1\r\nX-Ark-Emulator: known\r\n",
+                None,
+            );
+            assert_eq!(response.status, 404, "{method} {path}");
+        }
+        assert_eq!(registry.listing().instances.len(), 1);
+        assert_eq!(
+            public_exchange(
+                &registry,
+                "GET",
+                "/v1/instances",
+                "",
+                Some("attacker.example:18180")
+            )
+            .status,
+            403
         );
     }
 

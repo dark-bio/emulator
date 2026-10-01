@@ -7,21 +7,27 @@
 //! Isolated registry peers for HTTP failures and lifecycle scenarios.
 
 use std::io::Write as _;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::discovery::Client;
+use super::{local, registry as registry_api};
+
+/// Reserve an isolated registry namespace without using the shared discovery port.
+pub(crate) fn server() -> (Client, local::Server, TcpListener) {
+    let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        reservation.local_addr().unwrap().port(),
+    );
+    let server = local::Server::bind(&registry_api::local_name(address.port())).unwrap();
+    (Client { address }, server, reservation)
+}
 
 /// Serve scripted replies, closing without a response when a reply is empty.
 pub(crate) fn registry(replies: Vec<(&'static str, String)>) -> (Client, JoinHandle<()>) {
-    let server = tiny_http::Server::http((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let client = Client {
-        address: SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            server.server_addr().to_ip().unwrap().port(),
-        ),
-    };
+    let (client, server, reservation) = server();
     let worker = thread::spawn(move || {
         for (method, reply) in replies {
             let incoming = server
@@ -32,6 +38,7 @@ pub(crate) fn registry(replies: Vec<(&'static str, String)>) -> (Client, JoinHan
             let mut writer = incoming.into_writer();
             writer.write_all(reply.as_bytes()).unwrap();
         }
+        drop(reservation);
     });
     (client, worker)
 }

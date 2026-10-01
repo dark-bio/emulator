@@ -19,10 +19,23 @@ name = "windows_cli"
 path = "../../launcher/tests/windows_cli.rs"
 required-features = ["packaged"]
 
+[[test]]
+name = "ipc"
+path = "../../launcher/tests/ipc.rs"
+required-features = ["packaged"]
+
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3"
+interprocess = "2.4.4"
+httparse = "1.10"
+sha2 = "0.10"
+tiny_http = { version = "0.12", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
 semver = "1"
 time = { version = "0.3", features = ["formatting"] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
