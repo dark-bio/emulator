@@ -558,7 +558,8 @@ fn exchange(
     }
     let split = match raw.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
         Some(split) => split,
-        None if raw.starts_with(b"HTTP/1.") => {
+        None if raw.starts_with(b"HTTP/1.") || b"HTTP/1.".starts_with(&raw) => {
+            // Launcher exit can interrupt even the first write of the status line
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
         }
         None => {
@@ -777,6 +778,12 @@ mod tests {
     fn test_direct_stop_confirms_a_lost_acknowledgement_without_replaying() {
         for lost in [
             "",
+            "H",
+            "HT",
+            "HTT",
+            "HTTP",
+            "HTTP/",
+            "HTTP/1",
             "HTTP/1.0 202 Accepted\r\n",
             "HTTP/1.0 202 Accepted\r\nContent-Length: 17\r\n\r\n{\"stop",
         ] {
@@ -794,19 +801,42 @@ mod tests {
         }
     }
 
+    /// Status replies cut off at any byte boundary can still confirm shutdown.
+    #[test]
+    fn test_direct_stop_confirms_exit_during_any_status_reply_fragment() {
+        let reply = response(200, r#"{"stopping":true}"#);
+        for end in 0..reply.len() {
+            // Exit after each possible byte boundary of the status response
+            let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guest.local_addr().unwrap().port();
+            let (endpoint, worker) = stop_peer(
+                vec![
+                    ("/v1/stop", response(202, r#"{"stopping":true}"#)),
+                    ("/v1/status", reply[..end].to_owned()),
+                ],
+                Some(guest),
+            );
+            let result = stop(&endpoint, port, Instant::now() + Duration::from_secs(5));
+            worker.join().unwrap();
+            assert!(result.is_ok(), "{end} bytes: {result:?}");
+        }
+    }
+
     /// A launcher that never accepted a lost request is reported without replay.
     #[test]
     fn test_direct_stop_reports_an_unaccepted_lost_request() {
-        let (endpoint, worker) = stop_peer(
-            vec![
-                ("/v1/stop", String::new()),
-                ("/v1/status", response(200, r#"{"stopping":false}"#)),
-            ],
-            None,
-        );
-        let err = stop(&endpoint, 18181, Instant::now() + Duration::from_secs(3)).unwrap_err();
-        assert_eq!(err.code, Code::ControlUnreachable);
-        worker.join().unwrap();
+        for lost in ["", "H", "HTTP/"] {
+            let (endpoint, worker) = stop_peer(
+                vec![
+                    ("/v1/stop", lost.to_owned()),
+                    ("/v1/status", response(200, r#"{"stopping":false}"#)),
+                ],
+                None,
+            );
+            let err = stop(&endpoint, 18181, Instant::now() + Duration::from_secs(3)).unwrap_err();
+            assert_eq!(err.code, Code::ControlUnreachable, "{lost:?}");
+            worker.join().unwrap();
+        }
     }
 
     /// A closed control endpoint cannot confirm a guest that is still running.
@@ -878,6 +908,8 @@ mod tests {
     #[test]
     fn test_direct_stop_keeps_status_failures_visible() {
         for reply in [
+            "garbage".to_owned(),
+            "HTTP?".to_owned(),
             response(200, "not json"),
             response(503, "status unavailable"),
         ] {
