@@ -4,25 +4,78 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Windows user identity and explicit access control for native IPC pipes.
+//! Windows pipe access control, connection deadlines and read readiness.
 
-use std::io;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::io::{self, Read as _};
+use std::os::windows::io::{AsHandle as _, AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::path::Path;
 use std::ptr;
+use std::time::Duration;
 
+use interprocess::ConnectWaitMode;
+use interprocess::local_socket::Stream;
+use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode};
 use interprocess::os::windows::security_descriptor::{
     AsSecurityDescriptorExt as _, BorrowedSecurityDescriptor, SecurityDescriptor,
 };
 use windows_sys::Win32::{
-    Foundation::LocalFree,
+    Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, LocalFree},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         },
         GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::{
+        Pipes::PeekNamedPipe,
+        Threading::{GetCurrentProcess, OpenProcessToken},
+    },
 };
+
+/// Connect to a nonblocking pipe under the caller's connection deadline.
+pub(super) fn connect(path: &Path, timeout: Duration) -> io::Result<Stream> {
+    // The local-socket wrapper does not forward its wait mode on Windows
+    let pipe = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+        path.as_os_str(),
+        ConnectWaitMode::Timeout(timeout),
+    )?;
+    pipe.set_nonblocking(true)?;
+    Ok(Stream::NamedPipe(pipe.into()))
+}
+
+/// Read available bytes while distinguishing an idle pipe from a closed peer.
+pub(super) fn read(socket: &mut Stream, bytes: &mut [u8]) -> io::Result<usize> {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+
+    // interprocess maps ERROR_NO_DATA from an empty PIPE_NOWAIT read to EOF
+    let Stream::NamedPipe(pipe) = socket;
+    let mut available = 0;
+    // SAFETY: the pipe handle stays alive and available is writable. Other outputs are unused.
+    if unsafe {
+        PeekNamedPipe(
+            pipe.as_handle().as_raw_handle(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            &mut available,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED) => Ok(0),
+            _ => Err(err),
+        };
+    }
+    if available == 0 {
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    // This stream has one reader, so the peeked bytes cannot be consumed elsewhere
+    pipe.read(bytes)
+}
 
 /// Read the current user's SID and construct a pipe DACL admitting only that user.
 pub(super) fn identity() -> io::Result<(String, SecurityDescriptor)> {

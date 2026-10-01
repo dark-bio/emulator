@@ -20,10 +20,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 use interprocess::ConnectWaitMode;
+#[cfg(unix)]
+use interprocess::local_socket::ConnectOptions;
 use interprocess::local_socket::{
-    ConnectOptions, GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions,
-    Stream as Socket, prelude::*,
+    GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, Stream as Socket,
+    prelude::*,
 };
 use sha2::{Digest as _, Sha256};
 use tiny_http::{HTTPVersion, Header, Method, Response};
@@ -102,11 +105,14 @@ impl Stream {
         let path = address(name)?;
         #[cfg(unix)]
         verify_directory(path.parent().unwrap())?;
+        #[cfg(unix)]
         let socket = ConnectOptions::new()
             .name(path.to_fs_name::<GenericFilePath>()?)
             .wait_mode(ConnectWaitMode::Timeout(timeout))
             .nonblocking_stream(true)
             .connect_sync()?;
+        #[cfg(windows)]
+        let socket = windows::connect(&path, timeout)?;
         Ok(Self::new(socket, timeout))
     }
 
@@ -153,13 +159,30 @@ fn bounded<T>(deadline: Instant, mut operation: impl FnMut() -> io::Result<T>) -
 
 impl Read for Stream {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        bounded(self.read_deadline.get(), || self.socket.read(bytes))
+        bounded(self.read_deadline.get(), || {
+            #[cfg(unix)]
+            {
+                self.socket.read(bytes)
+            }
+            #[cfg(windows)]
+            {
+                windows::read(&mut self.socket, bytes)
+            }
+        })
     }
 }
 
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        bounded(self.write_deadline.get(), || self.socket.write(bytes))
+        bounded(self.write_deadline.get(), || {
+            let result = self.socket.write(bytes);
+            // A full nonblocking Windows pipe may accept no bytes without an error
+            #[cfg(windows)]
+            if matches!(result, Ok(0)) && !bytes.is_empty() {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            result
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -481,7 +504,7 @@ mod tests {
             .unwrap();
         let mut reply = String::new();
         client.read_to_string(&mut reply).unwrap();
-        assert!(reply.ends_with("\r\n\r\naccepted"));
+        assert!(reply.ends_with("\r\n\r\naccepted"), "{reply:?}");
         worker.join().unwrap();
     }
 
@@ -522,11 +545,96 @@ mod tests {
         let mut stalled = Stream::connect(&name, IO_TIMEOUT).unwrap();
         stalled.write_all(b"GET /").unwrap();
         let started = Instant::now();
-        assert!(matches!(server.recv(), Err(err) if err.kind() == io::ErrorKind::TimedOut));
+        let err = server.recv().err().expect("partial request was accepted");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert!(started.elapsed() < Duration::from_secs(4));
         drop(stalled);
         let mut next = Stream::connect(&name, IO_TIMEOUT).unwrap();
         next.write_all(b"GET /next HTTP/1.0\r\n\r\n").unwrap();
         assert_eq!(server.recv().unwrap().url(), "/next");
+    }
+
+    /// An idle reply times out, then fragmented data and peer closure remain readable.
+    #[test]
+    fn test_idle_reply_resumes_and_preserves_fragments() {
+        let name = format!("t-{}", identity());
+        let server = Server::bind(&name).unwrap();
+        let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
+        client.write_all(b"GET /test HTTP/1.0\r\n\r\n").unwrap();
+        let mut reply = server.recv().unwrap().into_writer();
+
+        // An open pipe with no response bytes is idle, not at EOF
+        client
+            .set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let err = client.read(&mut [0]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+
+        // The first fragment survives an idle interval before the second arrives
+        reply.write_all(b"first").unwrap();
+        client.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        let mut first = [0; 5];
+        client.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"first");
+        client
+            .set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let err = client.read(&mut [0]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+
+        // Closing after the final fragment supplies real EOF
+        reply.write_all(b"last").unwrap();
+        drop(reply);
+        client.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        let mut last = String::new();
+        client.read_to_string(&mut last).unwrap();
+        assert_eq!(last, "last");
+    }
+
+    /// A peer that stops consuming bytes cannot leave a writer blocked indefinitely.
+    #[test]
+    fn test_full_send_buffer_obeys_the_write_deadline() {
+        let name = format!("t-{}", identity());
+        let server = Server::bind(&name).unwrap();
+        let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
+        let _peer = server.listener.accept().unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+
+        // Bound the attempted data while filling the OS buffer without a reader
+        let mut failure = None;
+        for _ in 0..2048 {
+            if let Err(err) = client.write_all(&[0; 8192]) {
+                failure = Some(err);
+                break;
+            }
+        }
+        let err = failure.expect("the send buffer accepted 16 MiB without a reader");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+    }
+
+    /// A busy Windows pipe respects the native client's connection timeout.
+    #[test]
+    #[cfg(windows)]
+    fn test_busy_pipe_connection_is_bounded() {
+        let name = format!("t-{}", identity());
+        let server = Server::bind(&name).unwrap();
+        let _first = Stream::connect(&name, IO_TIMEOUT).unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            finished
+                .send(Stream::connect(&name, Duration::from_millis(40)).map(|_| ()))
+                .unwrap();
+        });
+
+        // Accept only after the deadline check, releasing a regressed waiting client
+        let answer = result.recv_timeout(Duration::from_secs(1));
+        let _peer = server.listener.accept().unwrap();
+        worker.join().unwrap();
+        let err = answer
+            .expect("connection exceeded its deadline")
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
     }
 }

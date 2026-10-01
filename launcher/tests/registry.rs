@@ -77,7 +77,7 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
                         thread::sleep(Duration::from_millis(10));
                     }
                     if worker_accepted
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                             count.checked_sub(1)
                         })
                         .is_ok()

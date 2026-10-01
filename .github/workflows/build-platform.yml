@@ -279,6 +279,10 @@ jobs:
           ARK_EMULATOR_TEST_EXE: ${{ github.workspace }}/target/${{ env.BUILD_PROFILE }}/ark-emulator.exe
         run: cargo test --locked -p cli-tests --features packaged
 
+      - name: Test native IPC
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p cli-tests --features packaged --test ipc
+
       - name: Notarize and staple the disk image
         # The .app is already done, by the build. A .dmg is assessed on its own
         # when a browser hands one to a user, so it needs its own ticket.
