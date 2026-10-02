@@ -21,7 +21,7 @@ pub(crate) fn server() -> (Client, local::Server, TcpListener) {
         Ipv4Addr::LOCALHOST,
         reservation.local_addr().unwrap().port(),
     );
-    let server = local::Server::bind(&registry_api::local_name(address.port())).unwrap();
+    let server = local::Server::bind_test(&registry_api::local_name(address.port())).unwrap();
     (Client { address }, server, reservation)
 }
 
@@ -38,6 +38,7 @@ pub(crate) fn registry(replies: Vec<(&'static str, String)>) -> (Client, JoinHan
             let mut writer = incoming.into_writer();
             writer.write_all(reply.as_bytes()).unwrap();
         }
+        drop(server);
         drop(reservation);
     });
     (client, worker)

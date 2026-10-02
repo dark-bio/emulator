@@ -198,7 +198,10 @@ pub(crate) fn host(addr: SocketAddrV4) -> io::Result<bool> {
     // decides the race.
     let server = Server::from_listener(listener, None::<tiny_http::SslConfig>)
         .map_err(|e| io::Error::other(format!("could not serve on {addr}: {e}")))?;
+    #[cfg(not(test))]
     let native = local::Server::bind(&local_name(addr.port()))?;
+    #[cfg(test)]
+    let native = local::Server::bind_test(&local_name(addr.port()))?;
     let registry = Arc::new(Mutex::new(Registry::new()));
     let public_registry = registry.clone();
     log!("[registry] hosting the registry on {addr}");
@@ -498,8 +501,8 @@ mod tests {
         let address = "localhost";
         let timeout = Duration::from_secs(2);
         let mut stream = local::Stream::connect(server.name(), timeout).unwrap();
-        stream.set_read_timeout(Some(timeout)).unwrap();
-        stream.set_write_timeout(Some(timeout)).unwrap();
+        stream.set_read_timeout(timeout);
+        stream.set_write_timeout(timeout);
         write!(
             stream,
             "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",

@@ -10,6 +10,7 @@ use std::io::{self, Read as _};
 use std::os::windows::io::{AsHandle as _, AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
 use std::ptr;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use interprocess::ConnectWaitMode;
@@ -78,7 +79,24 @@ pub(super) fn read(socket: &mut Stream, bytes: &mut [u8]) -> io::Result<usize> {
 }
 
 /// Read the current user's SID and construct a pipe DACL admitting only that user.
-pub(super) fn identity() -> io::Result<(String, SecurityDescriptor)> {
+pub(super) fn identity() -> io::Result<&'static (String, SecurityDescriptor)> {
+    /// Successful identity lookup retained for the process lifetime.
+    static IDENTITY: OnceLock<(String, SecurityDescriptor)> = OnceLock::new();
+    /// Serializes initialization while allowing failed lookups to be retried.
+    static INITIALIZING: Mutex<()> = Mutex::new(());
+    if let Some(identity) = IDENTITY.get() {
+        return Ok(identity);
+    }
+    let _initializing = INITIALIZING.lock().unwrap();
+    if let Some(identity) = IDENTITY.get() {
+        return Ok(identity);
+    }
+    let identity = read_identity()?;
+    Ok(IDENTITY.get_or_init(|| identity))
+}
+
+/// Read the process token and construct a DACL restricted to its user's SID.
+fn read_identity() -> io::Result<(String, SecurityDescriptor)> {
     let mut token = ptr::null_mut();
     // SAFETY: the output handle is writable and GetCurrentProcess is a valid pseudo-handle
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {

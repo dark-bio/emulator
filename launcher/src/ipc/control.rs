@@ -531,7 +531,7 @@ fn exchange(
     // Partial writes and reads share the deadline instead of restarting it
     let mut unwritten = head.as_bytes();
     while !unwritten.is_empty() {
-        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        stream.set_write_timeout(remaining(deadline)?);
         let written = stream.write(unwritten)?;
         if written == 0 {
             return Err(io::Error::from(io::ErrorKind::WriteZero).into());
@@ -541,7 +541,7 @@ fn exchange(
     let mut raw = Vec::new();
     let mut buffer = [0; 1024];
     loop {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        stream.set_read_timeout(remaining(deadline)?);
         let count = stream.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -726,9 +726,7 @@ mod tests {
         ] {
             let mut stream =
                 Stream::connect(&control.endpoint.name(), Duration::from_secs(1)).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
+            stream.set_read_timeout(Duration::from_secs(1));
             write!(stream, "POST /v1/stop HTTP/1.0\r\nHost: localhost\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
             let mut reply = String::new();
             stream.read_to_string(&mut reply).unwrap();
@@ -1383,9 +1381,7 @@ mod tests {
             (format!("{INSTANCE_HEADER}: {}\r\n", endpoint.id), "", 400),
         ] {
             let mut stream = Stream::connect(&endpoint.name(), Duration::from_secs(1)).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
+            stream.set_read_timeout(Duration::from_secs(1));
             write!(stream, "POST /v1/button/press HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();

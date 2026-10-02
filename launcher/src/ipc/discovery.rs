@@ -324,8 +324,8 @@ fn request(
     let mut stream = connect(addr, deadline)?;
     let mut exchange = || -> Result<Vec<u8>, Failure> {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        stream.set_read_timeout(Some(remaining))?;
-        stream.set_write_timeout(Some(remaining))?;
+        stream.set_read_timeout(remaining);
+        stream.set_write_timeout(remaining);
 
         let mut head = format!(
             "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\

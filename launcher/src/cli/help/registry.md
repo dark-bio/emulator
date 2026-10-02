@@ -24,10 +24,12 @@ endpoint is named `c-ID`, where ID is its advertised launch id.
 
 On Unix, these are filesystem sockets under `/tmp/ark-emulator-UID/`, where
 UID is the effective user id. The directory has mode 0700 and sockets have
-mode 0600. Persistent lock files protect live listeners during stale socket
-recovery. On Windows, they are named pipes under
-`\\.\pipe\ark-emulator-SID-NAME`, restricted to the current user's SID and
-rejecting remote clients. Processes running as that user may connect.
+mode 0600. Persistent registry lock files protect live listeners during stale
+socket recovery. Unique control endpoints need no lock file. Sockets are
+removed on listener drop and best-effort on normal process exit. On Windows,
+they are named pipes under `\\.\pipe\ark-emulator-SID-NAME`, restricted to the
+current user's SID and rejecting remote clients. Processes running as that
+user may connect.
 
 The browser port has one owner across OS users. If it is held without a
 private endpoint for the current user, close the other user's emulators,

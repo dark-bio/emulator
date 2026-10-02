@@ -280,7 +280,6 @@ jobs:
         run: cargo test --locked -p cli-tests --features packaged
 
       - name: Test native IPC
-        if: runner.os != 'Windows'
         run: cargo test --locked -p cli-tests --features packaged --test ipc
 
       - name: Notarize and staple the disk image
