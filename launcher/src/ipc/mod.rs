@@ -8,6 +8,7 @@
 
 pub(crate) mod control;
 pub(crate) mod discovery;
+mod http;
 pub(crate) mod local;
 pub(crate) mod registry;
 

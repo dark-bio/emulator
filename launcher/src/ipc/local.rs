@@ -14,7 +14,7 @@
 use std::cell::Cell;
 #[cfg(unix)]
 use std::fs::File;
-use std::io::{self, BufRead as _, BufReader, Cursor, Read, Write};
+use std::io::{self, BufRead as _, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::{
     io::{AsFd as _, AsRawFd as _},
@@ -560,7 +560,7 @@ pub(crate) struct Request {
     /// Headers including repeated fields for application validation.
     headers: Vec<Header>,
     /// Complete request body, bounded before allocation.
-    body: Cursor<Vec<u8>>,
+    body: Vec<u8>,
     /// Connection retained until the response is written.
     stream: Stream,
 }
@@ -632,7 +632,7 @@ impl Request {
             method,
             path,
             headers,
-            body: Cursor::new(body),
+            body,
             stream: reader.into_inner(),
         })
     }
@@ -661,13 +661,9 @@ impl Request {
     pub(crate) fn headers(&self) -> &[Header] {
         &self.headers
     }
-    /// Return the bounded body length.
-    pub(crate) fn body_length(&self) -> Option<usize> {
-        Some(self.body.get_ref().len())
-    }
-    /// Borrow the already bounded request body.
-    pub(crate) fn as_reader(&mut self) -> &mut dyn Read {
-        &mut self.body
+    /// Borrow the complete request body, bounded before allocation.
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
     }
     /// Send an HTTP response and release the native connection.
     pub(crate) fn respond<R: Read>(self, response: Response<R>) -> io::Result<()> {

@@ -24,7 +24,7 @@
 //! again after selecting targets.
 
 use std::collections::HashMap;
-use std::io::{self, Cursor, Read as _};
+use std::io::{self, Cursor};
 use std::net::{SocketAddrV4, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -44,12 +44,6 @@ pub(crate) const REGISTRY_PORT: u16 = 18180;
 /// Schema version of registry responses.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
-/// Protocol marker required on native registry writes.
-pub(super) const WRITE_HEADER: &str = "X-Ark-Registry";
-
-/// Fixed protocol value; access control belongs to the native transport.
-pub(super) const WRITE_HEADER_VALUE: &str = "1";
-
 /// How long an entry survives without being refreshed. Comfortably more than
 /// the heartbeat interval in [`super::discovery`], so a launcher that is busy
 /// or beating slowly is not dropped between two of its beats.
@@ -58,10 +52,6 @@ const ENTRY_TTL: Duration = Duration::from_secs(15);
 /// How often the serve loop wakes up with no request to handle, which is what
 /// bounds how late an entry's expiry can be.
 const TICK: Duration = Duration::from_millis(500);
-
-/// Largest request body the registry will read. Registrations are a few hundred
-/// bytes; anything beyond this is not one of ours.
-const MAX_BODY: usize = 8 * 1024;
 
 /// A running emulator, as published to whoever asks. Also the body a launcher
 /// registers itself with, so the two never drift apart.
@@ -270,49 +260,12 @@ fn serve(server: &local::Server, registry: &Mutex<Registry>) {
 }
 
 /// Route a native request without exposing mutations on the browser listener.
-fn handle(mut request: Request, registry: &mut Registry) {
+fn handle(request: Request, registry: &mut Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
 
-    // Refuse browser writes before parsing a body or changing registry state
-    if matches!(method, Method::Post | Method::Delete) {
-        let has_write_header = request
-            .headers()
-            .iter()
-            .filter(|header| header.field.equiv(WRITE_HEADER))
-            .map(|header| header.value.as_str())
-            .eq([WRITE_HEADER_VALUE]);
-        let refusal = if request
-            .body_length()
-            .is_some_and(|length| length > MAX_BODY)
-        {
-            Some(text(StatusCode(413), "body too large"))
-        } else if request
-            .headers()
-            .iter()
-            .any(|header| header.field.equiv("Origin"))
-        {
-            Some(text(StatusCode(403), "browser writes are not accepted"))
-        } else if !has_write_header {
-            Some(text(
-                StatusCode(403),
-                &format!("registry writes require {WRITE_HEADER}: {WRITE_HEADER_VALUE}"),
-            ))
-        } else {
-            None
-        };
-        if let Some(response) = refusal {
-            respond(request, response);
-            return;
-        }
-    }
-
     let response = match (&method, path.as_str()) {
-        // Preflight, answered for any path so a consumer probing a route this
-        // build does not have can still read the 404.
-        (Method::Options, _) => empty(StatusCode(204)),
-
         (Method::Get, "/v1/instances") => {
             let listing = registry.listing();
             match serde_json::to_vec(&listing) {
@@ -324,15 +277,13 @@ fn handle(mut request: Request, registry: &mut Registry) {
             }
         }
 
-        (Method::Post, "/v1/instances") => match read_body(&mut request) {
-            Ok(body) => match serde_json::from_slice::<Instance>(&body) {
-                Ok(instance) => {
-                    registry.upsert(instance);
-                    empty(StatusCode(204))
-                }
-                Err(e) => text(StatusCode(400), &format!("malformed body: {e}")),
-            },
-            Err(response) => response,
+        (Method::Post, "/v1/instances") => match serde_json::from_slice::<Instance>(request.body())
+        {
+            Ok(instance) => {
+                registry.upsert(instance);
+                empty(StatusCode(204))
+            }
+            Err(e) => text(StatusCode(400), &format!("malformed body: {e}")),
         },
 
         (Method::Delete, _) => match path.strip_prefix("/v1/instances/") {
@@ -349,27 +300,7 @@ fn handle(mut request: Request, registry: &mut Registry) {
         _ => text(StatusCode(404), "no such route"),
     };
 
-    respond(request, response);
-}
-
-/// Read a request's body, capped at [`MAX_BODY`]. Borrows rather than consumes
-/// so that a body which fails to read is still something we can answer.
-fn read_body(request: &mut Request) -> Result<Vec<u8>, Response<Cursor<Vec<u8>>>> {
-    if request.body_length().is_some_and(|len| len > MAX_BODY) {
-        return Err(text(StatusCode(413), "body too large"));
-    }
-    let mut body = Vec::new();
-    match request
-        .as_reader()
-        .take(MAX_BODY as u64)
-        .read_to_end(&mut body)
-    {
-        Ok(_) => Ok(body),
-        Err(e) => Err(text(
-            StatusCode(400),
-            &format!("could not read the body: {e}"),
-        )),
-    }
+    let _ = request.respond(response);
 }
 
 /// Cross-origin grants carried only by browser discovery responses.
@@ -414,15 +345,10 @@ fn empty(status: StatusCode) -> Response<Cursor<Vec<u8>>> {
     Response::from_data(Vec::new()).with_status_code(status)
 }
 
-/// Answer a native request without granting browser access.
-fn respond(request: Request, response: Response<Cursor<Vec<u8>>>) {
-    let _ = request.respond(response);
-}
-
 /// Registry lifecycle and HTTP browser guards.
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
     use std::net::{Ipv4Addr, TcpStream};
 
     use super::*;
@@ -524,65 +450,28 @@ mod tests {
         parse_reply(&response)
     }
 
-    /// Missing guards and browser origins cannot publish or withdraw entries.
+    /// Invalid JSON cannot replace a published entry.
     #[test]
-    fn test_rejected_writes_preserve_entries() {
-        // Publish through HTTP so every rejected request starts from a real entry
+    fn test_invalid_writes_preserve_entries() {
         let mut registry = Registry::new();
-        let allowed = "X-Ark-Registry: 1\r\n";
         assert_eq!(
-            exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE).status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
         );
         let before = exchange(&mut registry, "GET", "/v1/instances", "", "").body;
-
-        // Check each write, including simple POSTs that need no browser preflight
-        for (case, headers) in [
-            ("missing", ""),
-            ("wrong", "X-Ark-Registry: 0\r\n"),
-            ("empty", "X-Ark-Registry:\r\n"),
-            ("repeated", "X-Ark-Registry: 1\r\nx-ark-registry: 1\r\n"),
-            ("origin only", "Origin: https://example.com\r\n"),
-            (
-                "origin",
-                "X-Ark-Registry: 1\r\noRiGiN: https://example.com\r\n",
-            ),
-            ("null origin", "X-Ark-Registry: 1\r\nOrigin: null\r\n"),
-            ("empty origin", "X-Ark-Registry: 1\r\nOrigin:\r\n"),
-        ] {
-            for (method, path, body) in [
-                (
-                    "POST",
-                    "/v1/instances",
-                    r#"{"port":18181,"disk":"forged.ark","disk_id":"ffff","ready":false}"#,
-                ),
-                (
-                    "POST",
-                    "/v1/instances",
-                    r#"{"port":18182,"disk":"extra.ark","disk_id":"ffff","ready":false}"#,
-                ),
-                ("POST", "/v1/instances", "not json"),
-                ("DELETE", "/v1/instances/18181", ""),
-            ] {
-                let reply = exchange(&mut registry, method, path, headers, body);
-                assert_eq!(reply.status, 403, "{case} {method} {path} {body}");
-                assert_eq!(
-                    exchange(&mut registry, "GET", "/v1/instances", "", "").body,
-                    before,
-                    "{case} {method} {path} {body}"
-                );
-                assert_eq!(
-                    exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE).status,
-                    204,
-                    "{case} {method} {path} {body}"
-                );
-            }
-        }
+        assert_eq!(
+            exchange(&mut registry, "POST", "/v1/instances", "", "not json").status,
+            400
+        );
+        assert_eq!(
+            exchange(&mut registry, "GET", "/v1/instances", "", "").body,
+            before
+        );
     }
 
-    /// Oversized write bodies fail before the header guard is checked.
+    /// The transport rejects oversized bodies before they can update the registry.
     #[test]
-    fn test_write_size_limit_precedes_the_browser_guard() {
+    fn test_oversized_writes_leave_the_registry_unchanged() {
         let mut registry = Registry::new();
         let reply = exchange(
             &mut registry,
@@ -599,19 +488,24 @@ mod tests {
         );
     }
 
-    /// Guarded native writes publish, refresh and withdraw entries.
+    /// Native writes publish, refresh and withdraw entries without browser guards.
     #[test]
-    fn test_guarded_writes_keep_the_registry_lifecycle() {
-        // Header names are case-insensitive on every mutating route
+    fn test_native_writes_keep_the_registry_lifecycle() {
         let mut registry = Registry::new();
-        let allowed = "x-aRk-ReGiStRy: 1\r\n";
         assert_eq!(
-            exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE).status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
         );
         let updated = r#"{"port":18181,"disk":"renamed.ark","disk_id":"0123abcd","ready":false}"#;
         assert_eq!(
-            exchange(&mut registry, "POST", "/v1/instances", allowed, updated).status,
+            exchange(
+                &mut registry,
+                "POST",
+                "/v1/instances",
+                "Origin: https://example.com\r\n",
+                updated
+            )
+            .status,
             204
         );
         let listing = exchange(&mut registry, "GET", "/v1/instances", "", "");
@@ -622,7 +516,7 @@ mod tests {
         // Withdrawal remains idempotent, and the same launcher can publish again
         for _ in 0..2 {
             assert_eq!(
-                exchange(&mut registry, "DELETE", "/v1/instances/18181", allowed, "").status,
+                exchange(&mut registry, "DELETE", "/v1/instances/18181", "", "").status,
                 204
             );
         }
@@ -632,8 +526,15 @@ mod tests {
             serde_json::json!({"version": 1, "instances": []})
         );
         assert_eq!(
-            exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE).status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
+        );
+        let preflight = exchange(&mut registry, "OPTIONS", "/v1/instances", "", "");
+        assert_eq!(preflight.status, 404);
+        assert!(
+            !preflight
+                .headers
+                .contains_key("access-control-allow-origin")
         );
     }
 
@@ -641,9 +542,8 @@ mod tests {
     #[test]
     fn test_registry_rejects_stop_requests() {
         let mut registry = Registry::new();
-        let allowed = "X-Ark-Registry: 1\r\n";
         assert_eq!(
-            exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE).status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
         );
         let before = exchange(&mut registry, "GET", "/v1/instances", "", "").body;
@@ -656,7 +556,7 @@ mod tests {
             "/v1/stop",
         ] {
             assert_eq!(
-                exchange(&mut registry, "POST", path, allowed, "").status,
+                exchange(&mut registry, "POST", path, "", "").status,
                 404,
                 "{path}"
             );
@@ -665,26 +565,19 @@ mod tests {
                 before,
                 "{path}"
             );
-            let heartbeat = exchange(&mut registry, "POST", "/v1/instances", allowed, INSTANCE);
+            let heartbeat = exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE);
             assert_eq!(heartbeat.status, 204, "{path}");
             assert!(heartbeat.body.is_empty(), "{path}");
         }
     }
 
-    /// Browser reads stay open while preflight never grants the write header.
+    /// Browser discovery grants reads while mutation routes remain absent.
     #[test]
     fn test_browser_reads_and_preflights_never_authorize_writes() {
         // Read a populated registry with an ordinary browser origin
         let mut registry = Registry::new();
         assert_eq!(
-            exchange(
-                &mut registry,
-                "POST",
-                "/v1/instances",
-                "X-Ark-Registry: 1\r\n",
-                INSTANCE
-            )
-            .status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
         );
         let listing = public_exchange(
@@ -703,9 +596,9 @@ mod tests {
         // Requested methods and headers never get reflected into the grant
         for (method, path, requested_headers) in [
             ("GET", "/v1/instances", ""),
-            ("POST", "/v1/instances", "content-type, x-ark-registry"),
-            ("DELETE", "/v1/instances/18181", "X-Ark-Registry"),
-            ("POST", "/unknown", "x-ark-registry"),
+            ("POST", "/v1/instances", "content-type, x-custom"),
+            ("DELETE", "/v1/instances/18181", "x-custom"),
+            ("POST", "/unknown", "x-custom"),
         ] {
             let headers = format!(
                 "Origin: https://example.com\r\nAccess-Control-Request-Method: {method}\r\nAccess-Control-Request-Headers: {requested_headers}\r\nAccess-Control-Request-Private-Network: true\r\n"
@@ -738,19 +631,12 @@ mod tests {
             listing.body
         );
         assert_eq!(
-            exchange(
-                &mut registry,
-                "POST",
-                "/v1/instances",
-                "X-Ark-Registry: 1\r\n",
-                INSTANCE
-            )
-            .status,
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
             204
         );
     }
 
-    /// TCP accepts discovery only, even with native headers and a known launch id.
+    /// TCP accepts discovery only and validates its Host header.
     #[test]
     fn test_browser_listener_has_no_mutation_routes() {
         let mut registry = Registry::new();
@@ -767,7 +653,7 @@ mod tests {
                 &registry,
                 method,
                 path,
-                "X-Ark-Registry: 1\r\nX-Ark-Emulator: known\r\n",
+                "Origin: https://example.com\r\n",
                 None,
             );
             assert_eq!(response.status, 404, "{method} {path}");

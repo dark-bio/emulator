@@ -160,7 +160,7 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
     let registry = thread::spawn(move || {
         let mut instances = std::collections::BTreeMap::new();
         loop {
-            let mut request = server
+            let request = server
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .unwrap();
@@ -177,7 +177,7 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
                 }
                 "POST" => {
                     let instance: serde_json::Value =
-                        serde_json::from_reader(request.as_reader()).unwrap();
+                        serde_json::from_slice(request.body()).unwrap();
                     assert!(instance["control"]["id"].is_string());
                     let fresh = instances
                         .insert(instance["port"].as_u64().unwrap(), instance)

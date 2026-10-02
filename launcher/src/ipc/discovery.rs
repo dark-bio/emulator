@@ -18,7 +18,7 @@
 //! the launcher tries to become the host and republishes itself either way.
 
 use std::fmt::Write as _;
-use std::io::{self, Read as _, Write as _};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
-use super::local;
 use super::registry::{self, Instance, REGISTRY_PORT, SCHEMA_VERSION};
+use super::{http, local};
 use crate::diagnostics::{log, trace};
 use crate::runtime::hardware::Controller;
 
@@ -321,53 +321,20 @@ fn request(
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, Failure> {
     let deadline = Instant::now() + TIMEOUT;
-    let mut stream = connect(addr, deadline)?;
-    let mut exchange = || -> Result<Vec<u8>, Failure> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        stream.set_read_timeout(remaining);
-        stream.set_write_timeout(remaining);
-
-        let mut head = format!(
-            "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\
-             Content-Length: {}\r\n",
-            body.map_or(0, <[u8]>::len)
-        );
-        if body.is_some() {
-            head.push_str("Content-Type: application/json\r\n");
-        }
-        if matches!(method, "POST" | "DELETE") {
-            head.push_str(&format!(
-                "{}: {}\r\n",
-                registry::WRITE_HEADER,
-                registry::WRITE_HEADER_VALUE
-            ));
-        }
-        head.push_str("\r\n");
-
-        stream.write_all(head.as_bytes())?;
-        if let Some(body) = body {
-            stream.write_all(body)?;
-        }
-        stream.flush()?;
-
-        let mut raw = Vec::new();
-        (&mut stream).take(MAX_RESPONSE + 1).read_to_end(&mut raw)?;
-        if raw.len() as u64 > MAX_RESPONSE {
-            return Err(Failure::Invalid(anyhow::anyhow!(
-                "the registry's answer was too large"
-            )));
-        }
-        let answer = split_response(&raw);
-        trace!(
-            "[discovery] {method} {path}: {}",
-            match &answer {
-                Ok(body) => format!("{} bytes", body.len()),
-                Err(err) => err.to_string(),
-            }
-        );
-        answer
-    };
-    exchange()
+    let stream = connect(addr, deadline)?;
+    let reply = http::exchange(stream, method, path, &[], body, deadline, MAX_RESPONSE)?;
+    trace!(
+        "[discovery] {method} {path}: HTTP {}, {} bytes",
+        reply.status,
+        reply.body.len()
+    );
+    if !(200..300).contains(&reply.status) {
+        return Err(Failure::Http {
+            status: reply.status,
+            reason: String::from_utf8_lossy(&reply.body).trim().to_owned(),
+        });
+    }
+    Ok(reply.body)
 }
 
 /// Wait for a winning launcher's local bind without falling back to HTTP writes.
@@ -399,56 +366,11 @@ fn connect(addr: SocketAddrV4, deadline: Instant) -> Result<local::Stream, Failu
     }
 }
 
-/// Pull the body out of a response, failing on any status the registry uses to
-/// say no. The only server on the other end is [`super::registry`], which
-/// answers with a status line, a few headers and an unencoded body.
-fn split_response(raw: &[u8]) -> Result<Vec<u8>, Failure> {
-    // A host disappearing before its reply can be retried after takeover
-    if raw.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "the registry closed before replying",
-        )
-        .into());
-    }
-    let split = match raw.windows(4).position(|window| window == b"\r\n\r\n") {
-        Some(split) => split,
-        None if raw.starts_with(b"HTTP/1.") || b"HTTP/1.".starts_with(raw) => {
-            // Host exit can interrupt any write of the response headers
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the registry closed during its reply headers",
-            )
-            .into());
-        }
-        None => {
-            return Err(Failure::Invalid(anyhow::anyhow!(
-                "the registry's answer had no header block"
-            )));
-        }
-    };
-    let head = String::from_utf8_lossy(&raw[..split]);
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .filter(|status| (100..=599).contains(status))
-        .context("the registry's answer had no valid status")
-        .map_err(Failure::Invalid)?;
-    if !(200..300).contains(&status) {
-        return Err(Failure::Http {
-            status,
-            reason: String::from_utf8_lossy(&raw[split + 4..]).trim().to_owned(),
-        });
-    }
-    Ok(raw[split + 4..].to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::testing::{registry as peer, response};
+    use std::io::{Read as _, Write as _};
     use std::thread;
 
     /// A publish refusal reaches the launcher with the status and server explanation.
@@ -456,7 +378,7 @@ mod tests {
     fn test_registration_refusal_is_permanent_and_preserves_the_reason() {
         let (client, worker) = peer(vec![(
             "POST",
-            response(403, "registry writes require X-Ark-Registry: 1"),
+            response(403, "registration denied by test registry"),
         )]);
         let instance: Instance = serde_json::from_str(
             r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
@@ -465,10 +387,10 @@ mod tests {
         let err = client.publish(&instance).unwrap_err();
         assert!(!err.retryable());
         assert!(
-            matches!(&err, Failure::Http { status: 403, reason } if reason == "registry writes require X-Ark-Registry: 1")
+            matches!(&err, Failure::Http { status: 403, reason } if reason == "registration denied by test registry")
         );
         assert!(err.to_string().contains("403"));
-        assert!(err.to_string().contains("X-Ark-Registry: 1"));
+        assert!(err.to_string().contains("registration denied"));
         worker.join().unwrap();
     }
 
@@ -520,7 +442,7 @@ mod tests {
         .unwrap();
         let mut reply = Vec::new();
         browser.read_to_end(&mut reply).unwrap();
-        let public = parse_listing(&split_response(&reply).unwrap()).unwrap();
+        let public = parse_listing(&http::parse_response(&reply).unwrap().body).unwrap();
         assert_eq!(public.len(), 1);
         assert_eq!(public[0].disk, listing[0].disk);
     }
@@ -580,6 +502,10 @@ mod tests {
             response(503, "registry unavailable"),
             response(200, "not json"),
             response(200, r#"{"version":999,"instances":[]}"#),
+            "garbage".to_owned(),
+            "HTTP?".to_owned(),
+            "HTTP/1.0 invalid\r\n\r\n".to_owned(),
+            "HTTP/1.0 999 Unknown\r\n\r\n".to_owned(),
         ] {
             let (client, worker) = peer(vec![("GET", reply.clone())]);
             let err = client.list().unwrap_err();
@@ -606,108 +532,6 @@ mod tests {
         assert!(matches!(&err, Failure::Transport(cause)
             if matches!(cause.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)));
         assert!(!err.retryable());
-    }
-
-    /// Native clients send the protocol marker for every write and leave reads open.
-    #[test]
-    fn test_registry_requests_carry_the_write_guard() {
-        // Inspect native requests without a running emulator
-        let (client, server, _reservation) = crate::ipc::testing::server();
-        let address = client.address;
-        let worker = thread::spawn(move || {
-            for method in ["GET", "POST", "DELETE"] {
-                let incoming = server
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(incoming.method().as_str(), method);
-                let guards: Vec<_> = incoming
-                    .headers()
-                    .iter()
-                    .filter(|header| header.field.equiv("X-Ark-Registry"))
-                    .map(|header| header.value.as_str())
-                    .collect();
-                if method == "GET" {
-                    assert!(guards.is_empty());
-                } else {
-                    assert_eq!(guards, ["1"]);
-                }
-                assert!(
-                    !incoming
-                        .headers()
-                        .iter()
-                        .any(|header| header.field.equiv("Origin"))
-                );
-                incoming.respond(tiny_http::Response::empty(204)).unwrap();
-            }
-        });
-
-        // Cover listing, publication and withdrawal through the shared client
-        for (method, path, body) in [
-            ("GET", "/v1/instances", None),
-            (
-                "POST",
-                "/v1/instances",
-                Some(
-                    br#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":true}"#
-                        .as_slice(),
-                ),
-            ),
-            ("DELETE", "/v1/instances/18181", None),
-        ] {
-            request(address, method, path, body)
-                .unwrap_or_else(|err| panic!("{method} {path}: {err}"));
-        }
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn test_a_body_is_split_off_the_headers() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"a\":1}";
-        assert_eq!(split_response(raw).unwrap(), b"{\"a\":1}");
-    }
-
-    #[test]
-    fn test_an_empty_body_is_not_an_error() {
-        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
-        assert!(split_response(raw).unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_a_refusal_is_an_error() {
-        let raw = b"HTTP/1.1 400 Bad Request\r\n\r\nmalformed body";
-        let err = split_response(raw).unwrap_err().to_string();
-        assert!(err.contains("400"), "{err}");
-    }
-
-    /// Every incomplete header fragment remains eligible for host takeover.
-    #[test]
-    fn test_truncated_reply_headers_are_retryable() {
-        let reply = response(204, "");
-        for end in 0..reply.len() {
-            let err = split_response(&reply.as_bytes()[..end]).unwrap_err();
-            assert!(
-                matches!(&err, Failure::Transport(cause)
-                if cause.kind() == io::ErrorKind::UnexpectedEof),
-                "{end}"
-            );
-            assert!(err.retryable(), "{end}");
-        }
-    }
-
-    /// Malformed replies remain permanent failures instead of triggering takeover.
-    #[test]
-    fn test_malformed_reply_headers_are_permanent() {
-        for reply in [
-            "garbage",
-            "HTTP?",
-            "HTTP/1.0 invalid\r\n\r\n",
-            "HTTP/1.0 999 Unknown\r\n\r\n",
-        ] {
-            let err = split_response(reply.as_bytes()).unwrap_err();
-            assert!(matches!(err, Failure::Invalid(_)), "{reply}");
-            assert!(!err.retryable(), "{reply}");
-        }
     }
 
     /// A listing of another version is refused whole, since nothing in it can

@@ -14,7 +14,7 @@
 //! Stop requests acknowledge acceptance before scheduling shutdown. Status
 //! remains available during shutdown without consulting the hardware worker.
 
-use std::io::{self, Read as _, Write as _};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Response, StatusCode};
 
+use super::http::{self, Response as Reply};
 use super::local::{self, Request, Server, Stream};
 use crate::error::{Code, Error};
 use crate::runtime::hardware::{ButtonOutcome, ButtonSource, Controller};
@@ -33,8 +34,6 @@ use crate::runtime::hardware::{ButtonOutcome, ButtonSource, Controller};
 const MAX_RESPONSE: u64 = 4096;
 /// Delay between direct shutdown status checks.
 const STOP_POLL: Duration = Duration::from_millis(100);
-/// Header required on every request, including reads.
-const INSTANCE_HEADER: &str = "X-Ark-Emulator";
 /// Connection generation observed before a button input was requested.
 const GENERATION_HEADER: &str = "X-Ark-Generation";
 
@@ -101,7 +100,6 @@ impl Control {
         let worker = {
             let server = server.clone();
             let stopping = stopping.clone();
-            let endpoint = endpoint.clone();
             thread::Builder::new()
                 .name("control".to_owned())
                 .spawn(move || {
@@ -109,7 +107,7 @@ impl Control {
                     while !stopping.load(Ordering::SeqCst) {
                         match server.recv() {
                             Ok(request) if !stopping.load(Ordering::SeqCst) => {
-                                if handle(request, &endpoint, &hardware, shutdown.is_none())
+                                if handle(request, &hardware, shutdown.is_none())
                                     && let Some(shutdown) = shutdown.take()
                                 {
                                     // Keep status available while withdrawal or guest exit waits
@@ -141,9 +139,8 @@ impl Drop for Control {
     }
 }
 
-/// Answer one request without accepting bodies or cross-origin browser access.
-fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller, stopping: bool) -> bool {
-    // Read headers without consuming a request body
+/// Answer one bodyless request received on this launch's private endpoint.
+fn handle(request: Request, hardware: &Controller, stopping: bool) -> bool {
     let header = |name: &str| {
         request
             .headers()
@@ -151,28 +148,10 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller, stopping
             .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(name))
             .map(|header| header.value.as_str())
     };
-    let (status, body) = if request.body_length().is_some_and(|length| length != 0)
-        || header("Transfer-Encoding").is_some()
-    {
+    let (status, body) = if !request.body().is_empty() {
         (
             413,
             serde_json::json!({"error": "control requests have no body"}),
-        )
-    } else if header("Origin").is_some() {
-        (
-            403,
-            serde_json::json!({"error": "browser requests are not accepted"}),
-        )
-    } else if !request
-        .headers()
-        .iter()
-        .filter(|header| header.field.equiv(INSTANCE_HEADER))
-        .map(|header| header.value.as_str())
-        .eq([endpoint.id.as_str()])
-    {
-        (
-            412,
-            serde_json::json!({"error": "the launcher no longer matches discovery"}),
         )
     } else {
         // Bind every input to the connection observed by its caller
@@ -236,7 +215,7 @@ fn handle(request: Request, endpoint: &Endpoint, hardware: &Controller, stopping
         }
     };
 
-    // Do not grant cross-origin access to this control endpoint
+    // Report the outcome after the hardware worker has handled the input
     let response = Response::from_data(serde_json::to_vec(&body).unwrap())
         .with_status_code(StatusCode(status))
         .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
@@ -354,12 +333,6 @@ pub(crate) fn stop(endpoint: &Endpoint, guest_port: u16, deadline: Instant) -> R
                     return Ok(());
                 }
             }
-            Err(Failure::Http { status: 412, .. }) => {
-                // A replacement launcher must never receive another stop from this command
-                if guest_gone(guest_port, deadline)? {
-                    return Ok(());
-                }
-            }
             Err(err) if err.connection_lost() => {}
             Err(err) => return Err(err.error()),
         }
@@ -387,14 +360,6 @@ fn guest_gone(port: u16, deadline: Instant) -> Result<bool, Error> {
     }
 }
 
-/// A complete HTTP reply from the selected launcher.
-struct Reply {
-    /// Successful HTTP status code, interpreted by the caller's route.
-    status: u16,
-    /// Bounded, unencoded response body.
-    body: Vec<u8>,
-}
-
 /// Control failures retaining connection loss for shutdown confirmation.
 #[derive(Debug)]
 enum Failure {
@@ -407,7 +372,7 @@ enum Failure {
         /// Error extracted from JSON or a plain-text response.
         reason: String,
     },
-    /// Invalid endpoint metadata or response framing.
+    /// Invalid endpoint metadata or response semantics.
     Invalid(&'static str),
 }
 
@@ -514,97 +479,29 @@ fn exchange(
     generation: Option<u64>,
     deadline: Instant,
 ) -> Result<Reply, Failure> {
-    // Validate discovered values before copying them into a socket or HTTP header
+    // Validate discovered values before using them in a socket name
     if endpoint.id.len() != 64 || !endpoint.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Failure::Invalid("invalid emulator control endpoint"));
     }
-    let mut stream = Stream::connect(&endpoint.name(), remaining(deadline)?)?;
-    let mut head = format!(
-        "{method} {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n{INSTANCE_HEADER}: {}\r\n",
-        endpoint.id
-    );
-    if let Some(generation) = generation {
-        head.push_str(&format!("{GENERATION_HEADER}: {generation}\r\n"));
+    let stream = Stream::connect(&endpoint.name(), remaining(deadline)?)?;
+    let generation = generation.map(|value| value.to_string());
+    let headers: Vec<_> = generation
+        .as_deref()
+        .map(|value| (GENERATION_HEADER, value))
+        .into_iter()
+        .collect();
+    let reply = http::exchange(stream, method, path, &headers, None, deadline, MAX_RESPONSE)?;
+    if (200..300).contains(&reply.status) {
+        return Ok(reply);
     }
-    head.push_str("\r\n");
-
-    // Partial writes and reads share the deadline instead of restarting it
-    let mut unwritten = head.as_bytes();
-    while !unwritten.is_empty() {
-        stream.set_write_timeout(remaining(deadline)?);
-        let written = stream.write(unwritten)?;
-        if written == 0 {
-            return Err(io::Error::from(io::ErrorKind::WriteZero).into());
-        }
-        unwritten = &unwritten[written..];
-    }
-    let mut raw = Vec::new();
-    let mut buffer = [0; 1024];
-    loop {
-        stream.set_read_timeout(remaining(deadline)?);
-        let count = stream.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        raw.extend_from_slice(&buffer[..count]);
-        if raw.len() as u64 > MAX_RESPONSE {
-            return Err(Failure::Invalid("emulator control returned too much data"));
-        }
-    }
-
-    // An absent reply is uncertain delivery; malformed replies remain errors
-    if raw.is_empty() {
-        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-    }
-    let split = match raw.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-        Some(split) => split,
-        None if raw.starts_with(b"HTTP/1.") || b"HTTP/1.".starts_with(&raw) => {
-            // Launcher exit can interrupt even the first write of the status line
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-        }
-        None => {
-            return Err(Failure::Invalid(
-                "emulator control returned no HTTP headers",
-            ));
-        }
-    };
-    let head = String::from_utf8_lossy(&raw[..split]);
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .filter(|status| (100..=599).contains(status))
-        .ok_or(Failure::Invalid(
-            "emulator control returned no valid HTTP status",
-        ))?;
-    let body = &raw[split + 4..];
-    if (200..300).contains(&status) {
-        if let Some(length) = head.lines().skip(1).find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("Content-Length")
-                .then_some(value.trim())
-        }) {
-            let length = length
-                .parse::<usize>()
-                .map_err(|_| Failure::Invalid("invalid control response length"))?;
-            if body.len() < length {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-            }
-            if body.len() != length {
-                return Err(Failure::Invalid("incorrect control response length"));
-            }
-        }
-        return Ok(Reply {
-            status,
-            body: body.to_vec(),
-        });
-    }
-    let reason = serde_json::from_slice::<serde_json::Value>(body)
+    let reason = serde_json::from_slice::<serde_json::Value>(&reply.body)
         .ok()
         .and_then(|body| body["error"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_owned());
-    Err(Failure::Http { status, reason })
+        .unwrap_or_else(|| String::from_utf8_lossy(&reply.body).trim().to_owned());
+    Err(Failure::Http {
+        status: reply.status,
+        reason,
+    })
 }
 
 #[cfg(test)]
@@ -612,6 +509,7 @@ mod tests {
     use super::*;
     use crate::ipc::testing::response;
     use serde_json::{Value, json};
+    use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::time::Instant;
@@ -626,7 +524,6 @@ mod tests {
             id: local::identity(),
         };
         let server = Server::bind(&endpoint.name()).unwrap();
-        let id = endpoint.id.clone();
         let worker = thread::spawn(move || {
             for (path, reply) in replies {
                 let request = server
@@ -637,13 +534,6 @@ mod tests {
                 assert_eq!(
                     request.method().as_str(),
                     if path == "/v1/stop" { "POST" } else { "GET" }
-                );
-                assert!(
-                    request
-                        .headers()
-                        .iter()
-                        .any(|header| header.field.equiv("X-Ark-Emulator")
-                            && header.value.as_str() == id)
                 );
                 assert!(
                     !request
@@ -702,49 +592,24 @@ mod tests {
         release.send(()).unwrap();
     }
 
-    /// Direct stop rejects browsers, bodies, duplicate guards and stale launch ids.
+    /// A stop request with a body cannot initiate shutdown.
     #[test]
-    fn test_direct_stop_enforces_the_control_guards() {
+    fn test_direct_stop_rejects_bodies() {
         let (called, received) = mpsc::channel();
         let control =
             Control::start(Controller::default(), move || called.send(()).unwrap()).unwrap();
-        let id = &control.endpoint.id;
-        for (headers, body, expected) in [
-            (String::new(), "", 412),
-            (format!("X-Ark-Emulator: {}\r\n", "0".repeat(64)), "", 412),
-            (
-                format!("X-Ark-Emulator: {id}\r\nX-Ark-Emulator: {id}\r\n"),
-                "",
-                412,
-            ),
-            (
-                format!("X-Ark-Emulator: {id}\r\nOrigin: https://example.com\r\n"),
-                "",
-                403,
-            ),
-            (format!("X-Ark-Emulator: {id}\r\n"), "x", 413),
-        ] {
-            let mut stream =
-                Stream::connect(&control.endpoint.name(), Duration::from_secs(1)).unwrap();
-            stream.set_read_timeout(Duration::from_secs(1));
-            write!(stream, "POST /v1/stop HTTP/1.0\r\nHost: localhost\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
-            let mut reply = String::new();
-            stream.read_to_string(&mut reply).unwrap();
-            assert_eq!(
-                reply
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap()
-                    .parse::<u16>()
-                    .unwrap(),
-                expected
-            );
-            assert!(
-                !reply
-                    .to_ascii_lowercase()
-                    .contains("access-control-allow-origin")
-            );
-        }
+        let stream = Stream::connect(&control.endpoint.name(), Duration::from_secs(1)).unwrap();
+        let reply = http::exchange(
+            stream,
+            "POST",
+            "/v1/stop",
+            &[],
+            Some(b"x"),
+            Instant::now() + Duration::from_secs(1),
+            MAX_RESPONSE,
+        )
+        .unwrap();
+        assert_eq!(reply.status, 413);
         assert!(received.try_recv().is_err());
     }
 
@@ -851,23 +716,29 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// Reusing a control endpoint cannot make the client stop a replacement launcher.
+    /// A stale endpoint cannot stop another launcher using the same guest port.
     #[test]
     fn test_direct_stop_observes_a_replacement_without_controlling_it() {
+        let previous = Control::start(Controller::default(), || {}).unwrap();
+        let endpoint = previous.endpoint.clone();
+        drop(previous);
         let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = guest.local_addr().unwrap().port();
-        let (endpoint, worker) = stop_peer(
-            vec![
-                ("/v1/stop", response(202, r#"{"stopping":true}"#)),
-                (
-                    "/v1/status",
-                    response(412, r#"{"error":"different launch"}"#),
-                ),
-            ],
-            Some(guest),
-        );
-        stop(&endpoint, port, Instant::now() + Duration::from_secs(5)).unwrap();
-        worker.join().unwrap();
+        let (called, received) = mpsc::channel();
+        let replacement =
+            Control::start(Controller::default(), move || called.send(()).unwrap()).unwrap();
+        let err = stop(&endpoint, port, Instant::now() + Duration::from_millis(250)).unwrap_err();
+        assert_eq!(err.code, Code::Timeout);
+        assert!(received.try_recv().is_err());
+        let reply = exchange(
+            &replacement.endpoint,
+            "GET",
+            "/v1/status",
+            None,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!decode_status(&reply.body).unwrap().stopping);
     }
 
     /// A slow response cannot extend shutdown's deadline with each received byte.
@@ -1357,28 +1228,15 @@ mod tests {
         assert_eq!(fixture.edge(), "rising");
     }
 
-    /// Raw requests exercise browser rejection, bounded bodies and stale launches.
+    /// Invalid input and stale endpoints cannot change the button state.
     #[test]
-    fn test_control_rejects_browser_requests_bodies_and_wrong_targets() {
+    fn test_control_rejects_bodies_and_invalid_generations() {
         let fixture = Fixture::new();
         let endpoint = &fixture.control.endpoint;
         for (headers, body, expected) in [
-            (String::new(), "", 412),
-            (
-                format!("{INSTANCE_HEADER}: {}\r\n", "0".repeat(64)),
-                "",
-                412,
-            ),
-            (
-                format!(
-                    "{INSTANCE_HEADER}: {}\r\nOrigin: https://example.com\r\n",
-                    endpoint.id
-                ),
-                "",
-                403,
-            ),
-            (format!("{INSTANCE_HEADER}: {}\r\n", endpoint.id), "x", 413),
-            (format!("{INSTANCE_HEADER}: {}\r\n", endpoint.id), "", 400),
+            ("", "x", 413),
+            ("", "", 400),
+            ("X-Ark-Generation: invalid\r\n", "", 400),
         ] {
             let mut stream = Stream::connect(&endpoint.name(), Duration::from_secs(1)).unwrap();
             stream.set_read_timeout(Duration::from_secs(1));
@@ -1409,6 +1267,7 @@ mod tests {
                 .code,
             Code::ControlUnreachable
         );
+        assert!(!fixture.hardware.snapshot().pressed);
     }
 
     /// Losing a POST reply times out with an unknown outcome and no replay.

@@ -6,6 +6,9 @@
 
 //! Native IPC regressions run on each packaging platform without a guest.
 
+#[path = "../src/ipc/http.rs"]
+mod http;
+
 #[path = "../src/ipc/local.rs"]
 #[allow(dead_code)] // Standalone transport tests use a subset of the application API.
 mod local;
