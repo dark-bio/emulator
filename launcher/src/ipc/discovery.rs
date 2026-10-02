@@ -411,11 +411,22 @@ fn split_response(raw: &[u8]) -> Result<Vec<u8>, Failure> {
         )
         .into());
     }
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .context("the registry's answer had no header block")
-        .map_err(Failure::Invalid)?;
+    let split = match raw.windows(4).position(|window| window == b"\r\n\r\n") {
+        Some(split) => split,
+        None if raw.starts_with(b"HTTP/1.") || b"HTTP/1.".starts_with(raw) => {
+            // Host exit can interrupt any write of the response headers
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the registry closed during its reply headers",
+            )
+            .into());
+        }
+        None => {
+            return Err(Failure::Invalid(anyhow::anyhow!(
+                "the registry's answer had no header block"
+            )));
+        }
+    };
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head
         .lines()
@@ -512,6 +523,37 @@ mod tests {
         let public = parse_listing(&split_response(&reply).unwrap()).unwrap();
         assert_eq!(public.len(), 1);
         assert_eq!(public[0].disk, listing[0].disk);
+    }
+
+    /// A heartbeat interrupted during its reply recovers through host takeover.
+    #[test]
+    fn test_heartbeat_takes_over_after_a_partial_reply() {
+        let (client, server, reservation) = crate::ipc::testing::server();
+        let worker = thread::spawn(move || {
+            // Accept registration, then release both listeners before heartbeat EOF
+            let first = server.recv().unwrap();
+            assert_eq!(first.method().as_str(), "POST");
+            first.respond(tiny_http::Response::empty(204)).unwrap();
+            let heartbeat = server.recv().unwrap();
+            assert_eq!(heartbeat.method().as_str(), "POST");
+            let mut writer = heartbeat.into_writer();
+            writer.write_all(b"HTTP/1.0 204 No Content\r\n").unwrap();
+            drop(server);
+            drop(reservation);
+        });
+
+        // The publisher survives losing its host and restores its own entry
+        let instance: Instance = serde_json::from_str(
+            r#"{"port":18181,"disk":"demo.ark","disk_id":"0123abcd","ready":false}"#,
+        )
+        .unwrap();
+        client.publish(&instance).unwrap();
+        let result = client.publish(&instance);
+        worker.join().unwrap();
+        result.unwrap();
+        let listing = client.list().unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].disk, "demo.ark");
     }
 
     /// A browser listener alone cannot receive a fallback registry request.
@@ -638,9 +680,34 @@ mod tests {
         assert!(err.contains("400"), "{err}");
     }
 
+    /// Every incomplete header fragment remains eligible for host takeover.
     #[test]
-    fn test_a_truncated_answer_is_an_error() {
-        assert!(split_response(b"HTTP/1.1 200 OK\r\nContent-Type: x").is_err());
+    fn test_truncated_reply_headers_are_retryable() {
+        let reply = response(204, "");
+        for end in 0..reply.len() {
+            let err = split_response(&reply.as_bytes()[..end]).unwrap_err();
+            assert!(
+                matches!(&err, Failure::Transport(cause)
+                if cause.kind() == io::ErrorKind::UnexpectedEof),
+                "{end}"
+            );
+            assert!(err.retryable(), "{end}");
+        }
+    }
+
+    /// Malformed replies remain permanent failures instead of triggering takeover.
+    #[test]
+    fn test_malformed_reply_headers_are_permanent() {
+        for reply in [
+            "garbage",
+            "HTTP?",
+            "HTTP/1.0 invalid\r\n\r\n",
+            "HTTP/1.0 999 Unknown\r\n\r\n",
+        ] {
+            let err = split_response(reply.as_bytes()).unwrap_err();
+            assert!(matches!(err, Failure::Invalid(_)), "{reply}");
+            assert!(!err.retryable(), "{reply}");
+        }
     }
 
     /// A listing of another version is refused whole, since nothing in it can

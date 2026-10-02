@@ -32,9 +32,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use interprocess::ConnectWaitMode;
 #[cfg(unix)]
 use interprocess::local_socket::ConnectOptions;
+#[cfg(unix)]
+use interprocess::local_socket::Stream as Socket;
 use interprocess::local_socket::{
-    GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, Stream as Socket,
-    prelude::*,
+    GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, prelude::*,
 };
 use sha2::{Digest as _, Sha256};
 use tiny_http::{HTTPVersion, Header, Method, Response};
@@ -43,7 +44,7 @@ use tiny_http::{HTTPVersion, Header, Method, Response};
 #[path = "local_windows.rs"]
 mod windows;
 #[cfg(windows)]
-use windows::identity as windows_identity;
+use windows::{Stream as Socket, identity as windows_identity};
 
 /// Poll interval for nonblocking pipes, which have no portable I/O timeout.
 const POLL: Duration = Duration::from_millis(5);
@@ -353,7 +354,11 @@ impl Server {
                 return Ok(None);
             }
             match self.listener.accept() {
-                Ok(socket) => return Request::read(Stream::new(socket, IO_TIMEOUT)).map(Some),
+                Ok(socket) => {
+                    #[cfg(windows)]
+                    let socket = Socket::Server(socket);
+                    return Request::read(Stream::new(socket, IO_TIMEOUT)).map(Some);
+                }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     if let Err(err) = self.wait(deadline)
                         && err.kind() != io::ErrorKind::Interrupted
