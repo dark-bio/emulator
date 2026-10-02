@@ -1,31 +1,52 @@
 # The registry of running emulators
 
-Anything that wants to find an emulator on this computer reads one loopback
-service. There is no daemon: whichever launcher binds 127.0.0.1:18180 serves
-it, every other launcher publishes itself into it, and when the host goes the
-next launcher takes the port over. A refused connection means no emulator is
-running, and it is an empty list rather than an error. A timeout, HTTP refusal
-or malformed listing is reported as a discovery failure.
+The launcher holding 127.0.0.1:18180 serves browser discovery and a private
+registry for native tools. Every launcher publishes into that registry. When
+its host exits, the next launcher takes over both listeners. A missing
+registry means an empty list. A timeout, refusal or malformed listing is a
+discovery failure.
 
 Most callers want `ark-emulator list`, or `ark devices`, which reads the same
 service. The contract below is for a tool that reads it directly.
 
-## Routes
+## Browser discovery
+
+The loopback HTTP listener accepts `GET /v1/instances` and its OPTIONS
+preflight. Every browser origin may read the listing. Host must name
+127.0.0.1 or localhost with the discovery port. Registry writes and control
+routes are absent from this listener, regardless of the request headers.
+
+## Native transport
+
+Native tools use HTTP/1.0 over local IPC, with one request per connection.
+The registry endpoint is named `registry-18180`. Each launch's control
+endpoint is named `c-ID`, where ID is its advertised launch id.
+
+On Unix, these are filesystem sockets under `/tmp/ark-emulator-UID/`, where
+UID is the effective user id. The directory has mode 0700 and sockets have
+mode 0600. Persistent registry lock files protect live listeners during stale
+socket recovery. Unique control endpoints need no lock file. Sockets are
+removed on listener drop and best-effort on normal process exit. On Windows,
+they are named pipes under `\\.\pipe\ark-emulator-SID-NAME`, restricted to the
+current user's SID and rejecting remote clients. Processes running as that
+user may connect.
+
+The browser port has one owner across OS users. If it is held without a
+private endpoint for the current user, close the other user's emulators,
+then update and restart all emulators. Native tools never fall back to TCP.
+
+The native registry serves these routes:
 
     GET    /v1/instances          the listing
     POST   /v1/instances          a launcher publishing itself
     DELETE /v1/instances/<port>   a launcher withdrawing itself
 
-Any page in a browser can read the listing. Publishing and withdrawing
-require `X-Ark-Registry: 1`. A missing, incorrect or repeated header
-answers 403, as does a write carrying `Origin`. Preflight permits GET and
-OPTIONS and never allows the write header. The fixed value prevents browser
-writes; it does not authenticate local processes. A declared write body larger
-than 8 KiB answers 413 before these checks.
+Access control belongs to the socket or pipe. Headers and bodies are each
+bounded to 8 KiB, and oversized requests answer 413. Native endpoints do not
+serve browser preflights.
 
-Publishing and withdrawing answer 204 with no body. Older launchers without
-the header cannot publish to a current registry host. Restart all running
-launchers after updating, since an older host still accepts unguarded writes.
+Publishing and withdrawing answer 204 with no body. All running launchers
+must support native IPC; restart them after updating.
 
 ## The listing
 
@@ -47,8 +68,7 @@ launchers after updating, since an older host still accepts unguarded writes.
 }
 ```
 
-`version` is 1 and changes only when something breaks. Adding a field or a
-route does not, so read what you know and ignore the rest.
+`version` is 1. Read fields you know and ignore the rest.
 
 `port` identifies the emulator and is what a client dials.
 `ws://127.0.0.1:PORT/v1/usb` is the Ark's own bus and `/v1/hw` the device
@@ -58,9 +78,9 @@ publishing a path. No path is ever published, since any page in any browser
 can read a loopback port.
 
 The Rust launcher owns the hardware connection in both window modes.
-New launchers also publish an optional `control` object with a loopback HTTP
-`port` and an opaque launch `id`. Older registry hosts may omit this field;
-restart all emulators with the current build to enable direct control.
+An optional `control` object contains an opaque launch `id` naming its native
+endpoint. It carries no TCP port or filesystem path. A missing object makes
+control unavailable and requires an update and restart.
 
 `ready` becomes true on the first nameplate and false when the hardware
 connection drops. `env`, `name`, `serial` and
@@ -97,12 +117,12 @@ The control endpoint serves two lifecycle routes:
     GET  /v1/status   whether this launcher has accepted shutdown
     POST /v1/stop     accept shutdown and exit
 
-Both carry `X-Ark-Emulator` with the advertised launch id and no body. Status
-returns 200 with `{"stopping":false}` or `{"stopping":true}`. Stop returns
-202 with `{"stopping":true}` before scheduling shutdown, even if the guest
-is booting or disconnected. It needs no hardware connection generation.
-Repeated requests acknowledge the same shutdown. The launch id prevents a
-stale request stopping a replacement on a reused port.
+Both requests have no body. Status returns 200 with `{"stopping":false}` or
+`{"stopping":true}`. Stop returns 202 with `{"stopping":true}` before
+scheduling shutdown, even if the guest is booting or disconnected. It needs
+no hardware connection generation.
+Repeated requests acknowledge the same shutdown. Each launch has a unique
+endpoint named by its id, preventing a stale request stopping a replacement.
 
 The CLI sends the stop once and waits for the selected control endpoint to
 disappear and the guest port to refuse connections. A lost or truncated
@@ -129,13 +149,13 @@ The control endpoint accepts these routes:
     POST /v1/button/press/SECONDS   hold and schedule automatic release
     POST /v1/button/release         release the CLI hold
 
-Requests carry `X-Ark-Emulator` with the advertised launch id and no body.
-The GET response carries connected, generation as a decimal string, pressed
-and cli_pressed. POST requests also carry `X-Ark-Generation` from that read,
-so inputs cannot carry over into another connection. A 200 response confirms
-hardware delivery or an already applied hold, with pressed, cli_pressed,
-changed and release_after_seconds. The last field is the accepted interval
-or null. It does not confirm completion of any resulting firmware operation.
+Requests have no body. The GET response carries connected, generation as a
+decimal string, pressed and cli_pressed. POST requests carry `X-Ark-Generation`
+from that read, so inputs cannot carry over into another connection. A 200
+response confirms hardware delivery or an already applied hold, with pressed,
+cli_pressed, changed and release_after_seconds. The last field is the accepted
+interval or null. It does not confirm completion of any resulting firmware
+operation.
 
 The timed route accepts whole seconds from 0 s to 4294967295 s. With 0 s,
 the worker releases immediately after delivering the press, then replies
@@ -147,8 +167,6 @@ active window hold. Older launchers reject the timed route with 404 without
 pressing the button; the CLI never falls back to an untimed press.
 
 A button POST answers 409 when hardware cannot accept the input or the
-launcher is stopping. A missing, wrong or repeated launch id answers 412,
-and a missing or malformed button generation answers 400.
+launcher is stopping. A missing or malformed button generation answers 400.
 An invalid release duration also answers 400 without changing the hold.
-Requests with bodies answer 413. Browser origins answer 403, and the endpoint
-permits no cross-origin requests. No command retries an uncertain input.
+Requests with bodies answer 413. No command retries an uncertain input.

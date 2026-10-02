@@ -4,13 +4,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Publishes running emulators and carries discovery, shutdown and button requests.
+//! Native IPC regressions run on each packaging platform without a guest.
 
-pub(crate) mod control;
-pub(crate) mod discovery;
+#[path = "../src/ipc/http.rs"]
 mod http;
-pub(crate) mod local;
-pub(crate) mod registry;
 
-#[cfg(test)]
-pub(crate) mod testing;
+#[path = "../src/ipc/local.rs"]
+#[allow(dead_code)] // Standalone transport tests use a subset of the application API.
+mod local;

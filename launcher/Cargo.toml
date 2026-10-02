@@ -27,6 +27,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 toml = "1"
 rfd = "0.17"
 tiny_http = { version = "0.12", default-features = false }
+interprocess = "2.4.4"
+httparse = "1.10"
 sha2 = "0.10"
 console = "0.16"
 dirs = "6"
@@ -41,10 +43,8 @@ tempfile = "3"
 # probe for WHPX, and Console and FileSystem for the console a command line run
 # borrows from the terminal that started it. See src/platform/mod.rs,
 # src/cli/output.rs and src/platform/orphan.rs.
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
-
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 signal-hook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
@@ -54,9 +54,11 @@ windows-core = "0.61"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

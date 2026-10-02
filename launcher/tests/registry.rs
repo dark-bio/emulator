@@ -14,17 +14,18 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Serializes scenarios that own the public discovery port within this test process.
-static REGISTRY_TEST: Mutex<()> = Mutex::new(());
+#[path = "../src/ipc/local.rs"]
+#[allow(dead_code)] // Scripted peers use the production transport without every client helper.
+mod local;
 
 /// Refused initial and later publications stop the guest and reach either caller.
 #[test]
 fn test_registration_refusals_reach_standalone_and_start_commands() {
-    let _exclusive = REGISTRY_TEST.lock().unwrap();
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     // Never send test publications into an emulator's live registry
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
@@ -34,7 +35,8 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let server = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let server = local::Server::bind_test("registry-18180").unwrap();
 
     // An isolated executable resolves only this fixture's guest and state
     let directory = tempfile::TempDir::new().unwrap();
@@ -72,7 +74,7 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
                         thread::sleep(Duration::from_millis(10));
                     }
                     if worker_accepted
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                             count.checked_sub(1)
                         })
                         .is_ok()
@@ -141,7 +143,7 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
 /// Direct stop shuts down real launchers after their registry disappears.
 #[test]
 fn test_direct_stop_all_survives_registry_loss_after_selection() {
-    let _exclusive = REGISTRY_TEST.lock().unwrap();
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
@@ -150,14 +152,15 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let server = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let server = local::Server::bind_test("registry-18180").unwrap();
 
     // Publish both launches, then remove discovery as soon as the CLI selects them
     let (published, ready) = mpsc::channel();
     let registry = thread::spawn(move || {
         let mut instances = std::collections::BTreeMap::new();
         loop {
-            let mut request = server
+            let request = server
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .unwrap();
@@ -174,7 +177,7 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
                 }
                 "POST" => {
                     let instance: serde_json::Value =
-                        serde_json::from_reader(request.as_reader()).unwrap();
+                        serde_json::from_slice(request.body()).unwrap();
                     assert!(instance["control"]["id"].is_string());
                     let fresh = instances
                         .insert(instance["port"].as_u64().unwrap(), instance)
@@ -304,7 +307,7 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
 /// A refused later stop retains the earlier confirmed result without registry fallback.
 #[test]
 fn test_direct_stop_all_preserves_partial_output_on_refusal() {
-    let _exclusive = REGISTRY_TEST.lock().unwrap();
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
@@ -313,7 +316,8 @@ fn test_direct_stop_all_preserves_partial_output_on_refusal() {
         }
         Err(err) => panic!("could not reserve the test registry: {err}"),
     };
-    let registry = tiny_http::Server::from_listener(listener, None).unwrap();
+    let _reservation = listener;
+    let registry = local::Server::bind_test("registry-18180").unwrap();
 
     // The lower guest port stops; the other control endpoint refuses the request
     let mut guests = vec![
@@ -325,10 +329,11 @@ fn test_direct_stop_all_preserves_partial_output_on_refusal() {
     let mut instances = Vec::new();
     let mut workers = Vec::new();
     for (index, guest) in guests.into_iter().enumerate() {
-        let control = tiny_http::Server::http(("127.0.0.1", 0)).unwrap();
+        let id = local::identity();
+        let control = local::Server::bind(&format!("c-{id}")).unwrap();
         instances.push(serde_json::json!({
             "port":guest.local_addr().unwrap().port(),"disk":format!("{index}.ark"),"disk_id":format!("{index}"),"ready":false,
-            "control":{"port":control.server_addr().to_ip().unwrap().port(),"id":"1".repeat(64)}
+            "control":{"id":id}
         }));
         workers.push(thread::spawn(move || {
             let request = control
