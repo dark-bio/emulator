@@ -1,24 +1,29 @@
-# Dark Bio - Ark Emulator
+# Ark Emulator
 
-An emulated Ark enclave for development and demos. It boots the real ArkOS
-firmware inside QEMU, with an optional native window showing the device's
-physical face (4 RGB LEDs and a reset pin).
+Emulated Ark enclave for development and demos. It boots the real ArkOS
+firmware in QEMU, with an optional window showing the device's face, its
+four RGB LEDs and its reset button. The
+[`ark`](https://github.com/dark-bio/cli) command line tool and
+[Ark Hub](https://hub.dark.bio) talk to it exactly as to a hardware Ark. Its
+owner approves access on their phone in Ark Companion, on
+[iOS](https://apps.apple.com/app/id6751324700) or
+[Android](https://play.google.com/store/apps/details?id=bio.dark.companion).
 
 > [!CAUTION]
-> **The emulator is not a vault.** The backing disk image is an unencrypted
-> qcow2 file on your host filesystem. Anything the emulated Ark stores ends up there,
-> readable by anyone with access to your machine. Do not put real genomic
-> data, real keys, or anything else you want to keep private into the
-> emulator. It exists for development, demos, and integration testing only.
-> The cryptographic and physical-security properties Dark Bio promises apply
-> to the actual Ark hardware, not this emulator. For any workload where data
-> confidentiality matters, use a real Ark.
+> **The emulator is not a vault.** It runs the Ark's firmware without the
+> hardware that protects the Ark's keys. Those keys sit in a plain qcow2 disk
+> image on your computer, so anyone with the file holds the device's
+> identity. The owner's data stays encrypted while the device is locked, and
+> lies open in the memory of a process on your computer while it is
+> unlocked. Keep real genomic data, real keys and anything else private on a
+> hardware Ark. The emulator exists for development, demos and integration
+> testing.
 
-## Install
+## Installation
 
 Download a build for your operating system and processor from
-[GitHub Releases](https://github.com/dark-bio/emulator/releases). Releases
-include QEMU and ArkOS, so you can launch the app without configuring either.
+[GitHub Releases](https://github.com/dark-bio/emulator/releases). Every
+release carries QEMU and ArkOS, so there is nothing else to install.
 
 | Platform | Installer | Portable version |
 |---|---|---|
@@ -26,103 +31,94 @@ include QEMU and ArkOS, so you can launch the app without configuring either.
 | Windows | `.exe` | Unzip the `.zip` and run `ark-emulator.exe` |
 | Linux | `.deb` | Make the `.AppImage` executable and run it |
 
-On macOS, you can also install with Homebrew:
+On macOS, Homebrew installs it too:
 
 ```sh
 brew install --cask dark-bio/tap/ark-emulator
 ```
 
-macOS requires version 15 (Sequoia) or later. Windows builds are unsigned;
+macOS needs version 15 (Sequoia) or later. Windows builds are unsigned, so
 if SmartScreen blocks a downloaded release, choose **More info**, then
 **Run anyway**.
 
-## Get started
+## The window
 
 1. Open **Ark Emulator**.
-2. In the settings screen, use **New** beside the filename to create an
-   emulator file, or **Open** to choose one you already have.
-3. Choose **Save and start** to remember your choices and boot the emulator.
-   Use **Start** to boot without saving your settings.
+2. In the settings screen, choose **New** beside the file name to create an
+   emulator file, or **Open** to pick one you have.
+3. Choose **Save and start** to remember your choices and boot, or **Start**
+   to boot without saving them.
 4. Open [Ark Hub](https://hub.dark.bio) in Chrome or Edge and connect to the
-   running emulator.
+   running emulator, or use `ark`.
 
-Each `.ark` file stores one emulator's data. Open the same file to continue
-where you left off, or create a new file to start with a blank device.
+Each `.ark` file is one emulated Ark. Open the same file to continue where
+you left off, or create a new one for a blank device. Click the notch below
+the device for its details, then the gear for the settings. **Autostart**
+boots your saved emulator when the app opens, and the **developers**
+section holds the memory and environment settings. Settings saved while an
+emulator runs apply to the next launch, and an environment change applies
+only to a newly created device.
 
-Click the notch below the device to see its information, then the gear to
-open settings. **Autostart** starts your saved emulator automatically on the
-next launch. The **developers** section contains memory and environment
-settings. Settings saved while an emulator is running apply on a later launch;
-an environment change applies only to a newly created device.
-
-To close the window, use your operating system's close or quit shortcut,
-such as Alt+F4 on Windows or Cmd+Q on macOS.
-
-## Run multiple emulators
-
-Launch the app again to open another window. On macOS, use **New Window**
-(Cmd+N) in the app menu. Each running instance needs a different emulator file;
-use **Open** or **New** in that window to choose one.
+Launch the app again, or choose **New Window** (Cmd+N) on macOS, to run
+another emulator on another file. Close a window with your system's close
+or quit shortcut, such as Alt+F4 on Windows or Cmd+Q on macOS.
 
 ## Command line
 
-Use `ark-emulator` to manage emulators without opening a window. Installing
-with Homebrew, the Windows installer or the `.deb` makes the command
-available in your terminal. On Windows, open a new PowerShell or Command
-Prompt window after installing.
+`ark-emulator` manages emulators without a window. Homebrew, the Windows
+installer and the `.deb` put it on your `PATH`, and on Windows a new
+terminal window picks it up. From the portable Windows ZIP, run
+`.\bin\ark-emulator.cmd` instead, and on macOS and Linux the executable
+inside the portable build.
 
 ```sh
-ark-emulator start --headless  # boot without a window, return when ready
-ark-emulator list              # show what is running on this computer
-ark-emulator button press      # hold its reset button
-ark-emulator button release    # release the CLI hold
-ark-emulator stop              # shut it down
+ark-emulator start --headless   # boot without a window, return once ready
+ark-emulator list               # what is running on this computer
+ark-emulator button press --release-after 0   # press the reset button once
+ark-emulator stop               # shut it down
+ark-emulator wipe --yes         # reset the stopped image to a fresh device
 ```
 
-Omit `--headless` to show the device window. For a foreground process, use
-`ark-emulator --headless --image demo.ark`; Ctrl-C stops it. See
-`ark-emulator help start` for readiness, timeouts and image defaults.
-Button commands accept a locator, name, serial or image when several emulators
-are running. `ark-emulator button press --release-after 3` schedules release
-after 3 s, even after the command exits. Use `--release-after 0` to release
-immediately after pressing. See `ark-emulator button press --help` for delivery
-and hold behavior.
-
-For the portable Windows ZIP, run `.\bin\ark-emulator.cmd` instead of
-`ark-emulator` from the extracted folder. On macOS and Linux, run the
-executable inside the portable build directly.
-
-Hand the locator to [`ark`](https://github.com/dark-bio/cli), which talks to an
-emulated Ark exactly as it talks to hardware:
+Without `--headless`, `start` opens the device window. A bare
+`ark-emulator --headless` runs an emulator in the foreground instead, until
+Ctrl-C. Hand the locator `start` prints to `ark`, which drives the emulated
+Ark as it drives hardware:
 
 ```sh
-ark -d emulator:18181 status
+ark --device emulator:18181 status   # identity, firmware, pairing and lock
+ark enroll                           # prints where to enroll it at Ark Hub
 ```
 
-A fresh emulator has a self-signed identity. `ark enroll` prints the Ark Hub
-address that gives it an attested one, valid for 30 days; after that,
-`ark-emulator stop`, `wipe` and `start` give a fresh device to enroll again.
+A fresh emulator is enrolled once at Ark Hub, in a browser, before it pairs.
+The enrollment lasts 30 days, and then `ark-emulator stop`, `wipe` and
+`start` give a fresh device to enroll again.
 
-`ark-emulator --help` lists every command and option, and `ark-emulator help`
-names the reference topics, whose sources in
-[`launcher/src/cli/help`](launcher/src/cli/help) read the same on GitHub. AI agents
-should read [`ark-emulator help agents`](launcher/src/cli/help/agents.md) first,
-then `ark help agents` before driving the Ark itself. Apps to run on an
-emulator, in Rust, Go, C and Python, are at
-[examples](https://github.com/dark-bio/examples). Pairing and unlocking happen
-in Ark Companion, on
-[iOS](https://apps.apple.com/app/id6751324700) or
-[Android](https://play.google.com/store/apps/details?id=bio.dark.companion).
+## Help
+
+`ark-emulator -h` is the overview, `ark-emulator <command> --help` a
+command's full contract, and `ark-emulator help --all` the whole manual. AI
+agents read [`ark-emulator help agents`](launcher/src/cli/help/agents.md)
+first, then `ark help agents` before driving the Ark itself. The topics'
+sources read the same on GitHub:
+
+| Topic | Contents |
+|---|---|
+| [`agents`](launcher/src/cli/help/agents.md) | Running ark-emulator from an AI agent, and the common tasks |
+| [`images`](launcher/src/cli/help/images.md) | The image that is the device, where it lives, its environment and identity, and wiping |
+| [`registry`](launcher/src/cli/help/registry.md) | The listing of running emulators, for a tool that reads it itself |
+| [`output`](launcher/src/cli/help/output.md) | Reading output, JSON, logs and error codes |
+
+Apps to run on an emulator, in Rust, Go, C and Python, are in the
+[examples](https://github.com/dark-bio/examples) repository.
 
 ## Build from source
 
-Install Rust, the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/),
-and QEMU, including `qemu-img`. Download a matching kernel and initramfs pair
-for your processor (`arm64` or `amd64`) from
+Install Rust, the
+[Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and
+QEMU, `qemu-img` included. Download a matching kernel and initramfs for your
+processor, `arm64` or `amd64`, from
 [the emulator firmware releases](https://github.com/dark-bio/emulator-images/releases).
-Source builds do not bundle QEMU or firmware.
-
-From this repository, run:
+A source build bundles neither QEMU nor firmware. From this repository:
 
 ```sh
 cargo build --release -p launcher
@@ -131,14 +127,11 @@ cargo build --release -p launcher
   --initrd /path/to/initrd.gz
 ```
 
-For everything the executable can do, run
-`./target/release/ark-emulator --help`.
-
 ## Layout
 
-| path | role |
+| Path | Role |
 |---|---|
-| `launcher/` | Rust runtime and optional Tauri window. Owns QEMU, the hardware connection and discovery, and carries the packaging config and macOS entitlements. |
-| `ui/` | Static HTML/CSS/JS. Renders device state from Rust and forwards user interactions through Tauri commands. |
-| `docs/` | Maintainer documentation. Currently the one-time Apple Developer setup the macOS signing in CI depends on. |
-| `.github/` | CI. Builds an installer per platform, then smoke tests each no-install artifact on a clean machine. The scripts under `scripts/` gather a relocatable QEMU and the pinned firmware for packaging; they are used by CI and runnable by hand. `packaging/` holds the Homebrew cask template a release publishes to the tap. |
+| `launcher/` | Rust runtime and optional Tauri window. Owns QEMU, the hardware connection and discovery, and carries the packaging configuration and macOS entitlements. |
+| `ui/` | Static HTML, CSS and JS. Renders the device state from Rust and forwards input through Tauri commands. |
+| `docs/` | Maintainer documentation, today the one-time Apple Developer setup that macOS signing in CI depends on. |
+| `.github/` | CI. Builds an installer per platform, then smoke tests each portable build on a clean machine. `scripts/` gathers a relocatable QEMU and the pinned firmware for packaging, and `packaging/` holds the Homebrew cask template a release publishes to the tap. |

@@ -176,7 +176,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
         Some(port) => HostPort::fixed(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
         None => HostPort::reserve().map_err(|err| {
             Error::new(Code::PortExhausted, format!("{err:#}"))
-                .hint("pass `--host-addr` to choose the port yourself")
+                .hint("pass `--port` to choose the port yourself")
         })?,
     };
     let address = reservation.addr();

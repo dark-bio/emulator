@@ -56,7 +56,6 @@ impl Code {
     /// on that topic walks.
     #[cfg(test)]
     pub(crate) const ALL: [Code; 18] = [
-        Code::Usage,
         Code::ConfirmationRequired,
         Code::DiskMissing,
         Code::Io,
@@ -66,6 +65,7 @@ impl Code {
         Code::PortExhausted,
         Code::StoppedUnexpectedly,
         Code::CouldNotStart,
+        Code::Usage,
         Code::DiskBusy,
         Code::NoEmulator,
         Code::AmbiguousEmulator,
