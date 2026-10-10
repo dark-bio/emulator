@@ -422,32 +422,41 @@ mod tests {
         headers: &str,
         body: &str,
     ) -> Reply {
+        raw_exchange(
+            registry,
+            &format!(
+                "{method} {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    /// Write the request bytes as given while the registry serves them.
+    fn raw_exchange(registry: &mut Registry, request: &str) -> Reply {
         // Use a unique local name so these tests cannot touch a running emulator
         let server = local::Server::bind(&format!("t-{}", local::identity())).unwrap();
-        let address = "localhost";
         let timeout = Duration::from_secs(2);
         let mut stream = local::Stream::connect(server.name(), timeout).unwrap();
         stream.set_read_timeout(timeout);
         stream.set_write_timeout(timeout);
-        write!(
-            stream,
-            "{method} {path} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
-            body.len()
-        )
-        .unwrap();
+        thread::scope(|scope| {
+            // Serve while the request is written, since macOS buffers only 8 KiB
+            let worker = scope.spawn(|| match server.recv_timeout(timeout) {
+                Ok(Some(request)) => handle(request, registry),
+                Err(err) if err.kind() == io::ErrorKind::InvalidData => {}
+                result => panic!("request was not received: {}", result.err().unwrap()),
+            });
+            stream.write_all(request.as_bytes()).unwrap();
 
-        // Exercise routing and header parsing before inspecting the reply
-        match server.recv_timeout(timeout) {
-            Ok(Some(request)) => handle(request, registry),
-            Err(err) if err.kind() == io::ErrorKind::InvalidData => {}
-            result => panic!("request was not received: {}", result.err().unwrap()),
-        }
-        let mut response = String::new();
-        if let Err(err) = stream.read_to_string(&mut response) {
-            assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
-            assert!(response.contains("\r\n\r\n"));
-        }
-        parse_reply(&response)
+            // Read the reply, which a rejected request may end with a reset
+            let mut response = String::new();
+            if let Err(err) = stream.read_to_string(&mut response) {
+                assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+                assert!(response.contains("\r\n\r\n"));
+            }
+            worker.join().unwrap();
+            parse_reply(&response)
+        })
     }
 
     /// Invalid JSON cannot replace a published entry.
@@ -472,20 +481,22 @@ mod tests {
     /// The transport rejects oversized bodies before they can update the registry.
     #[test]
     fn test_oversized_writes_leave_the_registry_unchanged() {
+        // Publish an entry for the rejected write to leave alone
         let mut registry = Registry::new();
-        let reply = exchange(
+        assert_eq!(
+            exchange(&mut registry, "POST", "/v1/instances", "", INSTANCE).status,
+            204
+        );
+        let before = exchange(&mut registry, "GET", "/v1/instances", "", "").body;
+
+        // An oversized length must be rejected without waiting for its body
+        let reply = raw_exchange(
             &mut registry,
-            "POST",
-            "/v1/instances",
-            "",
-            &"x".repeat(8193),
+            "POST /v1/instances HTTP/1.0\r\nContent-Length: 8193\r\n\r\n",
         );
         assert_eq!(reply.status, 413);
         let listing = exchange(&mut registry, "GET", "/v1/instances", "", "");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&listing.body).unwrap(),
-            serde_json::json!({"version": 1, "instances": []})
-        );
+        assert_eq!(listing.body, before);
     }
 
     /// Native writes publish, refresh and withdraw entries without browser guards.

@@ -547,6 +547,8 @@ mod tests {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // macOS hands an accepted socket the listener's nonblocking mode
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_millis(500)))
                         .unwrap();
