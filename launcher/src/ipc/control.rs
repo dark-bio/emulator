@@ -1277,6 +1277,7 @@ mod tests {
             id: local::identity(),
         };
         let server = Server::bind(&endpoint.name()).unwrap();
+        let (finished, received) = mpsc::channel();
         let worker = thread::spawn(move || {
             let get = server
                 .recv_timeout(Duration::from_secs(2))
@@ -1293,6 +1294,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(post.url(), "/v1/button/press");
+
+            // Keep the reply open until the client reaches its own deadline
+            received.recv().unwrap();
             assert!(
                 server
                     .recv_timeout(Duration::from_millis(150))
@@ -1301,7 +1305,11 @@ mod tests {
             );
             drop(post);
         });
-        let error = button(&endpoint, true, None, Duration::from_millis(50)).unwrap_err();
+
+        // Allow both accepts to pass through Windows' 100 ms listener poll
+        let error = button(&endpoint, true, None, Duration::from_secs(1)).unwrap_err();
+        finished.send(()).unwrap();
+        worker.join().unwrap();
         assert_eq!(error.code, Code::Timeout);
         assert!(
             error
@@ -1309,6 +1317,5 @@ mod tests {
                 .iter()
                 .any(|hint| hint.contains("state is unknown"))
         );
-        worker.join().unwrap();
     }
 }

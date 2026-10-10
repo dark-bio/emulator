@@ -282,6 +282,13 @@ jobs:
       - name: Test native IPC
         run: cargo test --locked -p cli-tests --features packaged --test ipc
 
+      - name: Test workspace on macOS and Windows
+        # build.yml runs these on Linux only. Sockets and pipes behave
+        # differently on macOS and Windows, so their legs run them as well.
+        if: inputs.os == 'macos-15' || inputs.os == 'windows-2022'
+        timeout-minutes: 15
+        run: cargo test --workspace --locked
+
       - name: Notarize and staple the disk image
         # The .app is already done, by the build. A .dmg is assessed on its own
         # when a browser hands one to a user, so it needs its own ticket.

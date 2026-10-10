@@ -254,4 +254,34 @@ mod tests {
             }
         }
     }
+
+    /// A request of the largest size and a 16 KiB reply arrive whole, past the
+    /// 8 KiB a macOS unix socket buffers.
+    #[test]
+    fn test_large_exchange_preserves_request_and_response() {
+        let server = Server::bind(&format!("t-{}", local::identity())).unwrap();
+        let stream = Stream::connect(server.name(), Duration::from_secs(2)).unwrap();
+        let worker = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            assert_eq!(request.body(), vec![b'q'; 8192]);
+            request
+                .respond(tiny_http::Response::from_data(vec![b'r'; 16 * 1024]))
+                .unwrap();
+        });
+
+        // Exchange while the server answers, as a real peer does
+        let reply = exchange(
+            stream,
+            "POST",
+            "/test",
+            &[],
+            Some(&[b'q'; 8192]),
+            Instant::now() + Duration::from_secs(2),
+            1024 * 1024,
+        );
+        worker.join().unwrap();
+        let reply = reply.unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, vec![b'r'; 16 * 1024]);
+    }
 }
