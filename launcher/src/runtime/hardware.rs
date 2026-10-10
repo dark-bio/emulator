@@ -11,7 +11,7 @@
 //! keep only the latest snapshot, and button requests are bounded and never
 //! replayed across connections.
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
+use tungstenite::{HandshakeError, Message, WebSocket, protocol::WebSocketConfig};
 
 use crate::diagnostics::log;
 
@@ -29,7 +29,7 @@ use crate::diagnostics::log;
 const RETRY: Duration = Duration::from_secs(1);
 /// Bounds socket writes without limiting how long boot may take.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-/// Limits button latency when the guest sends no hardware frames.
+/// Bounds shutdown and button latency while waiting for the guest.
 const INPUT_POLL: Duration = Duration::from_millis(10);
 /// Hardware frames contain only a few LED values or identity claims.
 const MAX_FRAME: usize = 64 * 1024;
@@ -39,6 +39,32 @@ const BUTTON_PIN: &str = "5";
 const LED_SWITCH_PIN: &str = "22";
 /// Version and revision of the carrier presented to the guest.
 const CARRIER: (u8, u8) = (1, 11);
+
+/// A TCP connection whose read timeouts preserve the WebSocket handshake state.
+struct Socket(TcpStream);
+
+impl Read for Socket {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        // tungstenite resumes handshakes on WouldBlock, including Windows timeouts
+        self.0.read(bytes).map_err(|err| {
+            if err.kind() == ErrorKind::TimedOut {
+                ErrorKind::WouldBlock.into()
+            } else {
+                err
+            }
+        })
+    }
+}
+
+impl Write for Socket {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
 
 /// Which source the device face should render.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -170,7 +196,7 @@ struct Inner {
     connection: Mutex<Option<Connection>>,
     /// Prevents reconnects after QEMU exits.
     stopping: AtomicBool,
-    /// A duplicate handle lets shutdown interrupt a pending handshake or I/O.
+    /// A duplicate handle shuts down both directions before joining the worker.
     socket: Mutex<Option<TcpStream>>,
 }
 
@@ -327,10 +353,12 @@ impl Controller {
         }
     }
 
-    /// Keep the handshake blocking until the guest responds or shutdown closes it.
-    fn connect(&self, address: SocketAddr) -> Result<WebSocket<TcpStream>> {
+    /// Keep one handshake alive across boot delays, checking for shutdown on idle reads.
+    fn connect(&self, address: SocketAddr) -> Result<WebSocket<Socket>> {
         let stream = TcpStream::connect_timeout(&address, RETRY)?;
         stream.set_nodelay(true)?;
+        // Windows shutdown does not wake a read that is already blocked
+        stream.set_read_timeout(Some(INPUT_POLL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         {
             let mut socket = self.0.socket.lock().unwrap();
@@ -344,19 +372,29 @@ impl Controller {
             .max_frame_size(Some(MAX_FRAME));
         // QEMU can accept TCP before the guest boots. Abandoning that
         // handshake could consume the guest's only hardware connection.
-        let (socket, _) = tungstenite::client::client_with_config(
+        let mut handshake = tungstenite::client::client_with_config(
             format!("ws://{address}/v1/hw"),
-            stream,
+            Socket(stream),
             Some(config),
-        )?;
-        socket.get_ref().set_read_timeout(Some(INPUT_POLL))?;
-        Ok(socket)
+        );
+        loop {
+            match handshake {
+                Ok((socket, _)) => return Ok(socket),
+                Err(HandshakeError::Interrupted(pending)) => {
+                    if self.0.stopping.load(Ordering::SeqCst) {
+                        bail!("hardware has stopped");
+                    }
+                    handshake = pending.handshake();
+                }
+                Err(HandshakeError::Failure(err)) => return Err(err.into()),
+            }
+        }
     }
 
     /// Consume hardware frames and explicit inputs on one ordered connection.
     fn serve(
         &self,
-        mut socket: WebSocket<TcpStream>,
+        mut socket: WebSocket<Socket>,
         buttons: &mpsc::Receiver<Button>,
         generation: u64,
     ) -> Result<()> {
@@ -416,7 +454,7 @@ impl Controller {
     /// Deliver an edge before committing a hold or starting its release timer.
     fn apply_button(
         &self,
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WebSocket<Socket>,
         source: ButtonSource,
         held: bool,
         release_after: Option<u32>,
@@ -737,11 +775,23 @@ mod tests {
     /// Stopping closes a blocked handshake and joins the socket worker promptly.
     #[test]
     fn test_stop_interrupts_a_pending_handshake() {
-        use std::io::Read as _;
+        use std::io::{BufRead as _, BufReader};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let controller = Controller::default();
         controller.start(listener.local_addr().unwrap());
-        let mut stream = accept(&listener);
+        let mut stream = BufReader::new(accept(&listener));
+
+        // Observe the full request without answering, so TCP setup is complete
+        let mut line = String::new();
+        loop {
+            assert_ne!(stream.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            line.clear();
+        }
+
+        // Shutdown must join the worker without the guest completing its handshake
         let (done, finished) = mpsc::channel();
         let worker = controller.clone();
         thread::spawn(move || {

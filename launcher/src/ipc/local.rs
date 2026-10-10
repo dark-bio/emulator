@@ -184,14 +184,24 @@ impl Stream {
 /// Retry readiness under a fixed deadline, never replaying an application request.
 fn bounded<T>(deadline: Instant, mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "local IPC deadline expired"))?;
+        // A delayed worker must try queued I/O before deciding it needs more time
         match operation() {
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(POLL.min(remaining))
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                let remaining =
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::TimedOut, "local IPC deadline expired")
+                        })?;
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    thread::sleep(POLL.min(remaining));
+                }
             }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             result => return result,
         }
     }
@@ -952,6 +962,46 @@ mod tests {
         let mut next = Stream::connect(&name, IO_TIMEOUT).unwrap();
         next.write_all(b"GET /next HTTP/1.0\r\n\r\n").unwrap();
         assert_eq!(server.recv().unwrap().url(), "/next");
+    }
+
+    /// A queued stop survives a delayed reader, while an idle read still expires.
+    #[test]
+    fn test_buffered_stop_survives_an_expired_read_deadline() {
+        // Queue the whole request before the server gets time to read it
+        let name = format!("t-{}", identity());
+        let server = Server::bind(&name).unwrap();
+        let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
+        let socket = server.listener.accept().unwrap();
+        #[cfg(windows)]
+        let socket = Socket::Server(socket);
+        client
+            .write_all(b"POST /v1/stop HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+
+        // An expired timestamp models descheduling without a timing-based wait
+        let stream = Stream::new(socket, IO_TIMEOUT);
+        stream.read_deadline.set(Instant::now() - IO_TIMEOUT);
+        let request = Request::read(stream).unwrap();
+        assert_eq!(request.method(), &Method::Post);
+        assert_eq!(request.url(), "/v1/stop");
+        assert!(request.body().is_empty());
+
+        // Once queued bytes are consumed, the same deadline permits no more waiting
+        let mut reply = request.into_writer();
+        assert_eq!(
+            reply.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        reply
+            .write_all(b"HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        drop(reply);
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert_eq!(
+            response,
+            "HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n"
+        );
     }
 
     /// An idle reply times out, then fragmented data and peer closure remain readable.
