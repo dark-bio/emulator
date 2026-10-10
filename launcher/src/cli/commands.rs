@@ -27,7 +27,7 @@ use tauri::PackageInfo;
 use super::args::{Boot, ButtonAction, Command, Global};
 use super::output::{self, Output};
 use crate::bundle::{self, Paths};
-use crate::diagnostics::{self, Sink};
+use crate::diagnostics;
 use crate::error::{Code, Error};
 use crate::ipc::{control, discovery, registry::Instance};
 use crate::platform;
@@ -53,11 +53,6 @@ pub(crate) fn run(
     identifier: &str,
     package: &PackageInfo,
 ) -> i32 {
-    diagnostics::log_sink(match global.log {
-        Some(_) => Sink::Events(output.clone()),
-        None => Sink::Quiet,
-    });
-
     // Valid management commands start with the kept release note
     if matches!(
         command,
@@ -161,7 +156,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     let image = disk::select(boot.image.as_deref(), settings.disk(), &paths.data)
         .map_err(|err| Error::io(format!("{err:#}")))?;
 
-    if let Some(instance) = discovery::booted(&listing()?, &image) {
+    if let Some(instance) = discovery::booted(&listing(output)?, &image) {
         output.event(
             "note",
             format!("{} is already booted", disk::name_of(&image)),
@@ -272,7 +267,7 @@ impl<'a> Wait<'a> {
                 )
                 .hint(format!("its log is at {}", log.display())));
             }
-            if let Some(instance) = discovery::booted(&listing()?, self.image) {
+            if let Some(instance) = discovery::booted(&listing(output)?, self.image) {
                 if instance.ready {
                     return Ok(instance.clone());
                 }
@@ -303,7 +298,7 @@ impl<'a> Wait<'a> {
 
 /// Show every emulator this computer is running.
 fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
-    let mut instances = listing()?;
+    let mut instances = listing(output)?;
     instances.sort_by_key(|instance| instance.port);
     let rows: Vec<Value> = instances
         .iter()
@@ -329,7 +324,7 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
 /// locators that went are the result, preserved as a partial result if a later
 /// operation fails or the wait times out.
 fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> Result<(), Error> {
-    let running = listing()?;
+    let running = listing(output)?;
     let mut targets = if all {
         running
     } else {
@@ -374,7 +369,7 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
         } => (true, emulator, release_after),
         ButtonAction::Release { emulator } => (false, emulator, None),
     };
-    let targets = pick(&listing()?, selector.as_deref())?;
+    let targets = pick(&listing(output)?, selector.as_deref())?;
     let instance = &targets[0];
     let endpoint = instance.control.as_ref().ok_or_else(|| {
         Error::new(
@@ -445,7 +440,7 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
         })?
         .len();
 
-    if let Some(instance) = discovery::booted(&listing()?, &path) {
+    if let Some(instance) = discovery::booted(&listing(output)?, &path) {
         return Err(Error::new(
             Code::DiskBusy,
             format!("{} is booted by {}", path.display(), locator(instance)),
@@ -487,8 +482,10 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
 
 /// What the emulators running on this computer look like. A registry that
 /// answers and cannot be read is a failure; none at all is an empty list.
-fn listing() -> Result<Vec<Instance>, Error> {
-    discovery::CLIENT.list().map_err(registry_error)
+fn listing(output: &Output) -> Result<Vec<Instance>, Error> {
+    discovery::CLIENT
+        .list(|warning| output.event("warning", warning))
+        .map_err(registry_error)
 }
 
 /// Report a registry failure with its server explanation and a recovery hint.
@@ -745,7 +742,10 @@ impl Relay {
         self.partial.extend(fresh);
         while let Some(end) = self.partial.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.partial.drain(..=end).collect();
-            output.event("log", String::from_utf8_lossy(&line).trim_end());
+            match serde_json::from_slice::<diagnostics::LogRecord>(&line) {
+                Ok(record) => output.log(&record.level, &record.target, &record.fields),
+                Err(_) => tracing::debug!("{}", String::from_utf8_lossy(&line).trim_end()),
+            }
         }
     }
 }

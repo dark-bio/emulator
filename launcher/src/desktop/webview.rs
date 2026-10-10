@@ -16,14 +16,14 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
     #[cfg(windows)]
     let builder = builder.on_webview_ready(|webview| {
-        use crate::diagnostics::log;
+        use tracing::debug;
 
         if let Err(error) = webview.with_webview(|native| {
             if let Err(error) = configure_windows(native) {
-                log!("[launcher] could not disable browser interactions: {error}");
+                debug!("could not disable browser interactions: {}", error);
             }
         }) {
-            log!("[launcher] could not access native webview: {error}");
+            debug!("could not access native webview: {}", error);
         }
     });
 

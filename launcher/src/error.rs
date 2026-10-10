@@ -41,7 +41,7 @@ pub(crate) enum Code {
     AmbiguousEmulator,
     /// The registry could not be read or refused a command.
     RegistryUnreachable,
-    /// The launcher does not support the requested direct control operation.
+    /// The launcher lacks a control endpoint or the requested control route.
     ControlUnsupported,
     /// The launcher's direct endpoint could not be reached or understood.
     ControlUnreachable,

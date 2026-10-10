@@ -4,53 +4,39 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Bounded HTTP exchanges over user-owned sockets and Windows named pipes.
+//! Bounded socket I/O and HTTP exchanges, with user-owned native listeners.
 //!
-//! Only native processes can reach these listeners. Unix sockets live in a
-//! private directory, and Windows pipes admit only the current user's SID.
-//! Each connection carries one bounded request and one response. HTTP framing
-//! preserves the control protocol across platforms.
+//! Native listeners use filesystem Unix-domain sockets. Their directories
+//! admit only the current user, through Unix permissions or Windows DACLs.
+//! Browser discovery uses the same bounded streams over loopback TCP, with its
+//! own route table. Each HTTP connection carries one request and one response.
 
 use std::cell::Cell;
-#[cfg(unix)]
 use std::fs::File;
-use std::io::{self, BufRead as _, BufReader, Read, Write};
-#[cfg(unix)]
-use std::os::unix::{
-    io::{AsFd as _, AsRawFd as _},
-    net::UnixStream,
-};
+use std::io::{self, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
-#[cfg(windows)]
-use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use interprocess::ConnectWaitMode;
-#[cfg(unix)]
-use interprocess::local_socket::ConnectOptions;
-#[cfg(unix)]
-use interprocess::local_socket::Stream as Socket;
-use interprocess::local_socket::{
-    GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, prelude::*,
-};
+use polling::{Event, Events, Poller};
 use sha2::{Digest as _, Sha256};
-use tiny_http::{HTTPVersion, Header, Method, Response};
+use socket2::{Domain, SockAddr, Socket, Type};
+use tiny_http::{Header, Method, Response};
+use ureq_proto::http::Version;
 
 #[cfg(windows)]
 #[path = "local_windows.rs"]
 mod windows;
 #[cfg(windows)]
-use windows::{Stream as Socket, identity as windows_identity};
+use windows::{create_directory, prepare, verify_directory};
 
-/// Poll interval for nonblocking pipes, which have no portable I/O timeout.
-const POLL: Duration = Duration::from_millis(5);
-/// Idle interval between nonblocking Windows accepts.
-#[cfg(windows)]
-const ACCEPT_POLL: Duration = Duration::from_millis(100);
+/// Registration key for the sole socket owned by each readiness poller.
+const SOCKET_EVENT: usize = 0;
+/// Maximum attempts to allocate a fresh private channel directory.
+const DIRECTORY_ATTEMPTS: usize = 16;
 /// Delay after a listener fails to accept a connection.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum time to receive a request or deliver a response.
@@ -60,7 +46,6 @@ const MAX_REQUEST: usize = 8192;
 /// Process-local component distinguishing simultaneous listener names.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Endpoints retained for cleanup when process exit skips their destructors.
-#[cfg(unix)]
 static SOCKETS: Mutex<Option<Vec<SocketFiles>>> = Mutex::new(None);
 
 /// Excludes process spawning while a test releases and reacquires a file lock.
@@ -68,21 +53,24 @@ static SOCKETS: Mutex<Option<Vec<SocketFiles>>> = Mutex::new(None);
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TEST: Mutex<()> = Mutex::new(());
 
-/// Files owned by a bound Unix endpoint.
-#[cfg(unix)]
+/// Files owned by a bound local endpoint.
 struct SocketFiles {
     /// Socket removed on listener drop or process exit.
     path: PathBuf,
+    /// Whether the socket's parent is a private directory owned by this endpoint.
+    remove_directory: bool,
     /// Whether a fixture created the lock while exclusively reserving its name.
     #[cfg(test)]
     remove_lock: bool,
 }
 
-#[cfg(unix)]
 impl SocketFiles {
     /// Remove the socket and any lock owned exclusively by a fixture.
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.path);
+        if self.remove_directory {
+            let _ = std::fs::remove_dir(self.path.parent().unwrap());
+        }
         #[cfg(test)]
         if self.remove_lock {
             let _ = std::fs::remove_file(self.path.with_extension("lock"));
@@ -105,8 +93,20 @@ pub(crate) fn identity() -> String {
     )
 }
 
-/// Resolve a protocol name within the current user's local IPC namespace.
-fn address(name: &str) -> io::Result<PathBuf> {
+/// Resolve the shared IPC root within this user's local application data.
+fn directory() -> io::Result<PathBuf> {
+    dirs::data_local_dir()
+        .map(|path| path.join("bio.dark.emulator").join("ipc"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "local application data directory is unavailable",
+            )
+        })
+}
+
+/// Resolve a protocol name to the same short filename on every host.
+pub(crate) fn address(name: &str) -> io::Result<PathBuf> {
     if name.is_empty()
         || name.len() > 70
         || !name
@@ -118,25 +118,104 @@ fn address(name: &str) -> io::Result<PathBuf> {
             "invalid local endpoint name",
         ));
     }
-    #[cfg(unix)]
-    {
-        // SAFETY: geteuid has no preconditions and does not retain pointers
-        let uid = unsafe { libc::geteuid() };
-        Ok(PathBuf::from(format!("/tmp/ark-emulator-{uid}")).join(name))
+    let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
+    let path = directory()?.join(&digest[..32]);
+    SockAddr::unix(&path)?;
+    Ok(path)
+}
+
+/// Create the private IPC root or verify its existing ownership and permissions.
+fn ensure_directory(path: &std::path::Path) -> io::Result<()> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    match create_directory(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
     }
-    #[cfg(windows)]
-    {
-        Ok(PathBuf::from(format!(
-            r"\\.\pipe\ark-emulator-{}-{name}",
-            windows_identity()?.0
-        )))
+    verify_directory(path)
+}
+
+/// Private directory retained until QEMU's endpoint has been removed.
+pub(crate) struct PrivateDirectory {
+    /// Directory removed after its socket is closed.
+    path: PathBuf,
+}
+
+impl PrivateDirectory {
+    /// Locate a socket within this access-controlled directory.
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+/// Create a private directory before QEMU can bind a socket inside it.
+pub(crate) fn private_directory() -> io::Result<PrivateDirectory> {
+    let root = directory()?;
+    ensure_directory(&root)?;
+
+    // A collision never adopts or removes a directory belonging to another endpoint
+    for _ in 0..DIRECTORY_ATTEMPTS {
+        let path = root.join(format!("h-{}", &identity()[..16]));
+        match create_directory(&path) {
+            Ok(()) => {
+                let directory = PrivateDirectory { path };
+                verify_directory(directory.path())?;
+                return Ok(directory);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a private IPC directory",
+    ))
+}
+
+/// Nonblocking socket registered for readiness and explicit wakeups on every host.
+struct ReadySocket {
+    /// Poller released before its socket, after unregistering it in `Drop`.
+    poller: Poller,
+    /// Socket kept alive for its entire readiness registration.
+    socket: Socket,
+}
+
+impl ReadySocket {
+    /// Register an owned socket without requesting events until a wait begins.
+    fn new(socket: Socket) -> io::Result<Self> {
+        socket.set_nonblocking(true)?;
+        let poller = Poller::new()?;
+        // SAFETY: this wrapper owns the socket and unregisters it before closing it
+        unsafe { poller.add(&socket, Event::none(SOCKET_EVENT))? };
+        Ok(Self { poller, socket })
+    }
+
+    /// Wait for readiness, a shutdown notification or the fixed deadline.
+    fn wait(&self, interest: Event, deadline: Instant) -> io::Result<()> {
+        // One-shot interest is rearmed after every WouldBlock, including timed-out waits
+        self.poller.modify(&self.socket, interest)?;
+        let mut events = Events::with_capacity(NonZeroUsize::new(1).unwrap());
+        self.poller.wait_deadline(&mut events, deadline)?;
+        Ok(())
+    }
+}
+
+impl Drop for ReadySocket {
+    fn drop(&mut self) {
+        let _ = self.poller.delete(&self.socket);
     }
 }
 
 /// A local connection with a single deadline for each read or write phase.
 pub(crate) struct Stream {
-    /// Nonblocking transport, including on Windows where timeouts are unavailable.
-    socket: Socket,
+    /// Nonblocking connection and its platform-independent readiness wait.
+    io: ReadySocket,
     /// Deadline shared by partial reads in the current phase.
     read_deadline: Cell<Instant>,
     /// Deadline shared by partial writes in the current phase.
@@ -147,27 +226,26 @@ impl Stream {
     /// Connect to a native endpoint without consulting proxies or DNS.
     pub(crate) fn connect(name: &str, timeout: Duration) -> io::Result<Self> {
         let path = address(name)?;
-        #[cfg(unix)]
-        verify_directory(path.parent().unwrap())?;
-        #[cfg(unix)]
-        let socket = ConnectOptions::new()
-            .name(path.to_fs_name::<GenericFilePath>()?)
-            .wait_mode(ConnectWaitMode::Timeout(timeout))
-            .nonblocking_stream(true)
-            .connect_sync()?;
-        #[cfg(windows)]
-        let socket = windows::connect(&path, timeout)?;
-        Ok(Self::new(socket, timeout))
+        Self::connect_path(&path, timeout)
     }
 
-    /// Wrap an accepted nonblocking connection with bounded I/O.
-    fn new(socket: Socket, timeout: Duration) -> Self {
+    /// Connect to a private endpoint supplied directly by the launcher.
+    pub(crate) fn connect_path(path: &std::path::Path, timeout: Duration) -> io::Result<Self> {
+        verify_directory(path.parent().unwrap())?;
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        socket.connect_timeout(&SockAddr::unix(path)?, timeout)?;
+        Self::new(socket, timeout)
+    }
+
+    /// Wrap a connection with readiness waits and bounded I/O.
+    pub(super) fn new(socket: Socket, timeout: Duration) -> io::Result<Self> {
+        let io = ReadySocket::new(socket)?;
         let deadline = Instant::now() + timeout;
-        Self {
-            socket,
+        Ok(Self {
+            io,
             read_deadline: Cell::new(deadline),
             write_deadline: Cell::new(deadline),
-        }
+        })
     }
 
     /// Set the budget for the next response read phase.
@@ -179,133 +257,118 @@ impl Stream {
     pub(crate) fn set_write_timeout(&self, timeout: Duration) {
         self.write_deadline.set(Instant::now() + timeout);
     }
-}
 
-/// Retry readiness under a fixed deadline, never replaying an application request.
-fn bounded<T>(deadline: Instant, mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    loop {
-        // A delayed worker must try queued I/O before deciding it needs more time
-        match operation() {
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) =>
-            {
-                let remaining =
-                    deadline
-                        .checked_duration_since(Instant::now())
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::TimedOut, "local IPC deadline expired")
-                        })?;
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    thread::sleep(POLL.min(remaining));
+    /// Retry readiness under a fixed deadline, never replaying an application request.
+    fn bounded<T>(
+        &self,
+        deadline: Instant,
+        interest: Event,
+        mut operation: impl FnMut(&Socket) -> io::Result<T>,
+    ) -> io::Result<T> {
+        loop {
+            // A delayed worker must try queued I/O before deciding it needs more time
+            match operation(&self.io.socket) {
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "local IPC deadline expired",
+                        ));
+                    }
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        && let Err(err) = self.io.wait(interest, deadline)
+                        && err.kind() != io::ErrorKind::Interrupted
+                    {
+                        return Err(err);
+                    }
                 }
+                result => return result,
             }
-            result => return result,
         }
     }
 }
 
 impl Read for Stream {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        bounded(self.read_deadline.get(), || {
-            #[cfg(unix)]
-            {
-                self.socket.read(bytes)
-            }
-            #[cfg(windows)]
-            {
-                windows::read(&mut self.socket, bytes)
-            }
-        })
+        self.bounded(
+            self.read_deadline.get(),
+            Event::readable(SOCKET_EVENT),
+            |mut socket| socket.read(bytes),
+        )
     }
 }
 
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        #[cfg(windows)]
-        let mut bytes = bytes;
-        bounded(self.write_deadline.get(), || {
-            #[cfg(unix)]
-            {
-                self.socket.write(bytes)
-            }
-            #[cfg(windows)]
-            loop {
-                match self.socket.write(bytes) {
-                    // PIPE_NOWAIT can reject a write larger than its free buffer
-                    // without accepting a prefix, even when the pipe is empty
-                    Ok(0) if bytes.len() > 1 => bytes = &bytes[..bytes.len() / 2],
-                    // Wait for the reader only when even one byte cannot fit
-                    Ok(0) if !bytes.is_empty() => {
-                        return Err(io::ErrorKind::WouldBlock.into());
-                    }
-                    result => return result,
-                }
-            }
-        })
+        self.bounded(
+            self.write_deadline.get(),
+            Event::writable(SOCKET_EVENT),
+            |mut socket| socket.write(bytes),
+        )
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // Writes are unbuffered; named-pipe flush would wait for peer consumption
-        Ok(())
+        (&self.io.socket).flush()
     }
 }
 
 /// One user-owned listener with exclusive name ownership and bounded accepts.
 pub(crate) struct Server {
-    /// Platform listener, inaccessible to browser networking APIs.
-    listener: Listener,
+    /// Listener and readiness notifications, inaccessible to browser networking APIs.
+    listener: ReadySocket,
     /// Endpoint name, never an arbitrary path supplied by discovery.
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     name: String,
     /// Interrupts an accept loop during launcher shutdown.
     stopped: AtomicBool,
-    /// Socket pair that interrupts the listener's readiness wait.
-    #[cfg(unix)]
-    wake: (UnixStream, UnixStream),
-    /// Notification that interrupts the idle pipe wait.
-    #[cfg(windows)]
-    wake: (Mutex<()>, Condvar),
+    /// Removes the endpoint after the listener closes and before releasing its lock.
+    _binding: Binding,
+}
+
+/// Socket path and ownership lock retained through listener teardown.
+struct Binding {
+    /// Socket removed after its listener has closed.
+    path: PathBuf,
     /// Held across stale socket removal, binding and final socket cleanup.
-    #[cfg(unix)]
     _lock: Option<File>,
+}
+
+impl Drop for Binding {
+    fn drop(&mut self) {
+        remove_socket(&self.path);
+    }
 }
 
 impl Server {
     /// Bind a private endpoint, recovering a stale socket only under its lock.
     pub(crate) fn bind(name: &str) -> io::Result<Self> {
         let path = address(name)?;
-        #[cfg(unix)]
-        let lock = prepare(&path)?;
-        #[cfg(unix)]
-        let wake = {
-            let pair = UnixStream::pair()?;
-            pair.1.set_nonblocking(true)?;
-            pair
+        ensure_directory(path.parent().unwrap())?;
+        let lock = if name.starts_with("c-") || name.starts_with("t-") {
+            None
+        } else {
+            Some(prepare(&path)?)
         };
-        #[cfg(windows)]
-        let wake = (Mutex::new(()), Condvar::new());
-        let options = ListenerOptions::new()
-            .name(path.as_path().to_fs_name::<GenericFilePath>()?)
-            .nonblocking(ListenerNonblockingMode::Both)
-            .reclaim_name(false);
-        #[cfg(windows)]
-        let options = {
-            use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
-            use interprocess::os::windows::security_descriptor::AsSecurityDescriptorExt as _;
-            options.security_descriptor(windows_identity()?.1.to_owned_sd()?)
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        listener.bind(&SockAddr::unix(&path)?)?;
+        let binding = Binding {
+            path: path.clone(),
+            _lock: lock,
         };
-        let listener = options.create_sync()?;
+        listener.listen(128)?;
+        let listener = ReadySocket::new(listener)?;
+        track_socket(path.clone(), false)?;
         let server = Self {
             listener,
-            #[cfg(any(unix, test))]
+            #[cfg(test)]
             name: name.to_owned(),
             stopped: AtomicBool::new(false),
-            wake,
-            #[cfg(unix)]
-            _lock: lock,
+            _binding: binding,
         };
 
         // macOS cannot set a socket's mode before bind. The private directory
@@ -313,7 +376,6 @@ impl Server {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            track_socket(path.clone())?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(server)
@@ -323,15 +385,12 @@ impl Server {
     /// The caller must reserve the name until the listener has been released.
     #[cfg(test)]
     pub(crate) fn bind_test(name: &str) -> io::Result<Self> {
-        #[cfg(unix)]
         let path = address(name)?;
-        #[cfg(unix)]
         let remove_lock = !path.with_extension("lock").try_exists()?;
         let result = Self::bind(name);
-        #[cfg(unix)]
         if remove_lock {
             match &result {
-                Ok(server) if server._lock.is_some() => {
+                Ok(server) if server._binding._lock.is_some() => {
                     let mut sockets = SOCKETS.lock().unwrap();
                     let socket = sockets
                         .as_mut()
@@ -370,19 +429,24 @@ impl Server {
 
     /// Bound the idle accept wait and the subsequent request read independently.
     pub(crate) fn recv_timeout(&self, timeout: Duration) -> io::Result<Option<Request>> {
+        self.accept_timeout(timeout)?
+            .map(|stream| Request::read(stream, MAX_REQUEST))
+            .transpose()
+    }
+
+    /// Accept a bounded native stream without imposing HTTP framing.
+    pub(crate) fn accept_timeout(&self, timeout: Duration) -> io::Result<Option<Stream>> {
         let deadline = Instant::now() + timeout;
         loop {
             if self.stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Ok(None);
             }
-            match self.listener.accept() {
-                Ok(socket) => {
-                    #[cfg(windows)]
-                    let socket = Socket::Server(socket);
-                    return Request::read(Stream::new(socket, IO_TIMEOUT)).map(Some);
+            match self.listener.socket.accept() {
+                Ok((socket, _)) => {
+                    return Stream::new(socket, IO_TIMEOUT).map(Some);
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = self.wait(deadline)
+                    if let Err(err) = self.listener.wait(Event::readable(SOCKET_EVENT), deadline)
                         && err.kind() != io::ErrorKind::Interrupted
                     {
                         thread::sleep(ACCEPT_BACKOFF);
@@ -398,84 +462,19 @@ impl Server {
         }
     }
 
-    /// Block until a connection, shutdown notification or idle deadline arrives.
-    #[cfg(unix)]
-    fn wait(&self, deadline: Instant) -> io::Result<()> {
-        let Listener::UdSocket(listener) = &self.listener;
-        let mut fds = [
-            libc::pollfd {
-                fd: listener.as_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: self.wake.0.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        let millis = timeout.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
-        // SAFETY: fds contains two initialized entries whose descriptors remain alive
-        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if fds.iter().any(|fd| fd.revents & libc::POLLNVAL != 0) {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
-        }
-        Ok(())
-    }
-
-    /// Wait for the next pipe poll or a shutdown notification.
-    #[cfg(windows)]
-    fn wait(&self, deadline: Instant) -> io::Result<()> {
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        let _guard = self
-            .wake
-            .1
-            .wait_timeout_while(
-                self.wake.0.lock().unwrap(),
-                ACCEPT_POLL.min(timeout),
-                |_| !self.stopped.load(Ordering::Acquire),
-            )
-            .unwrap();
-        Ok(())
-    }
-
     /// Wake an idle receiver during shutdown.
     pub(crate) fn unblock(&self) {
-        #[cfg(windows)]
-        let _guard = self.wake.0.lock().unwrap();
         self.stopped.store(true, Ordering::Release);
-        #[cfg(unix)]
-        let _ = (&self.wake.1).write(&[1]);
-        #[cfg(windows)]
-        self.wake.1.notify_all();
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Ok(path) = address(&self.name) {
-            let mut sockets = SOCKETS.lock().unwrap();
-            if let Some(sockets) = sockets.as_mut()
-                && let Some(index) = sockets.iter().position(|socket| socket.path == path)
-            {
-                sockets.swap_remove(index).remove();
-            } else {
-                let _ = std::fs::remove_file(path);
-            }
-        }
+        let _ = self.listener.poller.notify();
     }
 }
 
 /// Register a bound socket for cleanup on normal process exit.
-#[cfg(unix)]
-fn track_socket(path: PathBuf) -> io::Result<()> {
+pub(crate) fn track_socket(path: PathBuf, remove_directory: bool) -> io::Result<()> {
     let mut sockets = SOCKETS.lock().unwrap();
     if sockets.is_none() {
-        // process::exit skips destructors, including those in registry worker threads
+        // Unix also runs this backstop when main returns without explicit cleanup
+        #[cfg(unix)]
         // SAFETY: cleanup_sockets has the required ABI and remains valid until process exit
         if unsafe { libc::atexit(cleanup_sockets) } != 0 {
             return Err(io::Error::other("could not register local IPC cleanup"));
@@ -484,15 +483,34 @@ fn track_socket(path: PathBuf) -> io::Result<()> {
     }
     sockets.as_mut().unwrap().push(SocketFiles {
         path,
+        remove_directory,
         #[cfg(test)]
         remove_lock: false,
     });
     Ok(())
 }
 
+/// Remove owned endpoints best-effort before exiting without Rust destructors.
+pub(crate) fn exit(code: i32) -> ! {
+    // Windows ExitProcess bypasses C atexit callbacks
+    cleanup_sockets();
+    std::process::exit(code);
+}
+
+/// Remove an owned socket and release its process-exit cleanup record.
+pub(crate) fn remove_socket(path: &std::path::Path) {
+    let mut sockets = SOCKETS.lock().unwrap();
+    if let Some(sockets) = sockets.as_mut()
+        && let Some(index) = sockets.iter().position(|socket| socket.path == path)
+    {
+        sockets.swap_remove(index).remove();
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Remove owned endpoints without waiting for another thread during process exit.
-#[cfg(unix)]
-extern "C" fn cleanup_sockets() {
+pub(crate) extern "C" fn cleanup_sockets() {
     if let Ok(mut sockets) = SOCKETS.try_lock()
         && let Some(sockets) = sockets.as_mut()
     {
@@ -502,24 +520,18 @@ extern "C" fn cleanup_sockets() {
     }
 }
 
-/// Create a private directory and lock a name before reclaiming its socket.
+/// Create a new user-only directory without accepting an existing path.
 #[cfg(unix)]
-fn prepare(path: &std::path::Path) -> io::Result<Option<File>> {
-    use std::fs::{DirBuilder, OpenOptions};
-    use std::os::unix::fs::{
-        DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
-    };
-    let directory = path.parent().unwrap();
-    match DirBuilder::new().mode(0o700).create(directory) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(err),
-    }
-    verify_directory(directory)?;
-    let name = path.file_name().unwrap().to_str().unwrap();
-    if name.starts_with("c-") || name.starts_with("t-") {
-        return Ok(None);
-    }
+fn create_directory(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// Lock a persistent endpoint before reclaiming an owned stale socket.
+#[cfg(unix)]
+fn prepare(path: &std::path::Path) -> io::Result<File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _};
     // SAFETY: geteuid has no preconditions and does not retain pointers
     let uid = unsafe { libc::geteuid() };
     let lock = OpenOptions::new()
@@ -554,7 +566,7 @@ fn prepare(path: &std::path::Path) -> io::Result<Option<File>> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
-    Ok(Some(lock))
+    Ok(lock)
 }
 
 /// Reject redirected or accessible IPC directories on both sides of a connection.
@@ -573,8 +585,10 @@ fn verify_directory(path: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
-/// One bounded HTTP request whose reply closes the native connection.
+/// One bounded HTTP request whose reply closes its socket connection.
 pub(crate) struct Request {
+    /// HTTP version used for the reply's status line.
+    version: Version,
     /// Parsed HTTP method.
     method: Method,
     /// Exact request target, validated by the endpoint handler.
@@ -588,82 +602,56 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    /// Parse one HTTP/1.0 request under fixed size and time limits.
-    fn read(stream: Stream) -> io::Result<Self> {
-        let mut reader = BufReader::new(stream);
-        let mut head = Vec::new();
-        loop {
-            let available = reader.fill_buf()?;
-            if available.is_empty() {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    /// Parse one HTTP request under the stream's deadline and a body size limit.
+    pub(super) fn read(mut stream: Stream, limit: usize) -> io::Result<Self> {
+        let request = match super::http::read_request(&mut stream, limit) {
+            Ok(request) => request,
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                let status = if err
+                    .get_ref()
+                    .is_some_and(|err| err.is::<super::http::TooLarge>())
+                {
+                    413
+                } else {
+                    400
+                };
+                return Self::reject(stream, status);
             }
-            let count = available
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(available.len(), |index| index + 1);
-            if head.len() + count > MAX_REQUEST {
-                return Self::reject(reader.into_inner(), 413);
-            }
-            head.extend_from_slice(&available[..count]);
-            reader.consume(count);
-            if head.ends_with(b"\r\n\r\n") {
-                break;
-            }
-        }
-        let mut fields = [httparse::EMPTY_HEADER; 32];
-        let mut parsed = httparse::Request::new(&mut fields);
-        if !matches!(parsed.parse(&head), Ok(httparse::Status::Complete(_)))
-            || parsed.version != Some(0)
-        {
-            return Self::reject(reader.into_inner(), 400);
-        }
-        let method = parsed
-            .method
-            .unwrap()
+            Err(err) => return Err(err),
+        };
+        let method = request
+            .method()
+            .as_str()
             .parse::<Method>()
             .map_err(|()| io::Error::from(io::ErrorKind::InvalidData))?;
-        let path = parsed.path.unwrap().to_owned();
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |path| path.as_str())
+            .to_owned();
         let mut headers = Vec::new();
-        let mut length = None;
-        for field in parsed.headers {
-            if field.name.eq_ignore_ascii_case("Transfer-Encoding") {
-                return Self::reject(reader.into_inner(), 413);
-            }
-            if field.name.eq_ignore_ascii_case("Content-Length") {
-                if length.is_some() {
-                    return Self::reject(reader.into_inner(), 400);
-                }
-                length = std::str::from_utf8(field.value)
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok());
-                if length.is_none() {
-                    return Self::reject(reader.into_inner(), 400);
-                }
-                if length.unwrap() > MAX_REQUEST {
-                    return Self::reject(reader.into_inner(), 413);
-                }
-            }
+        for (name, value) in request.headers() {
             headers.push(
-                Header::from_bytes(field.name, field.value)
+                Header::from_bytes(name.as_str(), value.as_bytes())
                     .map_err(|()| io::Error::from(io::ErrorKind::InvalidData))?,
             );
         }
-        let mut body = vec![0; length.unwrap_or(0)];
-        reader.read_exact(&mut body)?;
         Ok(Self {
+            version: request.version(),
             method,
             path,
             headers,
-            body,
-            stream: reader.into_inner(),
+            body: request.into_body(),
+            stream,
         })
     }
 
     /// Reject framing before dispatching anything to an application handler.
     fn reject(mut stream: Stream, status: u16) -> io::Result<Self> {
+        stream.set_write_timeout(IO_TIMEOUT);
         let _ = write!(
             stream,
-            "HTTP/1.0 {status} Rejected\r\nContent-Length: 0\r\n\r\n"
+            "HTTP/1.1 {status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
         );
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -687,10 +675,37 @@ impl Request {
     pub(crate) fn body(&self) -> &[u8] {
         &self.body
     }
-    /// Send an HTTP response and release the native connection.
-    pub(crate) fn respond<R: Read>(self, response: Response<R>) -> io::Result<()> {
+    /// Send a response with its byte length and close the socket connection.
+    pub(crate) fn respond<R: Read>(mut self, response: Response<R>) -> io::Result<()> {
+        let status = response.status_code();
+        let mut raw = format!(
+            "{:?} {} {}\r\nConnection: close\r\n",
+            self.version,
+            status.0,
+            status.default_reason_phrase()
+        )
+        .into_bytes();
+        for header in response.headers() {
+            if !header.field.equiv("Content-Length")
+                && !header.field.equiv("Transfer-Encoding")
+                && !header.field.equiv("Connection")
+            {
+                write!(raw, "{header}\r\n")?;
+            }
+        }
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body)?;
+        // These statuses have no response body, so no length is needed
+        if matches!(status.0, 100..=199 | 204 | 304) {
+            raw.extend_from_slice(b"\r\n");
+        } else {
+            write!(raw, "Content-Length: {}\r\n\r\n", body.len())?;
+            if self.method != Method::Head {
+                raw.extend_from_slice(&body);
+            }
+        }
         self.stream.set_write_timeout(IO_TIMEOUT);
-        response.raw_print(self.stream, HTTPVersion(1, 0), &self.headers, false, None)
+        self.stream.write_all(&raw)
     }
     /// Expose the response stream to scripted peers testing partial replies.
     #[cfg(test)]
@@ -703,6 +718,82 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Protocol names map to the app-data paths native clients expect on every host.
+    #[test]
+    fn test_endpoint_paths_match_the_shared_namespace() {
+        let root = dirs::data_local_dir()
+            .unwrap()
+            .join("bio.dark.emulator")
+            .join("ipc");
+        for (name, file) in [
+            ("registry-18180", "675ee216b25e35275ab9abd52629e31f"),
+            ("c-0123456789abcdef", "498ca4e5b7df41bc7d678993c7bb742e"),
+        ] {
+            assert_eq!(address(name).unwrap(), root.join(file), "{name}");
+        }
+    }
+
+    /// Private channel directories share the IPC root and retain exclusive ownership.
+    #[test]
+    fn test_private_directories_are_distinct_and_removed_on_drop() {
+        let first = private_directory().unwrap();
+        let second = private_directory().unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        assert_eq!(first_path.parent().unwrap(), directory().unwrap());
+        assert_eq!(first_path.parent(), second_path.parent());
+        assert_ne!(first_path, second_path);
+        verify_directory(&first_path).unwrap();
+        verify_directory(&second_path).unwrap();
+
+        // Exclusive creation preserves an existing directory and its contents
+        let retained = second_path.join("retained");
+        std::fs::write(&retained, b"owned by the other channel").unwrap();
+        assert_eq!(
+            create_directory(&second_path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        drop(first);
+        assert!(!first_path.exists());
+        assert_eq!(
+            std::fs::read(&retained).unwrap(),
+            b"owned by the other channel"
+        );
+        std::fs::remove_file(retained).unwrap();
+        drop(second);
+        assert!(!second_path.exists());
+    }
+
+    /// Existing broad permissions and redirected IPC directories are refused unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn test_directory_access_controls() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let directory = private_directory().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            ensure_directory(directory.path()).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            Stream::connect_path(&directory.path().join("hw.sock"), IO_TIMEOUT)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        // Following a private target through a link must not bypass directory checks
+        let target = private_directory().unwrap();
+        let link = directory.path().join("link");
+        symlink(target.path(), &link).unwrap();
+        assert_eq!(
+            ensure_directory(&link).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        std::fs::remove_file(link).unwrap();
+    }
 
     /// Private listeners preserve replies and refuse a second live owner.
     #[test]
@@ -717,17 +808,17 @@ mod tests {
         });
         let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
         client
-            .write_all(b"GET /test HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
+            .write_all(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
-        let mut reply = String::new();
-        client.read_to_string(&mut reply).unwrap();
-        assert!(reply.ends_with("\r\n\r\naccepted"), "{reply:?}");
+        let mut reply = Vec::new();
+        client.read_to_end(&mut reply).unwrap();
+        assert!(reply.ends_with(b"\r\n\r\naccepted"), "{reply:?}");
+        assert!(reply.windows(17).any(|bytes| bytes == b"Content-Length: 8"));
         worker.join().unwrap();
     }
 
     /// Unique control and test endpoints leave neither sockets nor lock files.
     #[test]
-    #[cfg(unix)]
     fn test_unique_endpoints_leave_no_files_on_drop() {
         for prefix in ["c", "t"] {
             let name = format!("{prefix}-{}", identity());
@@ -743,8 +834,8 @@ mod tests {
 
     /// Fixture cleanup removes newly created locks and preserves pre-existing ones.
     #[test]
-    #[cfg(unix)]
     fn test_fixture_lock_cleanup_preserves_existing_locks() {
+        #[cfg(unix)]
         let _exclusive = PROCESS_TEST.lock().unwrap();
         let name = format!("registry-{}", &identity()[..32]);
         let path = address(&name).unwrap();
@@ -761,15 +852,15 @@ mod tests {
 
     /// Normal process exit removes sockets even when listener destructors are skipped.
     #[test]
-    #[cfg(unix)]
     fn test_process_exit_cleans_sockets() {
+        #[cfg(unix)]
         let _exclusive = PROCESS_TEST.lock().unwrap();
         if let Ok(id) = std::env::var("ARK_IPC_EXIT_TEST") {
             let _control = Server::bind(&format!("c-{id}")).unwrap();
             let _test = Server::bind(&format!("t-{id}")).unwrap();
             let _registry = Server::bind(&format!("registry-{}", &id[..32])).unwrap();
             let _fixture = Server::bind_test(&format!("registry-fixture-{}", &id[..32])).unwrap();
-            std::process::exit(0);
+            exit(0);
         }
         let id = identity();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -794,13 +885,13 @@ mod tests {
 
     /// Exit skips socket cleanup when its bookkeeping mutex is held.
     #[test]
-    #[cfg(unix)]
     fn test_process_exit_skips_busy_cleanup() {
+        #[cfg(unix)]
         let _exclusive = PROCESS_TEST.lock().unwrap();
         if let Ok(name) = std::env::var("ARK_IPC_BUSY_EXIT_TEST") {
             let _server = Server::bind(&name).unwrap();
             let _sockets = SOCKETS.lock().unwrap();
-            std::process::exit(0);
+            exit(0);
         }
         let name = format!("t-{}", identity());
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -916,25 +1007,31 @@ mod tests {
 
     /// Socket permissions restrict access and stale recovery preserves files.
     #[test]
-    #[cfg(unix)]
     fn test_permissions_stale_recovery_and_file_preservation() {
+        #[cfg(unix)]
         use std::os::unix::fs::MetadataExt as _;
-        use std::os::unix::net::UnixListener;
+        #[cfg(unix)]
         let _exclusive = PROCESS_TEST.lock().unwrap();
         let name = format!("registry-{}", &identity()[..32]);
         let server = Server::bind(&name).unwrap();
         let path = address(&name).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        assert_eq!(
-            std::fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777,
-            0o700
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777,
+                0o700
+            );
+        }
+        verify_directory(path.parent().unwrap()).unwrap();
         drop(server);
         assert!(!path.exists());
         assert!(path.with_extension("lock").exists());
 
         // A crashed owner's socket remains after its kernel listener disappears
-        drop(UnixListener::bind(&path).unwrap());
+        let stale = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        stale.bind(&SockAddr::unix(&path).unwrap()).unwrap();
+        drop(stale);
         let server = Server::bind(&name).unwrap();
         assert!(Stream::connect(&name, IO_TIMEOUT).is_ok());
         drop(server);
@@ -960,7 +1057,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4));
         drop(stalled);
         let mut next = Stream::connect(&name, IO_TIMEOUT).unwrap();
-        next.write_all(b"GET /next HTTP/1.0\r\n\r\n").unwrap();
+        next.write_all(b"GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         assert_eq!(server.recv().unwrap().url(), "/next");
     }
 
@@ -971,17 +1069,14 @@ mod tests {
         let name = format!("t-{}", identity());
         let server = Server::bind(&name).unwrap();
         let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
-        let socket = server.listener.accept().unwrap();
-        #[cfg(windows)]
-        let socket = Socket::Server(socket);
+        let stream = server.accept_timeout(IO_TIMEOUT).unwrap().unwrap();
         client
             .write_all(b"POST /v1/stop HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
 
         // An expired timestamp models descheduling without a timing-based wait
-        let stream = Stream::new(socket, IO_TIMEOUT);
         stream.read_deadline.set(Instant::now() - IO_TIMEOUT);
-        let request = Request::read(stream).unwrap();
+        let request = Request::read(stream, MAX_REQUEST).unwrap();
         assert_eq!(request.method(), &Method::Post);
         assert_eq!(request.url(), "/v1/stop");
         assert!(request.body().is_empty());
@@ -1010,10 +1105,12 @@ mod tests {
         let name = format!("t-{}", identity());
         let server = Server::bind(&name).unwrap();
         let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
-        client.write_all(b"GET /test HTTP/1.0\r\n\r\n").unwrap();
+        client
+            .write_all(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         let mut reply = server.recv().unwrap().into_writer();
 
-        // An open pipe with no response bytes is idle, not at EOF
+        // An open socket with no response bytes remains idle
         client.set_read_timeout(Duration::from_millis(40));
         let err = client.read(&mut [0]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
@@ -1028,22 +1125,28 @@ mod tests {
         let err = client.read(&mut [0]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
 
-        // Closing after the final fragment supplies real EOF
-        reply.write_all(b"last").unwrap();
-        drop(reply);
+        // Fragments and EOF arriving during a readiness wait must each wake the reader
+        let writer = thread::spawn(move || {
+            for fragment in [b"last".as_slice(), b" reply"] {
+                thread::sleep(Duration::from_millis(20));
+                reply.write_all(fragment).unwrap();
+            }
+            thread::sleep(Duration::from_millis(20));
+        });
         client.set_read_timeout(IO_TIMEOUT);
         let mut last = String::new();
         client.read_to_string(&mut last).unwrap();
-        assert_eq!(last, "last");
+        writer.join().unwrap();
+        assert_eq!(last, "last reply");
     }
 
-    /// A peer that stops consuming bytes cannot leave a writer blocked indefinitely.
+    /// A stalled peer bounds writes, which resume when it starts consuming bytes.
     #[test]
-    fn test_full_send_buffer_obeys_the_write_deadline() {
+    fn test_full_send_buffer_times_out_and_resumes() {
         let name = format!("t-{}", identity());
         let server = Server::bind(&name).unwrap();
         let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
-        let _peer = server.listener.accept().unwrap();
+        let mut peer = server.accept_timeout(IO_TIMEOUT).unwrap().unwrap();
         client.set_write_timeout(Duration::from_millis(40));
 
         // Bound the attempted data while filling the OS buffer without a reader
@@ -1056,29 +1159,68 @@ mod tests {
         }
         let err = failure.expect("the send buffer accepted 16 MiB without a reader");
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+
+        // Reusing the connection rearms writable interest after the expired deadline
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            peer.set_read_timeout(IO_TIMEOUT);
+            let mut received = Vec::new();
+            peer.read_to_end(&mut received).unwrap();
+            received
+        });
+        client.set_write_timeout(IO_TIMEOUT);
+        client.write_all(b"resumed").unwrap();
+        drop(client);
+        let received = reader.join().unwrap();
+        let buffered = received.strip_suffix(b"resumed").unwrap();
+        assert!(!buffered.is_empty());
+        assert!(buffered.iter().all(|byte| *byte == 0));
     }
 
-    /// A busy Windows pipe respects the native client's connection timeout.
+    /// Listeners queue more than one client before accepting either connection.
     #[test]
-    #[cfg(windows)]
-    fn test_busy_pipe_connection_is_bounded() {
+    fn test_connections_can_queue_before_accept() {
         let name = format!("t-{}", identity());
         let server = Server::bind(&name).unwrap();
         let _first = Stream::connect(&name, IO_TIMEOUT).unwrap();
-        let (finished, result) = std::sync::mpsc::channel();
-        let worker = thread::spawn(move || {
-            finished
-                .send(Stream::connect(&name, Duration::from_millis(40)).map(|_| ()))
-                .unwrap();
-        });
+        let _second = Stream::connect(&name, IO_TIMEOUT).unwrap();
+        assert!(server.accept_timeout(IO_TIMEOUT).unwrap().is_some());
+        assert!(server.accept_timeout(IO_TIMEOUT).unwrap().is_some());
+    }
 
-        // Accept only after the deadline check, releasing a regressed waiting client
-        let answer = result.recv_timeout(Duration::from_secs(1));
-        let _peer = server.listener.accept().unwrap();
-        worker.join().unwrap();
-        let err = answer
-            .expect("connection exceeded its deadline")
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+    /// Accept readiness wakes again after an idle timeout and successive connections.
+    #[test]
+    fn test_accept_readiness_rearms_after_timeouts_and_connections() {
+        let name = format!("t-{}", identity());
+        let server = Server::bind(&name).unwrap();
+        assert!(
+            server
+                .accept_timeout(Duration::from_millis(20))
+                .unwrap()
+                .is_none()
+        );
+
+        // Each client arrives after the previous connection has been handled
+        let (waiting, ready) = std::sync::mpsc::channel();
+        let receiver = thread::spawn(move || {
+            for expected in [1, 2, 3] {
+                waiting.send(()).unwrap();
+                let mut stream = server.accept_timeout(IO_TIMEOUT).unwrap().unwrap();
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                assert_eq!(byte, [expected]);
+                stream.write_all(&byte).unwrap();
+            }
+        });
+        for value in [1, 2, 3] {
+            ready.recv_timeout(IO_TIMEOUT).unwrap();
+            thread::sleep(Duration::from_millis(20));
+            let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
+            client.write_all(&[value]).unwrap();
+            let mut echoed = [0];
+            client.read_exact(&mut echoed).unwrap();
+            assert_eq!(echoed, [value]);
+        }
+        receiver.join().unwrap();
     }
 }

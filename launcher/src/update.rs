@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::cli::output::Output;
-use crate::diagnostics::log;
+use tracing::debug;
 
 /// Hidden sole argument that runs the detached lookup and nothing else.
 pub(crate) const ENTRY_POINT: &str = "__update";
@@ -114,7 +114,7 @@ pub(crate) fn start(output: &Output, now: OffsetDateTime) {
         return;
     }
     let Some(directory) = directory() else {
-        log!("[launcher] update cache directory could not be located");
+        debug!("update cache directory could not be located");
         return;
     };
 
@@ -132,7 +132,7 @@ pub(crate) fn start(output: &Output, now: OffsetDateTime) {
 
     // Claim before asking, so a failing network asks only once an hour
     if let Err(error) = claim(&directory, now) {
-        log!("[launcher] update claim could not be written: {}", error);
+        debug!("update claim could not be written: {}", error);
         return;
     }
 
@@ -160,7 +160,7 @@ pub(crate) fn start(output: &Output, now: OffsetDateTime) {
         command.spawn().map(drop)
     });
     if let Err(error) = result {
-        log!("[launcher] update process could not be started: {}", error);
+        debug!("update process could not be started: {}", error);
     }
 }
 

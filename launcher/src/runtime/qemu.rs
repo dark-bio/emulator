@@ -12,9 +12,9 @@
 //! one a packaged build ships a QEMU for. A cross-architecture guest always
 //! runs under TCG emulation and always needs a QEMU on `PATH`.
 //!
-//! The guest is minimal on purpose: virtio net and block, no monitor and no
-//! graphics. One host port forwarded through SLIRP is the entire interface the
-//! UI and any host-side client talk to.
+//! The guest is minimal on purpose: virtio net and block, no interactive monitor and no
+//! graphics. USB uses one host port forwarded through SLIRP. Hardware uses a
+//! dedicated virtio-serial device connected to private host IPC.
 //!
 //! A bundled firmware boots with its serial console attached to a null
 //! device, so the guest's output goes nowhere and stdout stays empty. A
@@ -37,12 +37,13 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::bundle::{Firmware, resolve_sidecar};
-use crate::diagnostics::{self, log};
+use crate::bundle::resolve_sidecar;
+use crate::diagnostics;
 use crate::platform::orphan;
 use crate::platform::{
     accel_flags, library_path_var, prepend_library_path, suppress_child_console,
 };
+use tracing::debug;
 
 /// CPU architecture of the firmware being booted, in the same docker-style
 /// vocabulary the firmware build names its artifacts with.
@@ -296,7 +297,7 @@ pub(crate) fn ensure_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// Create a blank qcow2 image, replacing any existing contents at `path`.
 /// The caller must first reject images used by a running emulator.
 pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
-    log!("[launcher] creating qcow2 image at {}", path.display());
+    debug!("creating qcow2 image at {}", path.display());
     // qcow2 is sparse on every host, including Windows NTFS where a raw
     // set_len would zero-fill the whole file. Delegated to qemu-img rather
     // than hand-writing the format. The bare byte count is read as bytes.
@@ -311,8 +312,8 @@ pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
         // qemu-img says what it could not do and why on stderr; its stdout is
         // just the format line, which belongs in the log rather than in front
         // of the user.
-        log!(
-            "[qemu-img] {}",
+        debug!(
+            target: "ark_emulator::qemu_img", "{}",
             String::from_utf8_lossy(&output.stdout).trim()
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -332,25 +333,25 @@ pub(crate) fn create_disk(path: &Path, qemu_libs: Option<&Path>) -> Result<()> {
 /// sidecar API, which exposes no pre-exec hook, and the Linux orphan
 /// protection needs one to arm `PR_SET_PDEATHSIG`.
 pub(crate) fn spawn_qemu(
-    arch: GuestArch,
-    firmware: &Firmware,
+    pending: &mut super::Pending,
     disk: &Path,
     memory: u32,
     env: &str,
-    qemu_libs: Option<&Path>,
-    host_port: &mut HostPort,
+    hardware: &crate::ipc::hardware::Endpoint,
+    monitor: &crate::ipc::hardware::Endpoint,
 ) -> Result<Child> {
+    let arch = pending.arch;
+    let firmware = &pending.firmware;
+    let qemu_libs = pending.qemu_libs.as_deref();
+    let host_port = &mut pending.host_port;
     let native = arch.host();
     let qemu = resolve_qemu(arch);
     let origin = if qemu.bundled { "bundled" } else { "on PATH" };
-    log!(
-        "[launcher] using the {origin} QEMU at {}",
-        qemu.binary.display()
-    );
+    debug!("using the {} QEMU at {}", origin, qemu.binary.display());
     diagnostics::record("QEMU", format!("{} ({origin})", qemu.binary.display()));
     let mut cmd = qemu.command(qemu_libs);
     if let Some(libs) = qemu_libs {
-        log!("[launcher] passing -L {} to QEMU", libs.display());
+        debug!("passing -L {} to QEMU", libs.display());
         // -L points QEMU at its firmware/BIOS/keymap datadir, e.g.
         // bios-256k.bin, which the q35 machine model needs even for a direct
         // -kernel boot since SeaBIOS still runs first. QEMU looks up only the
@@ -400,6 +401,20 @@ pub(crate) fn spawn_qemu(
             disk.display()
         ))
         .args(["-device", "virtio-blk-pci,drive=disk0", "-monitor", "none"]);
+
+    // The private monitor reports guest port closure independently of its socket
+    cmd.arg("-chardev")
+        .arg(monitor.chardev())
+        .args(["-mon", "chardev=qmp,mode=control"]);
+
+    // Hardware uses a private virtio port; the serial console retains stdio
+    cmd.arg("-chardev")
+        .arg(hardware.chardev())
+        .args(["-device", "virtio-serial-pci", "-device"])
+        .arg(format!(
+            "virtserialport,id=hw,chardev=hw,name={}",
+            crate::ipc::hardware::PORT_NAME
+        ));
 
     // -nographic would otherwise hand the serial device to stdio, so a build
     // that wants nothing printed points it at a null device instead. The

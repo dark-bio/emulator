@@ -146,8 +146,14 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         },
     }
 
-    let registry = discovery::CLIENT.list();
+    let mut registry_warnings = Vec::new();
+    let registry = discovery::CLIENT.list(|warning| registry_warnings.push(warning));
     match &registry {
+        Ok(_) if !registry_warnings.is_empty() => checks.fail(
+            "registry",
+            Error::new(Code::RegistryUnreachable, registry_warnings.join("; "))
+                .hint("update Ark Emulator and restart all running launchers"),
+        ),
         Ok(instances) if instances.is_empty() => checks.ok("registry", "no emulator running"),
         Ok(instances) => checks.ok("registry", &format!("{} running", instances.len())),
         Err(err) => checks.fail(

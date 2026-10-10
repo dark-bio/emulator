@@ -26,9 +26,9 @@ use anyhow::{Context as _, Result, bail};
 use tauri::PackageInfo;
 
 use crate::cli::args::Boot;
-use crate::diagnostics::log;
 use crate::platform::strip_verbatim_prefix;
 use crate::runtime::qemu::GuestArch;
+use tracing::debug;
 
 /// Where this build keeps its files, resolved without a window so that a
 /// command line run never has to start one.
@@ -135,7 +135,7 @@ fn resource_dir(package: &PackageInfo) -> Option<PathBuf> {
     let dir = match tauri::utils::platform::resource_dir(package, &tauri::Env::default()) {
         Ok(dir) => strip_verbatim_prefix(&dir),
         Err(e) => {
-            log!("[launcher] could not resolve the resource directory: {e}");
+            debug!("could not resolve the resource directory: {}", e);
             return None;
         }
     };
@@ -171,17 +171,18 @@ pub(crate) fn resolve_sidecar(name: &str) -> Option<PathBuf> {
 /// picked.
 pub(crate) fn resolve_qemu_libs(resources: Option<&Path>) -> Option<PathBuf> {
     let Some(dir) = resources.map(|dir| dir.join("qemu-libs")) else {
-        log!("[launcher] no bundled resources, using QEMU's own search paths");
+        debug!("no bundled resources, using QEMU's own search paths");
         return None;
     };
     if !dir.exists() {
-        log!("[launcher] no bundled qemu-libs, using QEMU's own search paths");
+        debug!("no bundled qemu-libs, using QEMU's own search paths");
         return None;
     }
     let count = std::fs::read_dir(&dir).map(|it| it.count()).unwrap_or(0);
-    log!(
-        "[launcher] using bundled qemu-libs at {} ({count} files)",
-        dir.display()
+    debug!(
+        "using bundled qemu-libs at {} ({} files)",
+        dir.display(),
+        count
     );
     Some(dir)
 }

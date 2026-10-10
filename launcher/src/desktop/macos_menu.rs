@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result, bail};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 
-use crate::diagnostics::log;
+use tracing::debug;
 
 const NEW_WINDOW: &str = "new-window";
 
@@ -27,7 +27,7 @@ pub(super) fn install(app: &tauri::App) -> Result<()> {
         if event.id().as_ref() == NEW_WINDOW {
             std::thread::spawn(|| {
                 if let Err(err) = spawn_new_instance() {
-                    log!("[launcher] could not start another emulator: {err:#}");
+                    debug!("could not start another emulator: {:#}", err);
                     rfd::MessageDialog::new()
                         .set_title("Could not start another emulator")
                         .set_description(format!("{err:#}"))

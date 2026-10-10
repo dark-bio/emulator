@@ -68,13 +68,18 @@ pub(crate) fn run(
             // Keep the event loop alive to display startup failures
             Ok(())
         })
-        .run(context)
+        .build(context)
         .unwrap_or_else(|err| {
             output.error(&Error::io(format!(
                 "{:#}",
                 anyhow!(err).context("the window system could not be started")
             )));
             runtime::shut_down(1);
+        })
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                crate::ipc::local::cleanup_sockets();
+            }
         });
 }
 

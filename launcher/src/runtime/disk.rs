@@ -38,9 +38,9 @@ use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::diagnostics::log;
 use crate::ipc::{discovery, registry::Instance};
 use crate::platform::strip_verbatim_prefix;
+use tracing::debug;
 
 /// Name used when an unattended launch needs to allocate an image.
 pub(crate) const DEFAULT_DISK: &str = "emulator.ark";
@@ -146,8 +146,8 @@ pub(crate) fn decide(
     if let Some(disk) = remembered {
         if let Some(instance) = discovery::booted(booted, disk) {
             let reason = Reason::InUse(disk.to_path_buf());
-            log!(
-                "[launcher] the remembered disk image {} is already booted on port {}",
+            debug!(
+                "the remembered disk image {} is already booted on port {}",
                 disk.display(),
                 instance.port
             );
@@ -167,10 +167,7 @@ pub(crate) fn decide(
             return Ok(Resolved::Boot(disk.to_path_buf()));
         } else {
             let reason = Reason::Missing(disk.to_path_buf());
-            log!(
-                "[launcher] the remembered disk image {} is gone",
-                disk.display()
-            );
+            debug!("the remembered disk image {} is gone", disk.display());
             if !no_input {
                 return Ok(Resolved::Ask {
                     suggestion: None,
@@ -248,7 +245,7 @@ pub(crate) fn require_existing(path: &Path) -> Result<()> {
 pub(crate) fn require_available(path: &Path) -> Result<()> {
     check_available(path, BOOTED.get().map(PathBuf::as_path), &[])?;
     let booted = discovery::CLIENT
-        .list()
+        .list(|warning| tracing::warn!("{}", warning))
         .context("could not check which images are running")?;
     check_available(path, None, &booted)
 }

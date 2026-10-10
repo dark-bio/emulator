@@ -4,13 +4,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! What the launcher knows about itself, kept ready for a crash report.
+//! Keeps tracing events and launcher facts ready for a crash report.
 //!
-//! A packaged build has nowhere to print: Windows release builds link as GUI
-//! apps and a macOS `.app` or Linux AppImage started from a file manager has no
-//! visible stderr. So every diagnostic goes through [`log!`] instead, which
-//! keeps the line in a bounded ring buffer and hands it to whichever [`Sink`]
-//! this run chose. QEMU's own stderr is teed in here too.
+//! Enabled launcher events enter a bounded ring buffer and, once opened, the log file.
+//! The output layer renders enabled diagnostics on stderr, including QEMU's
+//! captured stderr. Windowed launches retain the same events for error reports.
 //!
 //! Alongside the log sits a small ordered set of facts about this run (guest
 //! architecture, which QEMU was picked, the paths in play). They are recorded
@@ -34,6 +32,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::prelude::*;
+
+use crate::cli::args::Log;
+use crate::cli::output::Output;
 
 /// Product name, matching `productName` in `tauri.conf.json`.
 const PRODUCT: &str = "Ark Emulator";
@@ -52,8 +60,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     log: VecDeque::new(),
     facts: Vec::new(),
     file: None,
-    sink: Sink::Stderr,
-    trace: false,
+    output: None,
 });
 
 /// The ring, the file, the facts and where lines go besides them.
@@ -64,53 +71,30 @@ struct State {
     facts: Vec<(&'static str, String)>,
     /// This launcher's own log file, once it has one.
     file: Option<File>,
-    /// Where a line goes besides the ring and the file.
-    sink: Sink,
-    /// Whether the chatty lines, one per registry request, are kept too.
-    trace: bool,
+    /// Optional terminal output, independent of crash-log retention.
+    output: Option<Output>,
 }
 
-/// Where a log line goes besides the ring and the log file.
-pub(crate) enum Sink {
-    /// Straight to stderr, which is what a run with a window does.
-    Stderr,
-
-    /// Through a command's output layer, as `log` events.
-    Events(crate::cli::output::Output),
-
-    /// Nowhere, which is a command that was not asked for diagnostics.
-    Quiet,
-}
-
-/// Choose where this run echoes its log lines. The ring and the log file get
-/// them whatever is chosen, so a crash report is never short of them.
-pub(crate) fn log_sink(sink: Sink) {
+/// Installs launcher diagnostics before any runtime threads start.
+///
+/// # Panics
+/// Panics if a global tracing subscriber has already been installed.
+pub(crate) fn init(output: &Output, level: Option<Log>, command: bool) {
+    // Commands keep diagnostics off stderr unless the caller requests them
     if let Ok(mut state) = STATE.lock() {
-        state.sink = sink;
+        state.output = (!command || level.is_some()).then(|| output.clone());
     }
-}
+    let level = if level == Some(Log::Trace) {
+        LevelFilter::TRACE
+    } else {
+        LevelFilter::DEBUG
+    };
 
-/// Choose how much this run logs. Trace adds one line per registry request,
-/// which is more than anybody wants unless they asked.
-pub(crate) fn level(level: Option<crate::cli::args::Log>) {
-    if let Ok(mut state) = STATE.lock() {
-        state.trace = level == Some(crate::cli::args::Log::Trace);
-    }
-}
-
-/// Record a line only under trace. Takes the same arguments as [`log!`].
-macro_rules! trace {
-    ($($arg:tt)*) => {{
-        if $crate::diagnostics::tracing() {
-            $crate::diagnostics::push(format!($($arg)*));
-        }
-    }};
-}
-pub(crate) use trace;
-
-/// Whether trace lines are wanted, read by [`trace!`] before it formats one.
-pub(crate) fn tracing() -> bool {
-    STATE.lock().is_ok_and(|state| state.trace)
+    // Dependency events can contain data outside the launcher's diagnostic contract
+    tracing_subscriber::registry()
+        .with(Targets::new().with_target("ark_emulator", level))
+        .with(Diagnostics)
+        .init();
 }
 
 /// The directory every launcher writes its log file into.
@@ -138,36 +122,78 @@ pub(crate) fn log_to(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Record one diagnostic line and hand it to this run's sink. Takes the same
-/// arguments as [`eprintln!`], which it replaces throughout the launcher.
-macro_rules! log {
-    ($($arg:tt)*) => {{
-        $crate::diagnostics::push(format!($($arg)*));
-    }};
-}
-pub(crate) use log;
+/// Subscriber layer retaining events and forwarding their metadata to the output layer.
+struct Diagnostics;
 
-/// Add an already-formatted line to the ring, the log file and the sink,
-/// dropping the oldest ring entry once full. Called by [`log!`]; use that
-/// instead.
-pub(crate) fn push(line: String) {
-    let Ok(mut state) = STATE.lock() else {
-        return;
-    };
-    if let Some(file) = state.file.as_mut() {
-        // A log file that cannot be written is not a reason to stop logging,
-        // and the line is still in the ring.
-        let _ = writeln!(file, "{line}");
+/// One stored diagnostic, retaining its metadata when a parent relays the log.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct LogRecord {
+    /// Tracing severity in lowercase.
+    pub(crate) level: String,
+    /// Module or named source that emitted the event.
+    pub(crate) target: String,
+    /// Event fields, including its formatted message.
+    pub(crate) fields: Map<String, Value>,
+}
+
+impl<S: Subscriber> Layer<S> for Diagnostics {
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let metadata = event.metadata();
+        let message = fields
+            .0
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let line = format!("[{}] {}", metadata.target(), message)
+            .replace('\r', "\\r")
+            .replace('\n', "\\n");
+        let record = LogRecord {
+            level: metadata.level().as_str().to_ascii_lowercase(),
+            target: metadata.target().to_owned(),
+            fields: fields.0,
+        };
+
+        // A failed file write leaves the event available in the crash report
+        let output = {
+            let Ok(mut state) = STATE.lock() else {
+                return;
+            };
+            if let Some(file) = state.file.as_mut() {
+                let _ = writeln!(file, "{}", serde_json::to_string(&record).unwrap());
+            }
+            if state.log.len() == LOG_CAPACITY {
+                state.log.pop_front();
+            }
+            state.log.push_back(line);
+            state.output.clone()
+        };
+
+        // Terminal I/O happens after releasing the crash-log lock
+        if let Some(output) = output {
+            output.log(&record.level, &record.target, &record.fields);
+        }
     }
-    match &state.sink {
-        Sink::Stderr => eprintln!("{line}"),
-        Sink::Events(output) => output.event("log", &line),
-        Sink::Quiet => {}
+}
+
+/// Fields captured from positional tracing events.
+#[derive(Default)]
+struct Fields(
+    /// JSON fields retained alongside the event's level and target.
+    Map<String, Value>,
+);
+
+impl Visit for Fields {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_owned(), Value::String(format!("{value:?}")));
     }
-    if state.log.len() == LOG_CAPACITY {
-        state.log.pop_front();
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0
+            .insert(field.name().to_owned(), Value::String(value.to_owned()));
     }
-    state.log.push_back(line);
 }
 
 /// Note a fact about this run for the report. Recording the same key twice

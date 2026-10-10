@@ -182,6 +182,39 @@ impl Output {
         let _ = stderr.flush();
     }
 
+    /// Renders a tracing event with its level, target and fields in JSON output.
+    pub(crate) fn log(&self, level: &str, target: &str, fields: &serde_json::Map<String, Value>) {
+        let message = fields.get("message").and_then(Value::as_str).unwrap_or("");
+        if !self.json() {
+            self.event("log", format!("[{target}] {message}"));
+            return;
+        }
+
+        // Escape external strings before they can form terminal control sequences
+        let fields: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::String(value) => Value::String(style::printable(value)),
+                    value => value.clone(),
+                };
+                (key.clone(), value)
+            })
+            .collect();
+        let mut spacing = self.0.spacing.lock().expect("output not poisoned");
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "{}",
+            json!({
+                "event": "log", "message": style::printable(message),
+                "level": level.to_ascii_lowercase(), "target": target, "fields": fields,
+            })
+        );
+        spacing.err_printed = true;
+        let _ = stderr.flush();
+    }
+
     /// Report a failure and the steps out of it. Under JSON the error object
     /// also lands on stdout, as the one member of an `error` envelope, when
     /// there is no result to replace.

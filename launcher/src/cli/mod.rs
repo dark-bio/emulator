@@ -16,7 +16,6 @@ mod style;
 use anyhow::Result;
 
 use crate::bundle::Paths;
-use crate::diagnostics::log;
 use crate::error::{Code, Error};
 use crate::platform;
 use crate::runtime::disk::Resolved;
@@ -24,6 +23,7 @@ use crate::runtime::qemu::ensure_disk;
 use crate::runtime::{self, Runtime};
 use args::Boot;
 use output::Output;
+use tracing::debug;
 
 /// Run in the foreground until QEMU exits or shutdown is requested.
 pub(crate) fn headless(paths: &Paths, boot: Boot, output: Output) -> Result<()> {
@@ -40,7 +40,7 @@ pub(crate) fn headless(paths: &Paths, boot: Boot, output: Output) -> Result<()> 
         }
         Err(err) => {
             // The parent start command reads this log after the launcher exits
-            log!("[launcher] stopped unexpectedly: {err:#}");
+            debug!("stopped unexpectedly: {:#}", err);
             output.error(&Error::new(Code::StoppedUnexpectedly, format!("{err:#}")));
             runtime::shut_down(1);
         }

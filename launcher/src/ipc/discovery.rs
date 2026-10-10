@@ -5,7 +5,7 @@
 // license that can be found in the LICENSE file.
 
 //! The launcher's side of the registry: reading it, keeping this emulator's
-//! entry in it up to date, and bounded HTTP framing over private local IPC.
+//! entry in it up to date, and HTTP messages over private local IPC.
 //!
 //! A refused connection means no registry is running. Connection loss can
 //! recover through host takeover; HTTP refusals, timeouts and malformed replies
@@ -26,10 +26,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
+use tracing::{debug, trace};
 
 use super::registry::{self, Instance, REGISTRY_PORT, SCHEMA_VERSION};
 use super::{http, local};
-use crate::diagnostics::{log, trace};
 use crate::runtime::hardware::Controller;
 
 /// How often this emulator re-registers itself.
@@ -63,8 +63,8 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    /// List running emulators, returning an empty list only on connection refusal.
-    pub(crate) fn list(self) -> Result<Vec<Instance>, Failure> {
+    /// Lists valid entries and reports each rejected entry through the caller.
+    pub(crate) fn list(self, report: impl FnMut(String)) -> Result<Vec<Instance>, Failure> {
         let body = match request(self.address, "GET", "/v1/instances", None) {
             Ok(body) => body,
             Err(Failure::Transport(err))
@@ -77,7 +77,7 @@ impl Client {
             }
             Err(err) => return Err(err),
         };
-        parse_listing(&body).map_err(Failure::Invalid)
+        parse_listing(&body, report).map_err(Failure::Invalid)
     }
 
     /// Publish an entry, attempting host takeover only after a lost connection.
@@ -89,7 +89,7 @@ impl Client {
             Err(err) if err.retryable() => {
                 // A disappearing host frees its port for one of the other launchers
                 if registry::host(self.address)? {
-                    log!("[discovery] the registry had no host, taking it over");
+                    debug!("the registry had no host, taking it over");
                 }
                 request(self.address, "POST", "/v1/instances", Some(&body))?
             }
@@ -104,10 +104,9 @@ impl Client {
     }
 }
 
-/// The instances in a listing. Each entry is read on its own, so one this
-/// build cannot make sense of is logged and skipped rather than hiding the
-/// rest, and a listing of another version is refused whole.
-fn parse_listing(body: &[u8]) -> Result<Vec<Instance>> {
+/// Reads valid entries and reports invalid ones without hiding the rest.
+/// A listing of an unknown version fails before any entries are read.
+fn parse_listing(body: &[u8], mut report: impl FnMut(String)) -> Result<Vec<Instance>> {
     let listing: serde_json::Value =
         serde_json::from_slice(body).context("could not read the registry's answer")?;
     let version = listing["version"].as_u64();
@@ -122,11 +121,15 @@ fn parse_listing(body: &[u8]) -> Result<Vec<Instance>> {
         .context("the registry's answer holds no instances")?;
     Ok(entries
         .iter()
+        .enumerate()
         .filter_map(
-            |entry| match serde_json::from_value::<Instance>(entry.clone()) {
+            |(index, entry)| match serde_json::from_value::<Instance>(entry.clone()) {
                 Ok(instance) => Some(instance),
                 Err(err) => {
-                    log!("[discovery] skipping an entry the registry holds: {err}");
+                    report(format!(
+                        "registry entry {} is invalid and was skipped: {err}",
+                        index + 1
+                    ));
                     None
                 }
             },
@@ -135,7 +138,7 @@ fn parse_listing(body: &[u8]) -> Result<Vec<Instance>> {
 }
 
 /// The emulator among `instances` that holds `image`, if one does. The image
-/// is what tells two emulators apart before either has been given a name.
+/// distinguishes two emulators before either has been given a name.
 pub(crate) fn booted<'a>(instances: &'a [Instance], image: &Path) -> Option<&'a Instance> {
     let id = disk_id(image);
     instances.iter().find(|instance| instance.disk_id == id)
@@ -198,7 +201,7 @@ pub(crate) fn publish(hardware: &Controller) -> Result<()> {
     match answer {
         Ok(()) => Ok(()),
         Err(err) if err.retryable() => {
-            log!("[discovery] waiting for a registry host: {err}");
+            debug!("waiting for a registry host: {}", err);
             Ok(())
         }
         Err(err) => Err(err).context("could not publish this emulator to the registry"),
@@ -223,7 +226,7 @@ pub(crate) fn deregister() {
         &format!("/v1/instances/{port}"),
         None,
     ) {
-        log!("[discovery] could not deregister: {e}");
+        debug!("could not deregister: {}", e);
     }
 }
 
@@ -324,7 +327,9 @@ fn request(
     let stream = connect(addr, deadline)?;
     let reply = http::exchange(stream, method, path, &[], body, deadline, MAX_RESPONSE)?;
     trace!(
-        "[discovery] {method} {path}: HTTP {}, {} bytes",
+        "{} {}: HTTP {}, {} bytes",
+        method,
+        path,
         reply.status,
         reply.body.len()
     );
@@ -366,6 +371,7 @@ fn connect(addr: SocketAddrV4, deadline: Instant) -> Result<local::Stream, Failu
     }
 }
 
+/// Discovery failures, host handover and image identity regressions.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,7 +425,12 @@ mod tests {
             address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, old_host.local_addr().unwrap().port()),
         };
         drop(old_host);
-        assert!(client.list().unwrap().is_empty());
+        assert!(
+            client
+                .list(|warning| panic!("{warning}"))
+                .unwrap()
+                .is_empty()
+        );
 
         // The next publication creates a registry and registers through native IPC
         let instance: Instance = serde_json::from_str(
@@ -427,7 +438,7 @@ mod tests {
         )
         .unwrap();
         client.publish(&instance).unwrap();
-        let listing = client.list().unwrap();
+        let listing = client.list(|warning| panic!("{warning}")).unwrap();
         assert_eq!(listing.len(), 1);
         assert_eq!(listing[0].disk, "demo.ark");
 
@@ -442,7 +453,13 @@ mod tests {
         .unwrap();
         let mut reply = Vec::new();
         browser.read_to_end(&mut reply).unwrap();
-        let public = parse_listing(&http::parse_response(&reply).unwrap().body).unwrap();
+        let split = reply
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        assert!(reply.starts_with(b"HTTP/1.0 200 "));
+        let public = parse_listing(&reply[split..], |warning| panic!("{warning}")).unwrap();
         assert_eq!(public.len(), 1);
         assert_eq!(public[0].disk, listing[0].disk);
     }
@@ -459,7 +476,7 @@ mod tests {
             let heartbeat = server.recv().unwrap();
             assert_eq!(heartbeat.method().as_str(), "POST");
             let mut writer = heartbeat.into_writer();
-            writer.write_all(b"HTTP/1.0 204 No Content\r\n").unwrap();
+            writer.write_all(b"HTTP/1.1 204 No Content\r\n").unwrap();
             drop(server);
             drop(reservation);
         });
@@ -473,7 +490,7 @@ mod tests {
         let result = client.publish(&instance);
         worker.join().unwrap();
         result.unwrap();
-        let listing = client.list().unwrap();
+        let listing = client.list(|warning| panic!("{warning}")).unwrap();
         assert_eq!(listing.len(), 1);
         assert_eq!(listing[0].disk, "demo.ark");
     }
@@ -504,13 +521,13 @@ mod tests {
             response(503, "registry unavailable"),
             response(200, "not json"),
             response(200, r#"{"version":999,"instances":[]}"#),
-            "garbage".to_owned(),
-            "HTTP?".to_owned(),
+            "garbage\r\n\r\n".to_owned(),
+            "HTTP?\r\n\r\n".to_owned(),
             "HTTP/1.0 invalid\r\n\r\n".to_owned(),
             "HTTP/1.0 999 Unknown\r\n\r\n".to_owned(),
         ] {
             let (client, worker) = peer(vec![("GET", reply.clone())]);
-            let err = client.list().unwrap_err();
+            let err = client.list(|warning| panic!("{warning}")).unwrap_err();
             assert!(!err.retryable(), "{reply}");
             worker.join().unwrap();
         }
@@ -528,7 +545,7 @@ mod tests {
         });
 
         // Hold the reply until the client reports its own I/O timeout
-        let err = client.list().unwrap_err();
+        let err = client.list(|warning| panic!("{warning}")).unwrap_err();
         release.send(()).unwrap();
         worker.join().unwrap();
         assert!(matches!(&err, Failure::Transport(cause)
@@ -540,25 +557,32 @@ mod tests {
     /// be trusted to mean what this build thinks.
     #[test]
     fn test_a_listing_of_another_version_is_refused() {
-        let err = parse_listing(br#"{"version": 999, "instances": []}"#)
-            .unwrap_err()
-            .to_string();
+        let err = parse_listing(br#"{"version": 999, "instances": []}"#, |warning| {
+            panic!("{warning}")
+        })
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("999"), "{err}");
-        assert!(parse_listing(br#"{"instances": []}"#).is_err());
+        assert!(parse_listing(br#"{"instances": []}"#, |warning| panic!("{warning}")).is_err());
     }
 
-    /// One entry this build cannot read hides no other.
+    /// Invalid entries are reported while valid entries remain available.
     #[test]
     fn test_a_malformed_entry_does_not_hide_the_rest() {
         let body = br#"{"version": 1, "instances": [
             {"port": "not a port"},
             {"port": 18182, "disk": "b.ark", "disk_id": "02", "ready": true}
         ]}"#;
-        let instances = parse_listing(body).unwrap();
+        let mut warnings = Vec::new();
+        let instances = parse_listing(body, |warning| warnings.push(warning)).unwrap();
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].port, 18182);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("entry 1"));
+        assert!(warnings[0].contains("invalid type"));
     }
 
+    /// Different image locations have different discovery identities.
     #[test]
     fn test_disk_id_distinguishes_images() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -568,6 +592,7 @@ mod tests {
         );
     }
 
+    /// Paths with different non-UTF-8 bytes keep distinct identities.
     #[test]
     #[cfg(unix)]
     fn test_disk_id_distinguishes_paths_that_are_not_utf8() {
@@ -578,9 +603,10 @@ mod tests {
         assert_ne!(disk_id(a), disk_id(b));
     }
 
+    /// Canonical aliases of one image share its discovery identity.
     #[test]
     fn test_disk_id_agrees_across_spellings_of_one_image() {
-        // Canonicalization needs the file to exist.
+        // Canonicalization needs the file to exist
         let tmp = tempfile::TempDir::new().unwrap();
         let direct = tmp.path().join("ark.ark");
         std::fs::write(&direct, b"").unwrap();
@@ -589,6 +615,7 @@ mod tests {
         assert_eq!(disk_id(&direct), disk_id(&indirect));
     }
 
+    /// A running image is selected by location rather than its basename.
     #[test]
     fn test_the_emulator_holding_an_image_is_found_by_its_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
