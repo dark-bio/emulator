@@ -490,6 +490,8 @@ mod tests {
         assert!(!err.retryable());
         assert!(err.to_string().contains("update and restart"), "{err}");
         while let Ok((mut probe, _)) = browser.accept() {
+            // An accepted socket can inherit the listener's nonblocking mode
+            probe.set_nonblocking(false).unwrap();
             probe.set_read_timeout(Some(TIMEOUT)).unwrap();
             assert_eq!(probe.read(&mut [0]).unwrap(), 0);
         }

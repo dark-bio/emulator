@@ -547,7 +547,7 @@ mod tests {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    // macOS hands an accepted socket the listener's nonblocking mode
+                    // An accepted socket can inherit the listener's nonblocking mode
                     stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -821,8 +821,19 @@ mod tests {
     /// Oversized messages terminate the connection before any state is applied.
     #[test]
     fn test_oversized_hardware_frames_disconnect() {
+        use tungstenite::protocol::frame::{
+            FrameHeader,
+            coding::{Data, OpCode},
+        };
         let (controller, _listener, mut socket) = connect();
-        socket.send("x".repeat(65 * 1024).into()).unwrap();
+
+        // Declare 65 KiB in the header alone, which must be enough to disconnect
+        FrameHeader {
+            opcode: OpCode::Data(Data::Text),
+            ..FrameHeader::default()
+        }
+        .format(65 * 1024, socket.get_mut())
+        .unwrap();
         let state = wait_for(&controller, |state| !state.connected);
         assert!(!state.nameplate.known);
         controller.stop();
