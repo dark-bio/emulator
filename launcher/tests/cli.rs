@@ -247,7 +247,7 @@ fn test_button_group_and_invalid_arguments() {
     let group = run(&["button", "--help"]);
     assert!(group.status.success());
     assert!(!stdout(&group).contains("Requires:"));
-    assert!(stdout(&group).contains("Each subcommand has its own contract"));
+    assert!(stdout(&group).contains("Each subcommand has its own requirements and output"));
     assert_eq!(stdout(&group), stdout(&run(&["help", "button"])));
     for arguments in [
         vec!["--json", "button"],
@@ -277,8 +277,16 @@ fn test_button_group_and_invalid_arguments() {
 fn test_timed_release_option_validation_and_help() {
     // Both help forms advertise the option only on the command that accepts it
     for flag in ["-h", "--help"] {
-        assert!(stdout(&run(&["button", "press", flag])).contains("--release-after"));
-        assert!(!stdout(&run(&["button", "release", flag])).contains("--release-after"));
+        for (action, expected) in [("press", true), ("release", false)] {
+            let page = stdout(&run(&["button", action, flag]));
+            let (_, options) = page.split_once("\nOptions:\n").unwrap();
+            let options = options.split("\n\n").next().unwrap();
+            assert_eq!(
+                options.contains("--release-after"),
+                expected,
+                "{action} {flag}"
+            );
+        }
     }
 
     // Both duration limits reach selection, using a port no emulator can hold
@@ -356,6 +364,49 @@ fn test_completions_are_shell_text_even_under_json() {
     let text = stdout(&script);
     assert!(text.contains("ark-emulator"), "{text}");
     assert!(!text.trim_start().starts_with('{'), "{text}");
+}
+
+/// Help and completions report a closed output pipe as a local I/O failure.
+#[test]
+fn test_help_and_completions_fail_when_the_output_pipe_is_closed() {
+    for arguments in [
+        vec!["help"],
+        vec!["help", "--all"],
+        vec!["completions", "zsh"],
+        vec!["-h"],
+        vec!["--help"],
+        vec!["list", "-h"],
+        vec!["list", "--help"],
+        vec!["button", "press", "-h"],
+        vec!["button", "press", "--help"],
+    ] {
+        for json in [false, true] {
+            // Close the reader before spawning so even a short page must fail
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let mut command = Command::new(support::executable());
+            if json {
+                command.arg("--json");
+            }
+            let output = command
+                .args(&arguments)
+                .env("NO_COLOR", "1")
+                .env("CI", "1")
+                .stdout(writer)
+                .output()
+                .unwrap();
+
+            // Both output modes retain the house error shape on stderr
+            assert_eq!(output.status.code(), Some(1), "{arguments:?}, json={json}");
+            if json {
+                let event: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+                assert_eq!(event["event"], "error", "{arguments:?}");
+                assert_eq!(event["error"]["code"], "io", "{arguments:?}");
+            } else {
+                assert!(stderr(&output).starts_with("error[io]: "), "{arguments:?}");
+            }
+        }
+    }
 }
 
 /// Headless is a boot option in both modes, never a management option.

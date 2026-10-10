@@ -1,67 +1,74 @@
-# The image is the device
+# Images
 
-An emulated Ark is one `.ark` file. It holds everything the device knows: its
-identity, its pairing, its data. Copy the file and you have copied the device;
-delete it and the device is gone. Two emulators can never share one image,
-since two guests writing one file would destroy it. A foreground launch refuses
-a second boot of an image, and `start` waits for and reports the emulator that
-already holds it instead of booting another.
+An emulated Ark is one image file, and the file is the device. It holds the
+device's identity, its pairing and its data, so copying the file copies the
+device and deleting it deletes the device. An image starts at a few
+megabytes and grows as the guest writes, up to about 119 GiB, which is the
+disk the guest sees.
 
-The file is a plain qcow2 image with no encryption of any kind. It starts at a
-few megabytes and grows as the guest writes, up to a virtual ceiling of about
-119 GiB, which is what the guest sees as its disk. Anything the emulated Ark
-stores is readable by anyone who can read that file, so real data belongs on
-hardware.
+The image is a plain qcow2 file, and the device's own keys sit inside it,
+without the protection the hardware gives them. Anyone with the file holds
+the device's identity. The owner's data stays encrypted while the device is
+locked, and lies open in the memory of a process on this computer while it
+is unlocked. Real data belongs on hardware.
+
+Two emulators never boot one image. A foreground launch refuses an image
+another emulator holds, and `ark-emulator start` waits for and reports that
+emulator instead of booting a second one.
 
 ## Where things live
 
-The launcher keeps what it writes in one directory per platform:
+ark-emulator keeps its settings, its own image and its logs in one data
+directory:
 
     macOS    ~/Library/Application Support/bio.dark.emulator
     Linux    ~/.local/share/bio.dark.emulator
     Windows  %APPDATA%\bio.dark.emulator
 
-`ark-emulator doctor --json` prints the one this build uses, along with the
-settings file and the log directory inside it. The image the launcher
-allocates for itself, `emulator.ark`, lives there too; an image you name with
---image lives wherever you put it. Any name works, and the window's own
-picker uses the `.ark` extension so the files are easy to tell apart.
+`ark-emulator doctor --json` prints the one this build uses, with the
+settings file and the log directory inside it. The image the emulator
+creates for itself, emulator.ark, lives there too, while an image named
+with --image lives wherever its path says. Any file name works, and the
+window's picker uses the .ark extension.
 
-## What is remembered
+## Which image a start boots
 
-`settings.toml` in that directory holds the image to boot, whether to boot it
-without asking, the guest memory, and the environment a newly created image is
-bound to. The window's settings panel writes it. The command line reads it and
-never writes it, so a `start --image` somewhere else leaves the remembered
-choice alone.
+settings.toml in the data directory remembers the image to boot, whether to
+boot it when the window opens, the guest memory and the environment for a
+new image. The window's settings panel writes it. The command line only
+reads it, so `ark-emulator start --image` elsewhere leaves the remembered
+image alone.
 
-A start or headless launch with no --image takes the remembered image, which
-is the device the owner opens by double-click. It creates that image afresh
-if it is gone. Only when nothing was ever remembered does it take the image
-the launcher allocates for itself.
-Headless launches ignore the saved autostart toggle and never open a picker.
+A start or a headless launch without --image boots the remembered image,
+which is the device the owner opens by double-click, and creates it afresh
+when the file is gone. With nothing remembered, it boots emulator.ark in
+the data directory. A headless launch ignores the remembered autostart and
+never opens a picker.
 
 ## Environments
 
-An image is bound to one cloud environment, release, staging or develop, when
-the firmware first boots on it. The binding is burnt in, so --env has no
-effect on an image the firmware has booted before. Since it is read back from
-the firmware, a start can only warn about a mismatch once the device is up.
-To move to another environment, create a new image.
+An image is bound to one cloud environment, release, staging or develop,
+when the firmware first boots on it. That first boot takes --env, or else
+the environment set in the window, or else release. Later boots keep the
+binding, so --env has no effect on an image that booted before, and a start
+that names another environment warns once the device is up. Moving to
+another environment takes a new image.
 
 ## Identity
 
-An emulated Ark starts with a self-signed identity. `ark enroll` gives it an
-attested one from the cloud, valid for 30 days, after which the cloud refuses
-the device. `ark-emulator list` shows the day it expires, and `ark genuine`
-says when it has passed. Copying the image copies the identity and its expiry
-with it. A device past its date is wiped and started again as a fresh one; an
-emulator holds nothing worth keeping that long.
+A fresh emulated Ark has a self-signed identity. `ark enroll` gives it an
+attested one, valid for 30 days, after which the cloud refuses the device.
+`ark-emulator list` shows when it expires, and `ark genuine` reports when it
+has. A copy of the image carries the identity and its expiry with it. A
+factory reset with the button keeps the identity too, so an expired device
+is wiped and started again as a fresh one.
 
 ## Wiping
 
-`ark-emulator wipe` resets the image start would boot to a fresh device, and
-`wipe PATH` another one. The file is replaced by an empty image at the same
-path, so the window and the next start find it as before, and the device on
-it is factory fresh, needing `ark enroll`, `ark pair` and `ark unlock` again.
-A booted image is refused; stop the emulator first.
+`ark-emulator wipe` resets the image a start would boot to a fresh device,
+and `ark-emulator wipe PATH` another image. The file is replaced by an empty
+image at the same path, so the window and the next start find it as before,
+and its device needs `ark enroll` and `ark pair` again. Pairing leaves the
+device unlocked until its next boot. A booted image is refused with
+disk-busy, so stop its emulator first. A terminal asks for confirmation,
+and --yes gives it elsewhere.

@@ -19,13 +19,7 @@ use crate::runtime::qemu::GuestArch;
 use crate::settings;
 
 /// What the tool is, which opens every help page.
-pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos\n\n\
-     An emulated Ark runs the real firmware in QEMU, with an optional window \
-     for the device's face. It is not a vault, since everything \
-     lives in one plain disk image on this computer, so real data belongs on \
-     hardware. Talk to it with `ark` from https://github.com/dark-bio/cli, \
-     exactly as you would to hardware, where the owner approves on their phone \
-     in Ark Companion.";
+pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos";
 
 /// Longest wait for a machine, in seconds. One number for the whole tool, so
 /// there is one to remember, and it is generous enough to cover a boot with no
@@ -52,7 +46,7 @@ pub(crate) struct Cli {
     #[command(flatten)]
     pub(crate) global: Global,
 
-    /// Emulator, bundled firmware and QEMU versions
+    /// Versions of the emulator, its firmware and QEMU
     #[arg(short = 'V', long)]
     pub(crate) version: bool,
 
@@ -84,32 +78,26 @@ impl Cli {
 /// command name means the same thing.
 #[derive(clap::Args)]
 pub(crate) struct Global {
-    /// Print results as JSON and events as JSON Lines
+    /// Print the result as JSON and events as JSON Lines
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Network wait, or whole start/stop
+    /// Wait limit for a start, stop or reply
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
-    /// Never ask; take the default image and exit on failure
+    /// Never prompt or open an error window
     // A launch with nobody at the keyboard, such as a test run, takes the
     // default image instead of asking where to keep one, and a failure prints
     // its report and exits instead of opening a window.
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
 
-    /// Diagnostics: debug, or trace with the registry too
-    #[arg(
-        long,
-        global = true,
-        value_name = "LEVEL",
-        value_enum,
-        hide_possible_values = true
-    )]
+    /// Diagnostic logs
+    #[arg(long, global = true, value_name = "LEVEL", value_enum)]
     pub(crate) log: Option<Log>,
 
-    /// Hide progress and notes; keep errors and hints
+    /// Hide progress, notes and warnings
     #[arg(short = 'q', long, global = true)]
     pub(crate) quiet: bool,
 
@@ -170,7 +158,7 @@ pub(crate) struct Boot {
     #[arg(long, value_name = "ENV", value_parser = settings::ENVS, hide_possible_values = true)]
     pub(crate) env: Option<String>,
 
-    /// Guest RAM in MiB
+    /// Guest RAM in MiB, 8192 unless set in the window
     // Lower it on a machine with little memory to spare. The remembered
     // amount answers when this does not.
     #[arg(long, value_name = "MIB")]
@@ -222,12 +210,12 @@ pub(crate) enum Command {
         boot: Boot,
     },
 
-    /// Show the emulators running on this computer
+    /// List the emulators running on this computer
     List,
 
     /// Shut an emulator down, like closing its window
     Stop {
-        /// Locator, serial, name or image, as ark -d takes it; the only one otherwise
+        /// Locator, serial, name or image; the only one otherwise
         #[arg(value_name = "EMULATOR", conflicts_with = "all")]
         emulator: Option<String>,
 
@@ -236,7 +224,7 @@ pub(crate) enum Command {
         all: bool,
     },
 
-    /// Control the reset button of a running emulator
+    /// Press the reset button of a running emulator
     #[command(disable_help_subcommand = true)]
     Button {
         /// Which hold to apply to the running emulator.
@@ -246,11 +234,11 @@ pub(crate) enum Command {
 
     /// Reset a stopped image so its next boot is a fresh device
     Wipe {
-        /// Image to reset; the image start would boot otherwise
+        /// Image to wipe; the one start would boot otherwise
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
 
-        /// Reset without being asked to confirm
+        /// Wipe without asking for confirmation
         #[arg(short = 'y', long)]
         yes: bool,
     },
@@ -265,13 +253,13 @@ pub(crate) enum Command {
         shell: clap_complete::Shell,
     },
 
-    /// Help for a command or a topic
+    /// Print help for a command or a topic
     Help {
-        /// Command or topic to explain: agents, output, images, registry
+        /// Command or topic: agents, images, registry or output
         #[arg(value_name = "COMMAND_OR_TOPIC")]
         name: Vec<String>,
 
-        /// Print the whole manual: every command page and every topic
+        /// Print the whole manual, every page and topic
         #[arg(long, conflicts_with = "name")]
         all: bool,
     },
@@ -282,17 +270,17 @@ pub(crate) enum Command {
 pub(crate) enum ButtonAction {
     /// Hold the reset button, optionally releasing it later
     Press {
-        /// Locator, serial, name or image; the only emulator otherwise
+        /// Locator, serial, name or image; the only one otherwise
         #[arg(value_name = "EMULATOR")]
         emulator: Option<String>,
 
-        /// Release after whole seconds; 0 releases immediately after pressing
+        /// Release after this many seconds; 0 for one short press
         #[arg(long, value_name = "SECONDS")]
         release_after: Option<u32>,
     },
     /// Release the command line hold on the reset button
     Release {
-        /// Locator, serial, name or image; the only emulator otherwise
+        /// Locator, serial, name or image; the only one otherwise
         #[arg(value_name = "EMULATOR")]
         emulator: Option<String>,
     },

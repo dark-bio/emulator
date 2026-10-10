@@ -28,6 +28,8 @@ mod runtime;
 mod settings;
 mod update;
 
+use std::io::Write as _;
+
 use clap::{FromArgMatches as _, Parser};
 
 use bundle::Paths;
@@ -66,13 +68,19 @@ fn main() {
         Ok(matches) => matches,
         Err(error) => {
             platform::attach_console();
-            if error.exit_code() == 0 {
-                let _ = error.print();
-                std::process::exit(0);
-            }
             let mut global = Cli::parse_from(["ark-emulator"]).global;
             global.json = json;
-            output::Output::new(&global).error(&usage(&error));
+            let output = output::Output::new(&global);
+            if error.exit_code() == 0 {
+                output.release_stdout();
+                if let Err(err) = error.print().and_then(|()| std::io::stdout().flush()) {
+                    let err = Error::io(format!("could not print the help: {err}"));
+                    output.error(&err);
+                    std::process::exit(err.exit());
+                }
+                std::process::exit(0);
+            }
+            output.error(&usage(&error));
             std::process::exit(2);
         }
     };

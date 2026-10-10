@@ -23,7 +23,7 @@ use super::style::{self, Color, Role, Theme};
 use crate::error::{Code, Error};
 
 /// The topics this build carries, in the order the manual prints them.
-const TOPICS: [&str; 4] = ["agents", "output", "images", "registry"];
+const TOPICS: [&str; 4] = ["agents", "images", "registry", "output"];
 
 /// The column the contract's values start in, one past the widest label and
 /// its colon.
@@ -64,11 +64,7 @@ pub(crate) fn run(path: &[String], all: bool, long: bool) -> Result<(), Error> {
     let theme = theme();
     let mut root = command(&theme);
     if all {
-        let mut pages = Vec::new();
-        collect(&mut root, &mut pages);
-        pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).expect("a listed topic"))));
-        let rule = theme.paint(Role::Muted, "-".repeat(theme.width.min(80)));
-        return print(&pages.join(&format!("\n\n{rule}\n\n")));
+        return print(&manual(&mut root, &theme));
     }
     if let [name] = path
         && let Some(text) = topic(name)
@@ -130,7 +126,7 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
         *command = command
             .clone()
             .override_usage("ark-emulator [OPTIONS]\n       ark-emulator <COMMAND>")
-            .arg(help.help("Print help; `help --all` prints the manual"));
+            .arg(help.help("Print help; `ark-emulator help --all` prints the manual"));
     } else {
         for global in globals {
             *command = command.clone().arg(global.clone().hide(true));
@@ -144,28 +140,42 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
     } else {
         format!("{parent} {}", command.get_name())
     };
-    let contract = contract(path.strip_prefix("ark-emulator").unwrap_or(&path).trim());
-    let footer = footer(theme, &contract);
-    let closing = "Output is formatted for reading; --json keeps complete, exact values.
+    let key = path.strip_prefix("ark-emulator ").unwrap_or(&path);
+    let contract = CONTRACTS
+        .iter()
+        .find(|contract| contract.path == key)
+        .unwrap_or_else(|| panic!("missing help contract for {key}"));
+    let closing = format!(
+        "Output is formatted for reading; --json keeps complete, exact values.
 AI agents: read `ark-emulator help agents` first.
-Topics: agents, output, images, registry.";
+Topics: {}.",
+        TOPICS.join(", ")
+    );
     let closing = closing
         .lines()
         .map(|line| style::wrap(&theme.inline(line), theme.width, 0))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut decorated = command.clone();
+    // Clap selects the paragraph with the help action, and the template puts
+    // it between the description and usage
+    let paragraph = style::wrap(&theme.inline(contract.paragraph), theme.width, 0);
+    let mut decorated = command.clone().before_long_help(paragraph.clone());
     if parent.is_empty() {
+        let footer = footer(
+            theme,
+            contract.footer.as_ref().expect("the bare run's footer"),
+        );
         decorated = decorated
+            .before_help(paragraph)
             .after_help(format!("{closing}\n"))
             .after_long_help(format!("{footer}\n\n{closing}\n"));
-    } else if command.has_subcommands() {
-        decorated = decorated.after_long_help(format!(
-            "Each subcommand has its own contract.\nRead `{} <command> --help` for that command's behavior.\n", path
-        ));
+    } else if let Some(fields) = &contract.footer {
+        decorated = decorated.after_long_help(format!("{}\n", footer(theme, fields)));
     } else {
-        decorated = decorated.after_long_help(format!("{footer}\n"));
+        decorated = decorated.after_long_help(format!(
+            "Each subcommand has its own requirements and output.\nRead {} COMMAND --help for its contract.\n", path
+        ));
     }
     *command = decorated;
     for child in command.get_subcommands_mut() {
@@ -173,11 +183,15 @@ Topics: agents, output, images, registry.";
     }
 }
 
-/// Clap lays a long help's options out over two lines each. Render the short
-/// layout once and keep it, so the long page differs only by its footer.
+/// Renders clap's compact option layout with the paragraph and footer selected
+/// by the help action.
 fn compact(command: &mut clap::Command, theme: &Theme) {
+    // Render the scan alone so the template can insert the paragraph after
+    // the description and the footer after the arguments and options
     let rendered = command
         .clone()
+        .before_help(None)
+        .before_long_help(None)
         .after_help(None)
         .after_long_help(None)
         .render_help()
@@ -188,9 +202,13 @@ fn compact(command: &mut clap::Command, theme: &Theme) {
         .map(|line| style::wrap(&theme.inline(line), theme.width, hanging(line)))
         .collect::<Vec<_>>()
         .join("\n");
-    *command = command
-        .clone()
-        .help_template(format!("{}{{after-help}}", scan.trim_end()));
+    let (description, scan) = scan.split_once("\n\n").unwrap_or((&scan, ""));
+    *command = command.clone().help_template(format!(
+        "{description}\n\n{{before-help}}{}{{after-help}}",
+        scan.trim_end()
+    ));
+
+    // Subcommands use the same layout for their own paragraphs and footers
     for child in command.get_subcommands_mut() {
         compact(child, theme);
     }
@@ -212,111 +230,247 @@ fn hanging(line: &str) -> usize {
     }
 }
 
-/// What a command promises, by the words it is typed with. The bare run's
-/// contract sits under the empty path, since the root is a command too.
-fn contract(path: &str) -> [(&'static str, &'static str); 5] {
-    let (requires, time, prints, exits, examples) = match path {
-        "start" => (
-            "a free loopback port from 18181 up, or --port; a source build needs --kernel and --initrd",
-            "about 10 s with hardware acceleration, minutes without; --timeout bounds the whole wait; a separate process opens the device window unless --headless is set; an already running image keeps its current mode",
-            "locator, image, created, started, environment, ready, expires; JSON adds port, path, name, serial and log",
-            "0 ready; 1 image, firmware or launcher failure; 2 usage; 3 registry unreachable; 7 not ready in time, still booting; 130/143 interrupted, still booting",
-            "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
-        ),
-        "list" => (
-            "nothing; no registry means no emulators",
-            "immediate",
-            "locator, image, ready, environment, name, serial, expires; JSON adds port and log",
-            "0 done; 2 usage; 3 registry answered but could not be read; 130/143 interrupted",
-            "ark-emulator list\nark-emulator list --json",
-        ),
-        "stop" => (
-            "a running emulator with direct control, named as ark -d names it, or the only one running; --all stops every one",
-            "a direct request, then seconds for launcher and guest exit; --all stops in port order; --timeout bounds the whole wait",
-            "stopped, the locators that went; confirmed stops remain in the partial result on a later failure or timeout",
-            "0 done; 2 usage; 3 selection, discovery or control failure; 7 shutdown not confirmed in time; 130/143 interrupted",
-            "ark-emulator stop\nark-emulator stop emulator:18181 --json",
-        ),
-        "button press" => (
-            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
-            "normally under a second; --timeout bounds each reply wait; --release-after accepts 0 to 4294967295 whole seconds, measured from delivery; 0 releases immediately after the press, before returning; positive delays return after scheduling, without waiting for release; each press replaces the timer, omitting the option cancels it; release, disconnect and shutdown also cancel it; a UI hold remains independent",
-            "locator, pressed (physical state), cli_pressed (CLI hold), changed (hold or timer changed), release_after_seconds (accepted delay, null without a timer)",
-            "0 delivered; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
-            "ark-emulator button press\nark-emulator button press emulator:18181 --release-after 3 --json",
-        ),
-        "button release" => (
-            "a running emulator with connected hardware and button control; locator, serial, name or image selects it, or the only one running",
-            "normally under a second; --timeout bounds each reply wait; success means written to hardware or already released; cancels any automatic release; the button remains pressed while the window holds it",
-            "locator, pressed (physical state), cli_pressed (CLI hold), changed (hold or timer changed), release_after_seconds (null)",
-            "0 CLI hold released; 1 output failure; 2 usage; 3 selection, registry, control or hardware unavailable; 7 reply timed out, state unknown; 130/143 interrupted, state unknown; no automatic retry",
-            "ark-emulator button release\nark-emulator button release emulator:18181 --json",
-        ),
-        "wipe" => (
-            "an existing image no emulator holds; confirmation at a terminal, or --yes",
-            "a second",
-            "path, wiped",
-            "0 done; 1 confirmation or file problem; 2 usage; 3 held by an emulator; 130/143 interrupted",
-            "ark-emulator wipe\nark-emulator wipe ~/arks/dev.ark --yes",
-        ),
-        "doctor" => (
-            "nothing; a check that cannot run is skipped",
-            "seconds; the release lookup waits up to --timeout for each network reply",
-            "checks: result (ok, warn, fail or skip), name, detail, hint; JSON adds version, firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir, registry",
-            "0 done; 1 a check failed on this computer; 2 usage; 3 the registry could not be read; 130/143 interrupted",
-            "ark-emulator doctor\nark-emulator doctor --json",
-        ),
-        "completions" => (
-            "nothing",
-            "immediate",
-            "the shell's completion script on stdout, even under --json",
-            "0 done; 2 usage",
-            "ark-emulator completions zsh\nark-emulator completions bash",
-        ),
-        "help" => (
-            "nothing",
-            "immediate",
-            "help text on stdout, even under --json",
-            "0 done; 2 no such command or topic",
-            "ark-emulator help agents\nark-emulator help start",
-        ),
-        _ => (
-            "nothing on a packaged build; a source build needs --kernel and --initrd and a QEMU on PATH",
-            "runs in the foreground; --headless opens no window and never prompts; the device accepts clients after about 10 s with hardware acceleration, minutes without; --timeout does not limit this run",
-            "nothing on stdout; the launcher's log on stderr; a source build adds the guest console on stdout",
-            "0 stopped; 1 launcher or QEMU failure; 2 usage; 130/143 interrupted, device stopped",
-            "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
-        ),
-    };
-    [
-        ("Requires", requires),
-        ("Time", time),
-        ("Prints", prints),
-        ("Exit", exits),
-        ("Examples", examples),
-    ]
+/// A command's paragraph and optional footer, selected by its path.
+struct Contract {
+    /// Command words after `ark-emulator`, or `ark-emulator` for the root.
+    path: &'static str,
+    /// Explanation between the one-line description and usage.
+    paragraph: &'static str,
+    /// Contract fields for the bare run and leaves, absent on group pages.
+    footer: Option<ContractFooter>,
 }
+
+/// A command's prerequisites, duration, outcome and examples.
+struct ContractFooter {
+    /// Conditions the command needs before it can work.
+    requires: &'static str,
+    /// Expected duration and the waits the timeout bounds.
+    time: &'static str,
+    /// Result fields in reading order and any JSON differences.
+    prints: &'static str,
+    /// Exit classes the command can return.
+    exit: &'static str,
+    /// Two invocations printed as bare commands.
+    examples: &'static str,
+}
+
+/// Command paragraphs and contract fields in command-tree order.
+const CONTRACTS: &[Contract] = &[
+    Contract {
+        path: "ark-emulator",
+        paragraph: "ark-emulator boots the real Ark firmware in QEMU on this computer. The \
+            whole device is one plain disk image, so real data belongs on hardware. \
+            `ark`, from https://github.com/dark-bio/cli, talks to an emulated Ark as \
+            to hardware, and the owner approves its requests on their phone in Ark \
+            Companion. ark-emulator itself needs no approval.",
+        footer: Some(ContractFooter {
+            requires: "a display unless --headless; a source build needs --kernel, --initrd \
+                and QEMU on PATH",
+            time: "runs in the foreground until the window closes, `ark-emulator stop`, \
+                Ctrl-C or SIGTERM; the firmware boots in about 10 s with hardware \
+                acceleration, minutes without; --timeout plays no part",
+            prints: "nothing on stdout, apart from the guest console of a run with \
+                --kernel and --initrd; the launcher's log lines on stderr, as log events \
+                under --json",
+            exit: "0 stopped; 1 launch, launcher or QEMU failure; 2 usage; 130/143 \
+                interrupted, device stopped",
+            examples: "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
+        }),
+    },
+    Contract {
+        path: "start",
+        paragraph: "Boots an emulator in a process of its own and waits until its firmware \
+            has booted. The emulator keeps running after start returns, until \
+            `ark-emulator stop`, and the locator it prints is what `ark --device` \
+            takes. Without --headless the emulator opens the device window. An image \
+            that is already booted is waited for and reported with started false, \
+            never booted twice. `ark-emulator help images` covers which image a start \
+            boots.",
+        footer: Some(ContractFooter {
+            requires: "a free port from 18181 to 18280, or --port; a display unless \
+                --headless; a source build needs --kernel and --initrd",
+            time: "about 10 s with hardware acceleration, minutes without; --timeout \
+                bounds the wait for the firmware, after which the emulator keeps \
+                booting",
+            prints: "locator, image, created, started, environment, ready, expires; JSON \
+                adds port, path, name, serial and log",
+            exit: "0 ready; 1 image, firmware, launch or output failure; 2 usage; 3 \
+                registry unreachable; 7 not ready in time, still booting; 130/143 \
+                interrupted, still booting",
+            examples: "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
+        }),
+    },
+    Contract {
+        path: "list",
+        paragraph: "Lists every emulator the registry on this computer reports, without \
+            connecting to any. Environment, name, serial and expiry are what each \
+            emulator's firmware reported, absent until it has and never verified. \
+            `ark devices` shows the same emulators beside hardware Arks.",
+        footer: Some(ContractFooter {
+            requires: "nothing; no emulator running is an empty list",
+            time: "immediate",
+            prints: "locator, image, ready, environment, name, serial, expires; JSON adds \
+                port and log",
+            exit: "0 done; 1 output failure; 2 usage; 3 registry unreadable; 130/143 \
+                interrupted",
+            examples: "ark-emulator list\nark-emulator list --json",
+        }),
+    },
+    Contract {
+        path: "stop",
+        paragraph: "Asks the emulator to shut down, the way closing its window does, and \
+            waits until its launcher and QEMU have exited. The guest gets no warning, \
+            like hardware that loses power, so stop an emulator only while no `ark` \
+            command runs against it. With several running, name one as \
+            `ark --device` names it, or pass --all, which stops them one at a time in \
+            port order.",
+        footer: Some(ContractFooter {
+            requires: "a running emulator, named by locator, serial, name or image, or the \
+                only one; --all needs none",
+            time: "seconds; --timeout bounds the wait for the emulators to exit",
+            prints: "stopped, the locators of the emulators that stopped, kept on a later \
+                failure or timeout",
+            exit: "0 done; 1 output failure; 2 usage; 3 selection, registry or control \
+                failure; 7 shutdown not confirmed in time; 130/143 interrupted",
+            examples: "ark-emulator stop\nark-emulator stop emulator:18181 --json",
+        }),
+    },
+    Contract {
+        path: "button",
+        paragraph: "Presses an emulated Ark's reset button from the command line. The window \
+            and the command line hold the button independently, and it is down while \
+            either holds it. While `ark pair` waits for the button, a press confirms \
+            the pairing at once. At any other time, a hold of 5 s arms a factory \
+            reset, which erases the device's data and pairing once the button is let \
+            go, and keeps its enrollment.",
+        footer: None,
+    },
+    Contract {
+        path: "button press",
+        paragraph: "Presses the button and holds it until `ark-emulator button release`, or \
+            for --release-after seconds. --release-after 0 is one short press, released \
+            before the command returns. The hold outlives the command and ends if the \
+            emulated hardware disconnects. A press while the command line holds the \
+            button sends no second press, and replaces or cancels the timer.",
+        footer: Some(ContractFooter {
+            requires: "a booted emulator, named by locator, serial, name or image, or the \
+                only one",
+            time: "under a second; --timeout bounds each reply; a positive \
+                --release-after returns once the release is scheduled",
+            prints: "locator; pressed, the button's state; CLI held, the command line's \
+                hold, cli_pressed in JSON; changed, whether that hold or its timer \
+                changed; release after, the accepted delay, release_after_seconds in JSON",
+            exit: "0 delivered; 1 output failure; 2 usage; 3 selection, control or \
+                hardware unavailable; 7 no reply in time, outcome unknown; 130/143 \
+                interrupted, outcome unknown",
+            examples: "ark-emulator button press --release-after 0\nark-emulator button press emulator:18181 --release-after 3 --json",
+        }),
+    },
+    Contract {
+        path: "button release",
+        paragraph: "Releases the command line's hold on the button and cancels a pending \
+            --release-after. The button stays down while the window holds it. \
+            Releasing a button the command line does not hold succeeds without a \
+            change, so it clears a press whose outcome is unknown.",
+        footer: Some(ContractFooter {
+            requires: "a booted emulator, named by locator, serial, name or image, or the \
+                only one",
+            time: "under a second; --timeout bounds each reply",
+            prints: "locator; pressed; CLI held, cli_pressed in JSON; changed; release \
+                after, release_after_seconds in JSON, which is null",
+            exit: "0 released; 1 output failure; 2 usage; 3 selection, control or \
+                hardware unavailable; 7 no reply in time, outcome unknown; 130/143 \
+                interrupted, outcome unknown",
+            examples: "ark-emulator button release\nark-emulator button release emulator:18181 --json",
+        }),
+    },
+    Contract {
+        path: "wipe",
+        paragraph: "Replaces the image with an empty one at the same path, so its next boot \
+            is a factory-fresh device that needs `ark enroll` and `ark pair` again. \
+            Without PATH it wipes the image a start would boot. An image an emulator \
+            holds is refused, so stop that emulator first.",
+        footer: Some(ContractFooter {
+            requires: "an image that exists and no emulator holds; confirmation at a \
+                terminal, or --yes",
+            time: "a second",
+            prints: "path, wiped",
+            exit: "0 done; 1 not confirmed, image missing or file error; 2 usage; 3 \
+                image in use or registry unreachable; 130/143 interrupted",
+            examples: "ark-emulator wipe\nark-emulator wipe ~/arks/dev.ark --yes",
+        }),
+    },
+    Contract {
+        path: "doctor",
+        paragraph: "Runs every check in order and prints the whole list. It covers newer \
+            releases, QEMU, the bundled firmware, hardware acceleration, the data \
+            directory, the settings, the remembered image, the registry and a free \
+            port. Each check is ok, warn, fail or skip, with a hint where something \
+            needs action. It applies no fixes.",
+        footer: Some(ContractFooter {
+            requires: "nothing; a check that cannot run is skipped",
+            time: "seconds; --timeout bounds each network reply of the release lookup",
+            prints: "result, name, detail and hint for each check; JSON adds version, \
+                firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir and \
+                registry",
+            exit: "0 no check failed; 1 or 3, the class of the first failed check; 1 \
+                output failure; 2 usage; 130/143 interrupted",
+            examples: "ark-emulator doctor\nark-emulator doctor --json",
+        }),
+    },
+    Contract {
+        path: "completions",
+        paragraph: "Prints the completion script for the shell on stdout. It never installs \
+            the script.",
+        footer: Some(ContractFooter {
+            requires: "nothing",
+            time: "immediate",
+            prints: "the shell's completion script, even under --json",
+            exit: "0 done; 1 output failure; 2 usage",
+            examples: "ark-emulator completions zsh\nark-emulator completions bash",
+        }),
+    },
+    Contract {
+        path: "help",
+        paragraph: "Prints the help page of a command, or a topic: agents, images, registry \
+            or output. `ark-emulator help --all` prints the whole manual, starting with \
+            the root page and the agents topic.",
+        footer: Some(ContractFooter {
+            requires: "nothing",
+            time: "immediate",
+            prints: "help text, even under --json",
+            exit: "0 done; 1 output failure; 2 no such command or topic",
+            examples: "ark-emulator help agents\nark-emulator help start",
+        }),
+    },
+];
 
 /// The contract as it prints: four labeled lines aligned on one column, then
 /// the examples as bare commands, since a pasted prompt breaks in a shell.
-fn footer(theme: &Theme, contract: &[(&str, &str); 5]) -> String {
-    let mut lines: Vec<String> = contract[..4]
-        .iter()
-        .map(|(label, text)| {
-            let label = format!("{label}:");
-            style::wrap(
-                &format!(
-                    "{}{}{}",
-                    theme.paint(Role::Muted, &label),
-                    " ".repeat(COLUMN - label.len()),
-                    theme.inline(text)
-                ),
-                theme.width,
-                COLUMN,
-            )
-        })
-        .collect();
+fn footer(theme: &Theme, fields: &ContractFooter) -> String {
+    let mut lines: Vec<String> = [
+        ("Requires", fields.requires),
+        ("Time", fields.time),
+        ("Prints", fields.prints),
+        ("Exit", fields.exit),
+    ]
+    .into_iter()
+    .map(|(label, text)| {
+        let label = format!("{label}:");
+        style::wrap(
+            &format!(
+                "{}{}{}",
+                theme.paint(Role::Muted, &label),
+                " ".repeat(COLUMN - label.len()),
+                theme.inline(text)
+            ),
+            theme.width,
+            COLUMN,
+        )
+    })
+    .collect();
     lines.push(format!("\n{}", theme.paint(Role::Heading, "Examples:")));
-    lines.extend(contract[4].1.lines().map(|line| {
+    lines.extend(fields.examples.lines().map(|line| {
         style::wrap(
             &format!("  {}", theme.paint(Role::Accent, line)),
             theme.width,
@@ -379,6 +533,8 @@ fn markdown(theme: &Theme, text: &str) -> String {
         } else if let Some((text, _)) = &mut paragraph {
             text.push(' ');
             text.push_str(content);
+        } else if bullet && indent > 0 {
+            paragraph = Some((format!("    {content}"), 4));
         } else {
             bullet = false;
             paragraph = Some((line.to_owned(), 0));
@@ -386,6 +542,24 @@ fn markdown(theme: &Theme, text: &str) -> String {
     }
     flush(&mut paragraph, &mut lines);
     lines.join("\n").trim_end().to_owned()
+}
+
+/// Renders the root, agents topic, command tree and remaining topics, divided
+/// by the muted rule.
+fn manual(root: &mut clap::Command, theme: &Theme) -> String {
+    let mut pages = Vec::new();
+    collect(root, &mut pages);
+    pages.insert(
+        1,
+        markdown(theme, topic(TOPICS[0]).expect("the agents topic")),
+    );
+    pages.extend(
+        TOPICS[1..]
+            .iter()
+            .map(|name| markdown(theme, topic(name).expect("a listed topic"))),
+    );
+    let rule = theme.paint(Role::Muted, "-".repeat(theme.width.min(80)));
+    pages.join(&format!("\n\n{rule}\n\n"))
 }
 
 /// Every command's page, in the order the tree holds them.
@@ -407,9 +581,9 @@ fn collect(command: &mut clap::Command, pages: &mut Vec<String>) {
 fn topic(name: &str) -> Option<&'static str> {
     Some(match name {
         "agents" => include_str!("help/agents.md"),
-        "output" => include_str!("help/output.md"),
         "images" => include_str!("help/images.md"),
         "registry" => include_str!("help/registry.md"),
+        "output" => include_str!("help/output.md"),
         _ => return None,
     })
 }
@@ -429,16 +603,6 @@ mod tests {
         "completions",
         "help",
     ];
-
-    /// The whole manual, as `help --all` hands it to a reader or a model.
-    fn manual() -> String {
-        let theme = Theme::fixed(80, Color::Off, false);
-        let mut root = command(&theme);
-        let mut pages = Vec::new();
-        collect(&mut root, &mut pages);
-        pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).unwrap())));
-        pages.join("\n\n")
-    }
 
     #[test]
     fn test_every_command_states_its_whole_contract() {
@@ -469,7 +633,7 @@ mod tests {
         let group = root.find_subcommand_mut("button").unwrap();
         let page = group.render_long_help().to_string();
         assert!(!page.contains("Requires:"));
-        assert!(page.contains("Each subcommand has its own contract"));
+        assert!(page.contains("Each subcommand has its own requirements and output"));
         for name in ["press", "release"] {
             let page = group
                 .find_subcommand_mut(name)
@@ -510,9 +674,10 @@ mod tests {
         for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
             assert!(page.contains(label), "{label}");
         }
-        assert!(page.contains("Topics: agents, output, images, registry."));
+        assert!(page.contains("Topics: agents, images, registry, output."));
     }
 
+    /// The short root page lists all commands within one screen.
     #[test]
     fn test_the_root_scan_fits_on_a_screen() {
         let theme = Theme::fixed(80, Color::Off, false);
@@ -520,6 +685,96 @@ mod tests {
         assert!(page.lines().count() <= 42, "{}", page.lines().count());
         for command in COMMANDS {
             assert!(page.contains(command), "{command}");
+        }
+    }
+
+    /// Every long page places a nonempty paragraph after its description,
+    /// while only the root keeps its paragraph on the short page.
+    #[test]
+    fn test_paragraphs_follow_descriptions_on_the_right_pages() {
+        /// Checks the preamble of a command and every command below it.
+        fn check(command: &mut clap::Command, root: bool, width: usize) {
+            // Separate each preamble from usage and check the paragraph's
+            // spacing independently of its wording
+            let long = command.render_long_help().to_string();
+            let short = command.render_help().to_string();
+            let name = command.get_name();
+            let (preamble, _) = long.split_once("\n\nUsage:").expect(name);
+            let (description, paragraph) = preamble.split_once("\n\n").expect(name);
+            assert!(!description.trim().is_empty(), "{name}");
+            assert!(!paragraph.trim().is_empty(), "{name}");
+            assert_eq!(paragraph, paragraph.trim(), "{name}");
+            assert!(!paragraph.contains("\n\n"), "{name}");
+            for line in paragraph.lines() {
+                assert!(console::measure_text_width(line) <= width, "{name}: {line}");
+            }
+            let (scan, _) = short.split_once("\n\nUsage:").expect(name);
+            assert_eq!(scan, if root { preamble } else { description }, "{name}");
+
+            // Visit the actual tree so a new command also needs a paragraph
+            for child in command.get_subcommands_mut() {
+                check(child, false, width);
+            }
+        }
+
+        for width in [40, 80, 120] {
+            let theme = Theme::fixed(width, Color::Off, false);
+            check(&mut command(&theme), true, width);
+        }
+    }
+
+    /// The manual puts the agents topic before commands, visits nested
+    /// commands in tree order and ends with the other topics.
+    #[test]
+    fn test_the_manual_orders_commands_and_prints_every_topic() {
+        let theme = Theme::fixed(80, Color::Off, false);
+        let text = manual(&mut command(&theme), &theme);
+        let separator = format!("\n\n{}\n\n", "-".repeat(80));
+        let pages: Vec<_> = text.split(&separator).collect();
+
+        // The order is part of the public manual, including the button group
+        let paths = [
+            "ark-emulator",
+            "start",
+            "list",
+            "stop",
+            "button",
+            "button press",
+            "button release",
+            "wipe",
+            "doctor",
+            "completions",
+            "help",
+        ];
+        assert_eq!(pages.len(), paths.len() + TOPICS.len());
+        for (index, path) in paths.into_iter().enumerate() {
+            let page = pages[if index == 0 { 0 } else { index + 1 }];
+            let usage = page
+                .lines()
+                .find_map(|line| line.strip_prefix("Usage: "))
+                .unwrap();
+            let path = if index == 0 {
+                path.to_owned()
+            } else {
+                format!("ark-emulator {path}")
+            };
+            assert_eq!(usage.split(['[', '<']).next().unwrap().trim(), path);
+        }
+
+        // Each advertised topic has a nonempty page at its expected position
+        for (name, index) in [
+            ("agents", 1),
+            ("images", 12),
+            ("registry", 13),
+            ("output", 14),
+        ] {
+            let page = markdown(&theme, topic(name).unwrap());
+            assert!(!page.trim().is_empty(), "{name}");
+            assert_eq!(pages[index], page, "{name}");
+        }
+        for name in TOPICS {
+            let page = markdown(&theme, topic(name).expect(name));
+            assert!(pages.contains(&page.as_str()), "{name}");
         }
     }
 
@@ -578,7 +833,11 @@ mod tests {
     #[test]
     fn test_the_manual_names_the_cli_and_the_example_apps() {
         // Wrapped, so a phrase is looked for across line breaks.
-        let manual = manual().split_whitespace().collect::<Vec<_>>().join(" ");
+        let theme = Theme::fixed(80, Color::Off, false);
+        let manual = manual(&mut command(&theme), &theme)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for link in [
             "https://github.com/dark-bio/cli",
             "https://github.com/dark-bio/examples",
@@ -595,7 +854,7 @@ mod tests {
         let output = topic("output").unwrap();
         for code in Code::ALL {
             assert!(
-                output.contains(&format!("- {}:", code.name())),
+                output.contains(&format!("- `{}` means", code.name())),
                 "{}",
                 code.name()
             );
@@ -608,9 +867,9 @@ mod tests {
         assert_eq!(
             markdown(
                 &theme,
-                "# Stopping\n\nRun `ark-emulator list` first.\n\n- One emulator at a time.\n\n    ark-emulator stop 18181\n"
+                "# Stopping\n\nRun `ark-emulator list` first.\n\n- One emulator at a time.\n\n    ark-emulator stop 18181\n\n  It stops at once.\n"
             ),
-            "\x1b[1mStopping\x1b[0m\n\nRun \x1b[1mark-emulator list\x1b[0m first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m"
+            "\x1b[1mStopping\x1b[0m\n\nRun \x1b[1mark-emulator list\x1b[0m first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m\n\n    It stops at once."
         );
     }
 
