@@ -214,14 +214,26 @@ impl Read for Stream {
 
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        let mut bytes = bytes;
         bounded(self.write_deadline.get(), || {
-            let result = self.socket.write(bytes);
-            // A full nonblocking Windows pipe may accept no bytes without an error
-            #[cfg(windows)]
-            if matches!(result, Ok(0)) && !bytes.is_empty() {
-                return Err(io::ErrorKind::WouldBlock.into());
+            #[cfg(unix)]
+            {
+                self.socket.write(bytes)
             }
-            result
+            #[cfg(windows)]
+            loop {
+                match self.socket.write(bytes) {
+                    // PIPE_NOWAIT can reject a write larger than its free buffer
+                    // without accepting a prefix, even when the pipe is empty
+                    Ok(0) if bytes.len() > 1 => bytes = &bytes[..bytes.len() / 2],
+                    // Wait for the reader only when even one byte cannot fit
+                    Ok(0) if !bytes.is_empty() => {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    result => return result,
+                }
+            }
         })
     }
 
