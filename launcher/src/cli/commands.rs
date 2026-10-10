@@ -491,7 +491,7 @@ fn listing(output: &Output) -> Result<Vec<Instance>, Error> {
 /// Report a registry failure with its server explanation and a recovery hint.
 fn registry_error(err: discovery::Failure) -> Error {
     let hint = if matches!(err, discovery::Failure::Http { status: 403, .. }) {
-        "update Ark Emulator and restart all running launchers"
+        "update Ark Emulator and restart all running emulators"
     } else {
         "check `ark-emulator list`; another program may be holding the registry's port"
     };

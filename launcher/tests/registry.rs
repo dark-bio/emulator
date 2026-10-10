@@ -26,15 +26,25 @@ mod local;
 #[allow(dead_code)] // Scripted peers use the production framing without the client helper.
 mod http;
 
-/// Run a lifecycle fixture with one app-data namespace for all its processes.
+/// Isolate a lifecycle fixture's named endpoints and application data from live launchers.
 fn isolated(name: &str) -> bool {
     if std::env::var_os("ARK_REGISTRY_TEST").is_some() {
+        let shared = std::env::var_os("ARK_REGISTRY_SHARED_ENDPOINT").unwrap();
+        assert_ne!(
+            local::address("registry-18180").unwrap(),
+            std::path::PathBuf::from(shared)
+        );
         return false;
     }
     let directory = tempfile::TempDir::new().unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name])
         .env("ARK_REGISTRY_TEST", "1")
+        .env(local::TEST_NAMESPACE, local::identity())
+        .env(
+            "ARK_REGISTRY_SHARED_ENDPOINT",
+            local::address("registry-18180").unwrap(),
+        )
         .env("XDG_DATA_HOME", directory.path())
         .status()
         .unwrap();

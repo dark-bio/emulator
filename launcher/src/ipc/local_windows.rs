@@ -11,8 +11,10 @@ use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
+
+use sha2::{Digest as _, Sha256};
 
 use windows_sys::Win32::{
     Foundation::LocalFree,
@@ -33,10 +35,83 @@ use windows_sys::Win32::{
         FileAttributeTagInfo, GetFileInformationByHandleEx, READ_CONTROL,
     },
     System::{
+        SystemInformation::GetSystemWindowsDirectoryW,
         SystemServices::{ACCESS_ALLOWED_ACE_TYPE, IO_REPARSE_TAG_AF_UNIX},
         Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
+
+/// Maximum UTF-8 path bytes, leaving one byte for the AF_UNIX terminator.
+const SOCKET_PATH_LIMIT: usize = 107;
+/// Maximum root bytes after reserving the longest native or QEMU socket suffix.
+const ROOT_LIMIT: usize = SOCKET_PATH_LIMIT - super::SOCKET_SUFFIX_LEN;
+/// Application directory beneath the user's local application data.
+const APP_DIRECTORY: &str = "bio.dark.emulator";
+/// Socket directory beneath the application directory.
+const IPC_DIRECTORY: &str = "ipc";
+/// Hexadecimal characters identifying the user in a short fallback root.
+const USER_ID_LEN: usize = 32;
+
+/// Resolve an IPC root that leaves room for every native and QEMU socket.
+pub(super) fn directory() -> io::Result<PathBuf> {
+    if let Some(root) = dirs::data_local_dir().and_then(|path| app_directory(&path)) {
+        return Ok(root);
+    }
+    short_directory(&system_directory()?, &sid()?)
+}
+
+/// Keep application data only when its UTF-8 path fits the longest socket suffix.
+fn app_directory(base: &Path) -> Option<PathBuf> {
+    let root = base.join(APP_DIRECTORY).join(IPC_DIRECTORY);
+    root.to_str()
+        .is_some_and(|path| path.len() <= ROOT_LIMIT)
+        .then_some(root)
+}
+
+/// Name a user-only directory directly below the system drive's root.
+fn short_directory(system: &Path, sid: &str) -> io::Result<PathBuf> {
+    let drive = match system.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) if drive.is_ascii_alphabetic() => {
+                drive
+            }
+            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        },
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let user = format!("{:x}", Sha256::digest(sid.as_bytes()));
+    Ok(PathBuf::from(format!(
+        "{}:\\{}{}",
+        char::from(drive),
+        super::ROOT_PREFIX,
+        &user[..USER_ID_LEN]
+    )))
+}
+
+/// Read the shared Windows directory without consulting per-user environment paths.
+fn system_directory() -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    // Ask for the required size, including the terminator, before allocating
+    // SAFETY: a null buffer with zero capacity requests the required buffer size
+    let size = unsafe { GetSystemWindowsDirectoryW(ptr::null_mut(), 0) };
+    if size == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0; size as usize];
+    // SAFETY: buffer has the capacity passed to the API and stays live for the call
+    let length = unsafe { GetSystemWindowsDirectoryW(buffer.as_mut_ptr(), size) };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length >= size {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(PathBuf::from(OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
 
 /// Descriptor allocated by the Windows local heap.
 struct Descriptor(
@@ -302,6 +377,73 @@ fn sid() -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every socket fits with the longest retained app-data root or the short root.
+    #[test]
+    fn test_longest_socket_paths_fit() {
+        use super::super::{CHANNEL_ID_LEN, CHANNEL_PREFIX, CHANNEL_SOCKET_NAME, SOCKET_NAME_LEN};
+
+        // Fill the root budget without relying on this test runner's user profile
+        let count = ROOT_LIMIT - "C:\\".len() - 1 - APP_DIRECTORY.len() - 1 - IPC_DIRECTORY.len();
+        let base = PathBuf::from(format!("C:\\{}", "x".repeat(count)));
+        let longest = app_directory(&base).unwrap();
+        let longer = PathBuf::from(format!("{}x", base.display()));
+        assert!(app_directory(&longer).is_none());
+
+        // The fallback keeps only the drive and a fixed-size hash of the user's SID
+        let system = PathBuf::from(format!("Z:\\{}\\Windows", "long-directory\\".repeat(100)));
+        let short = short_directory(&system, "S-1-5-21-123-456-789-1001").unwrap();
+        assert_ne!(
+            short,
+            short_directory(&system, "S-1-5-21-123-456-789-1002").unwrap()
+        );
+        for root in [longest, short] {
+            let native = root.join("f".repeat(SOCKET_NAME_LEN));
+            let channel = root
+                .join(format!("{CHANNEL_PREFIX}{}", "f".repeat(CHANNEL_ID_LEN)))
+                .join(CHANNEL_SOCKET_NAME);
+            for path in [native, channel] {
+                assert!(path.to_str().unwrap().len() <= 107, "{}", path.display());
+                socket2::SockAddr::unix(&path).unwrap();
+            }
+        }
+    }
+
+    /// App-data selection counts UTF-8 bytes and rejects paths AF_UNIX cannot encode.
+    #[test]
+    fn test_app_directory_bounds_unicode_paths() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        // A two-byte character crosses the boundary before its character count does
+        let count = ROOT_LIMIT - "C:\\".len() - 1 - APP_DIRECTORY.len() - 1 - IPC_DIRECTORY.len();
+        let fits = PathBuf::from(format!("C:\\{}é", "x".repeat(count - 2)));
+        let exceeds = PathBuf::from(format!("C:\\{}é", "x".repeat(count - 1)));
+        assert!(app_directory(&fits).is_some());
+        assert!(app_directory(&exceeds).is_none());
+
+        // Windows filenames can contain an unpaired surrogate, unlike AF_UNIX paths
+        let invalid = PathBuf::from(OsString::from_wide(&[67, 58, 92, 0xd800]));
+        assert!(app_directory(&invalid).is_none());
+    }
+
+    /// The short fallback root has the same ownership and DACL checks as app data.
+    #[test]
+    fn test_short_root_access_controls() {
+        let root = short_directory(&system_directory().unwrap(), &sid().unwrap()).unwrap();
+        let created = match create_directory(&root) {
+            Ok(()) => true,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(err) => panic!("could not create the fallback root: {err}"),
+        };
+
+        // Retain the ownership result until a newly created root has been removed
+        let result = verify_directory(&root);
+        if created {
+            std::fs::remove_dir(&root).unwrap();
+        }
+        result.unwrap();
+    }
 
     /// Directories are private before binding, and an unrestricted DACL is refused.
     #[test]

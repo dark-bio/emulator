@@ -24,10 +24,10 @@ Every stderr line under --json is one event, however long its message:
 
     {"event":"note","message":"emulator.ark is already booted"}
 
-The kinds are note, warning, hint, step, log and error, and an error event
-carries the error object in place of a message. A caller that merged the
-two streams drops the lines starting with `{"event":` and keeps the
-document.
+The kinds are note, warning, hint, step, log and error. An error event
+carries the error object in place of a message, and a log event also
+carries level, target and fields. A caller that merged the two streams
+drops the lines starting with `{"event":` and keeps the document.
 
 ## Events and verbosity
 
@@ -42,9 +42,11 @@ A bare run has no result, so its stdout stays empty, apart from a run with
 --kernel and --initrd, which gives stdout to the guest console. Its stderr
 carries the launcher's log lines, as log events under --json.
 
-Every emulator writes its launcher's lines and what QEMU says to a log file
-in the data directory, named after the port it holds. Each launch on a port
-replaces the file. `ark-emulator doctor --json` names the directory, and
+Every emulator writes its launcher's diagnostics, what QEMU says included,
+to a log file in the data directory, named after the port it holds. Each
+line is one JSON record with level, target and fields, and the message is
+in fields.message. Each launch on a port replaces the file.
+`ark-emulator doctor --json` names the directory, and
 `ark-emulator start --json` and `ark-emulator list --json` name each
 emulator's file. The device itself never writes to it.
 
@@ -117,7 +119,8 @@ Exit 3 is an emulator in the way or out of reach.
   command. Emulators from different releases can cause it, so update Ark
   Emulator and restart every running emulator.
 - `control-unsupported` means the emulator lacks the control the command
-  needs. Update Ark Emulator and restart every running emulator.
+  needs, or its control endpoint is missing. Update Ark Emulator and
+  restart every running emulator.
 - `control-unreachable` means the emulator's control endpoint could not be
   reached or understood. A failed stop can still be shutting down, and a
   button input without a reply has an unknown outcome, which

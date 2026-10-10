@@ -31,7 +31,31 @@ use ureq_proto::http::Version;
 #[path = "local_windows.rs"]
 mod windows;
 #[cfg(windows)]
-use windows::{create_directory, prepare, verify_directory};
+use windows::{create_directory, directory, prepare, verify_directory};
+
+/// Prefix of a private per-user root outside the application data directory.
+const ROOT_PREFIX: &str = "ark-emulator-";
+/// Parent of Unix IPC roots, independent of the home and temporary directories.
+#[cfg(unix)]
+const UNIX_ROOT: &str = "/tmp";
+/// Hexadecimal characters in a registry or control socket filename.
+const SOCKET_NAME_LEN: usize = 32;
+/// Optional socket-name namespace inherited by integration tests and their launchers.
+/// Runtime selection lets subprocesses share fixtures without changing socket roots.
+pub(crate) const TEST_NAMESPACE: &str = "ARK_EMULATOR_TEST_NAMESPACE";
+/// Prefix distinguishing private QEMU channel directories from socket files.
+const CHANNEL_PREFIX: &str = "h-";
+/// Hexadecimal characters distinguishing private QEMU channel directories.
+const CHANNEL_ID_LEN: usize = 16;
+/// Socket filename shared by the isolated hardware and monitor directories.
+pub(super) const CHANNEL_SOCKET_NAME: &str = "hw.sock";
+/// Longest socket suffix below an IPC root, including directory separators.
+#[cfg(windows)]
+const SOCKET_SUFFIX_LEN: usize = {
+    let native = 1 + SOCKET_NAME_LEN;
+    let channel = 1 + CHANNEL_PREFIX.len() + CHANNEL_ID_LEN + 1 + CHANNEL_SOCKET_NAME.len();
+    if native > channel { native } else { channel }
+};
 
 /// Registration key for the sole socket owned by each readiness poller.
 const SOCKET_EVENT: usize = 0;
@@ -93,16 +117,17 @@ pub(crate) fn identity() -> String {
     )
 }
 
-/// Resolve the shared IPC root within this user's local application data.
+/// Resolve a short IPC root for the effective user, independent of their home.
+#[cfg(unix)]
 fn directory() -> io::Result<PathBuf> {
-    dirs::data_local_dir()
-        .map(|path| path.join("bio.dark.emulator").join("ipc"))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "local application data directory is unavailable",
-            )
-        })
+    // SAFETY: geteuid has no preconditions and does not retain pointers
+    Ok(unix_directory(unsafe { libc::geteuid() }))
+}
+
+/// Name a Unix user's private root without expanding `/tmp` through symlinks.
+#[cfg(unix)]
+fn unix_directory(uid: libc::uid_t) -> PathBuf {
+    PathBuf::from(UNIX_ROOT).join(format!("{ROOT_PREFIX}{uid}"))
 }
 
 /// Resolve a protocol name to the same short filename on every host.
@@ -118,8 +143,14 @@ pub(crate) fn address(name: &str) -> io::Result<PathBuf> {
             "invalid local endpoint name",
         ));
     }
-    let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
-    let path = directory()?.join(&digest[..32]);
+    let mut digest = Sha256::new();
+    if let Some(namespace) = std::env::var_os(TEST_NAMESPACE) {
+        digest.update(namespace.as_encoded_bytes());
+        digest.update([0]);
+    }
+    digest.update(name.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    let path = directory()?.join(&digest[..SOCKET_NAME_LEN]);
     SockAddr::unix(&path)?;
     Ok(path)
 }
@@ -161,7 +192,7 @@ pub(crate) fn private_directory() -> io::Result<PrivateDirectory> {
 
     // A collision never adopts or removes a directory belonging to another endpoint
     for _ in 0..DIRECTORY_ATTEMPTS {
-        let path = root.join(format!("h-{}", &identity()[..16]));
+        let path = root.join(format!("{CHANNEL_PREFIX}{}", &identity()[..CHANNEL_ID_LEN]));
         match create_directory(&path) {
             Ok(()) => {
                 let directory = PrivateDirectory { path };
@@ -719,18 +750,74 @@ impl Request {
 mod tests {
     use super::*;
 
-    /// Protocol names map to the app-data paths native clients expect on every host.
+    /// Protocol names share the selected private root and stable socket filenames.
     #[test]
     fn test_endpoint_paths_match_the_shared_namespace() {
-        let root = dirs::data_local_dir()
-            .unwrap()
-            .join("bio.dark.emulator")
-            .join("ipc");
+        let root = directory().unwrap();
         for (name, file) in [
             ("registry-18180", "675ee216b25e35275ab9abd52629e31f"),
             ("c-0123456789abcdef", "498ca4e5b7df41bc7d678993c7bb742e"),
         ] {
             assert_eq!(address(name).unwrap(), root.join(file), "{name}");
+        }
+    }
+
+    /// A namespaced subprocess can serve the same endpoint without reaching its parent.
+    #[test]
+    fn test_namespaces_isolate_named_endpoints() {
+        #[cfg(unix)]
+        let _exclusive = PROCESS_TEST.lock().unwrap();
+        if let Ok(name) = std::env::var("ARK_IPC_NAMESPACE_TEST") {
+            let parent = std::env::var_os("ARK_IPC_PARENT_ENDPOINT").unwrap();
+            assert_ne!(address(&name).unwrap(), PathBuf::from(parent));
+            let server = Server::bind_test(&name).unwrap();
+            let mut client = Stream::connect(&name, IO_TIMEOUT).unwrap();
+            client.write_all(b"GET /isolated HTTP/1.0\r\n\r\n").unwrap();
+            let request = server.recv().unwrap();
+            assert_eq!(request.url(), "/isolated");
+            request.respond(Response::from_string("isolated")).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert!(response.ends_with("\r\n\r\nisolated"));
+            return;
+        }
+
+        // Hold the parent's endpoint while children bind the same name independently
+        let name = format!("registry-fixture-{}", &identity()[..32]);
+        let server = Server::bind_test(&name).unwrap();
+        for namespace in [identity(), format!("{}-{}", identity(), "é".repeat(1024))] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("test_namespaces_isolate_named_endpoints")
+                .env(TEST_NAMESPACE, namespace)
+                .env("ARK_IPC_NAMESPACE_TEST", &name)
+                .env("ARK_IPC_PARENT_ENDPOINT", address(&name).unwrap())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(
+                server
+                    .recv_timeout(Duration::from_millis(20))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    /// The largest Unix UID leaves every socket path within the platform limit.
+    #[cfg(unix)]
+    #[test]
+    fn test_longest_socket_paths_fit() {
+        let root = unix_directory(libc::uid_t::MAX);
+        let native = root.join("f".repeat(SOCKET_NAME_LEN));
+        let channel = root
+            .join(format!("{CHANNEL_PREFIX}{}", "f".repeat(CHANNEL_ID_LEN)))
+            .join(CHANNEL_SOCKET_NAME);
+
+        // These byte limits reserve the terminating NUL in sockaddr_un.sun_path
+        let limit = if cfg!(target_os = "macos") { 103 } else { 107 };
+        for path in [native, channel] {
+            assert!(path.as_os_str().len() <= limit, "{}", path.display());
+            SockAddr::unix(&path).unwrap();
         }
     }
 

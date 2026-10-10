@@ -57,7 +57,7 @@ impl Endpoint {
     /// Reserve an isolated channel name before spawning QEMU.
     pub(crate) fn new(id: &'static str) -> io::Result<Self> {
         let directory = local::private_directory()?;
-        let path = directory.path().join("hw.sock");
+        let path = directory.path().join(local::CHANNEL_SOCKET_NAME);
         socket2::SockAddr::unix(&path)?;
         local::track_socket(path.clone(), true)?;
         Ok(Self {
@@ -100,7 +100,7 @@ impl Endpoint {
 
 impl Drop for Endpoint {
     fn drop(&mut self) {
-        local::remove_socket(&self._directory.path().join("hw.sock"));
+        local::remove_socket(&self._directory.path().join(local::CHANNEL_SOCKET_NAME));
     }
 }
 

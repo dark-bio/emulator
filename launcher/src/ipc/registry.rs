@@ -774,11 +774,10 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
-            write!(
-                client,
-                "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{headers}\r\n"
-            )
-            .unwrap();
+            let request = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\n{headers}\r\n");
+            // One excess byte proves the limit without unread input resetting the reply
+            let wire = request.as_bytes();
+            client.write_all(&wire[..wire.len().min(8193)]).unwrap();
             let mut client = BufReader::new(client);
             let mut status = String::new();
             client.read_line(&mut status).unwrap();
@@ -941,28 +940,16 @@ mod tests {
     /// Repeated hosting attempts leave the existing registry in place.
     #[test]
     fn test_hosting_twice_from_one_process_is_refused() {
-        // The second call is the one a heartbeat makes after a failed publish.
-        // A launcher already hosting must not stack a second server on its own.
-        if !host(super::super::discovery::CLIENT.address).unwrap() {
-            // The port is held by something else, which the test below covers.
-            return;
-        }
-        assert!(!host(super::super::discovery::CLIENT.address).unwrap());
+        let address = public_registry();
+        assert!(!host(address).unwrap());
     }
 
     /// A launcher cannot host while another listener holds the browser port.
     #[test]
     fn test_only_one_launcher_can_host_the_registry() {
-        // Whoever binds first serves; the rest report a lost race rather than
-        // an error, which is what lets every launcher try unconditionally.
-        let Ok(held) = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTRY_PORT))
-        else {
-            // Something on this machine is already holding the port, which is
-            // the case being asserted anyway.
-            assert!(!host(super::super::discovery::CLIENT.address).unwrap());
-            return;
-        };
-        assert!(!host(super::super::discovery::CLIENT.address).unwrap());
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, held.local_addr().unwrap().port());
+        assert!(!host(address).unwrap());
         drop(held);
     }
 }

@@ -152,7 +152,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         Ok(_) if !registry_warnings.is_empty() => checks.fail(
             "registry",
             Error::new(Code::RegistryUnreachable, registry_warnings.join("; "))
-                .hint("update Ark Emulator and restart all running launchers"),
+                .hint("update Ark Emulator and restart all running emulators"),
         ),
         Ok(instances) if instances.is_empty() => checks.ok("registry", "no emulator running"),
         Ok(instances) => checks.ok("registry", &format!("{} running", instances.len())),
