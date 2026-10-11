@@ -50,14 +50,9 @@ bundle_binary qemu-img qemu-img
 
 bundle_firmware "on Debian/Ubuntu, efi-virtio.rom needs the ipxe-qemu package"
 
-# QEMU's accelerators, block drivers and UI backends can be dlopen'd modules
-# rather than linked in, and Debian and Ubuntu build them that way. ldd cannot
-# see a dlopen, so they never turn up through collect_deps. Copied ahead of the
-# dependency walk below so their own dependencies get collected too.
-#
-# Without the TCG module, a machine with no QEMU installed has no software
-# emulation to fall back on when KVM is unavailable, and QEMU aborts on an
-# assertion rather than failing cleanly.
+# The native TCG accelerator is loaded dynamically on Debian and Ubuntu.
+# The launcher uses built-in devices and local qcow2 storage, so display,
+# audio and remote-storage modules are omitted along with their dependencies.
 module_dir=""
 for candidate in /usr/lib/*/qemu /usr/lib/qemu /usr/lib64/qemu; do
   [ -d "$candidate" ] || continue
@@ -68,15 +63,13 @@ for candidate in /usr/lib/*/qemu /usr/lib/qemu /usr/lib64/qemu; do
 done
 
 if [ -n "$module_dir" ]; then
-  find "$module_dir" -maxdepth 1 -name '*.so' -exec cp -L {} "$libs_dir/" \;
-  # Asserted for the same reason as the firmware: a silent miss only surfaces
-  # later, on a machine with no QEMU to fall back to.
   accel_module="accel-tcg-${native_qemu#qemu-system-}.so"
-  if [ ! -f "$libs_dir/$accel_module" ]; then
+  if [ ! -f "$module_dir/$accel_module" ]; then
     echo "$accel_module not found in $module_dir" >&2
     exit 1
   fi
-  echo "bundled $(find "$module_dir" -maxdepth 1 -name '*.so' | wc -l) QEMU modules from $module_dir"
+  cp -L "$module_dir/$accel_module" "$libs_dir/"
+  echo "bundled $accel_module from $module_dir"
 else
   # A distro that links everything in has nothing here to collect.
   echo "this QEMU build has no loadable modules"

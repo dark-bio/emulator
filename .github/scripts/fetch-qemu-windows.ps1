@@ -1,10 +1,9 @@
 # fetch-qemu-windows.ps1: the Windows counterpart of fetch-qemu-linux.sh and
 # fetch-qemu-macos.sh, which share a qemu-common.sh this cannot use.
 #
-# The official Windows build already ships every DLL side by side, with no
-# absolute-path linking to undo, so this is just fetch, silent-install, and
-# copy. DLLs still go into launcher/qemu-libs/ rather than next to the exes, to
-# match the other two platforms.
+# The Windows distribution supplies DLLs beside its executables. Follow the
+# imports of the two bundled tools with Visual Studio's dumpbin, and copy their
+# dependencies into launcher/qemu-libs/ to match the other platforms.
 #
 # Only the host's own architecture is bundled, as the generic
 # "qemu-system-guest" sidecar; qemu-img is always bundled.
@@ -26,11 +25,29 @@ $QemuSha512 = "5bcf9eed634e8575a37b74f445af41a2fe4106da512d0c30c368301d4c105037f
 $repoRoot = Resolve-Path "$PSScriptRoot/../.."
 $binDir = Join-Path $repoRoot "launcher/binaries"
 $libsDir = Join-Path $repoRoot "launcher/qemu-libs"
+# A repeated fetch must not retain DLLs or ROMs from a broader installation
+foreach ($dir in @($binDir, $libsDir)) {
+    if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+}
 New-Item -ItemType Directory -Force -Path $binDir, $libsDir | Out-Null
 
 $triple = (rustc -vV | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
 if (-not $triple) {
     throw "could not determine host target triple via 'rustc -vV'"
+}
+
+# The Visual Studio tools are installed on the runner but may not be on PATH
+$dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+if (-not $dumpbin) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+    if (Test-Path $vswhere) {
+        $dumpbin = & $vswhere -latest -products '*' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+    }
+}
+if (-not $dumpbin) {
+    throw "dumpbin.exe not found; install the Visual Studio C++ build tools"
 }
 
 $installer = "qemu-w64-setup-$QemuVersion.exe"
@@ -48,9 +65,34 @@ $installDir = Join-Path $env:TEMP "qemu-install"
 Start-Process -FilePath $installerPath -ArgumentList "/S", "/D=$installDir" -Wait
 
 $nativeQemu = switch -Regex ($triple) {
-    "^aarch64-" { "qemu-system-aarch64.exe" }
-    "^x86_64-"  { "qemu-system-x86_64.exe" }
+    "^aarch64-" { $arch = "arm64"; "qemu-system-aarch64.exe" }
+    "^x86_64-"  { $arch = "amd64"; "qemu-system-x86_64.exe" }
     default     { throw "unsupported host architecture in triple $triple" }
+}
+
+# Copies imports recursively, including delay imports reported by dumpbin.
+# DLLs absent from the distribution must resolve to Windows or its API sets.
+# Runtime-loaded graphics backends are unused by the headless QEMU guest.
+function Copy-Dependencies([string]$Binary) {
+    $imports = & $dumpbin /nologo /dependents $Binary
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin failed for $Binary"
+    }
+    foreach ($line in $imports) {
+        if ($line -notmatch '^\s+(\S+\.dll)\s*$') { continue }
+        $name = $Matches[1]
+        $src = Join-Path $installDir $name
+        $dest = Join-Path $libsDir $name
+        if (Test-Path $dest) { continue }
+
+        if (Test-Path $src) {
+            Copy-Item $src $dest
+            Copy-Dependencies $src
+        } elseif ($name -notmatch '^(api|ext)-ms-win-' -and
+                  -not (Test-Path (Join-Path "$env:WINDIR/System32" $name))) {
+            throw "$name imported by $Binary is missing from QEMU and Windows"
+        }
+    }
 }
 
 $binaries = @{
@@ -61,39 +103,18 @@ foreach ($name in $binaries.Keys) {
     $src = Join-Path $installDir $binaries[$name]
     $dest = Join-Path $binDir "$name-$triple.exe"
     Copy-Item $src $dest -Force
+    Copy-Dependencies $src
 }
 
-# Every DLL, rather than re-deriving Windows' own dependency graph to find the
-# subset the exes need. They are small next to the qemu-system-* binaries.
-Get-ChildItem (Join-Path $installDir "*.dll") | ForEach-Object {
-    Copy-Item $_.FullName (Join-Path $libsDir $_.Name) -Force
-}
-
-# The firmware/BIOS files, whose subdirectory within the installer varies by
-# version, hence the recursive search. The size cap excludes the ARM UEFI blobs,
-# which a direct kernel boot never uses.
-#
-# Filtering by extension after an unrestricted -Recurse rather than via -Include
-# is deliberate: -Recurse -Include is unreliable unless -Path itself ends in a
-# wildcard, and a wrong pattern matches nothing without erroring.
-$firmwareExtensions = ".bin", ".rom", ".fd", ".dtb"
-$firmwareFiles = Get-ChildItem $installDir -Recurse -File |
-    Where-Object { $_.Extension -in $firmwareExtensions -and $_.Length -lt 5MB }
-foreach ($file in $firmwareFiles) {
-    Copy-Item $file.FullName (Join-Path $libsDir $file.Name) -Force
-}
-
-# A silent miss only surfaces later as an opaque QEMU firmware error, on a
-# machine with no QEMU to fall back to. efi-virtio.rom is carried by every
-# virtio-pci device.
-$requiredFirmware = @("efi-virtio.rom")
-if ($nativeQemu -eq "qemu-system-x86_64.exe") {
-    $requiredFirmware += "bios-256k.bin", "vgabios-stdvga.bin"
-}
+# ROM locations within the Windows distribution vary by version
+$firmwareFiles = Get-ChildItem $installDir -Recurse -File
+$requiredFirmware = Get-Content (Join-Path $repoRoot ".github/packaging/qemu/$arch.roms")
 foreach ($name in $requiredFirmware) {
-    if (-not ($firmwareFiles | Where-Object { $_.Name -eq $name })) {
+    $file = $firmwareFiles | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    if (-not $file) {
         throw "$name not found under $installDir; did the QEMU installer layout change?"
     }
+    Copy-Item $file.FullName (Join-Path $libsDir $name)
 }
 
 Write-Host "populated $binDir (triple $triple) and $libsDir"

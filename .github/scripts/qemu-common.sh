@@ -13,6 +13,8 @@
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 bin_dir="$repo_root/launcher/binaries"
 libs_dir="$repo_root/launcher/qemu-libs"
+# A repeated fetch must not retain resources from a broader QEMU installation
+rm -rf "$bin_dir" "$libs_dir"
 mkdir -p "$bin_dir" "$libs_dir"
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
@@ -22,8 +24,8 @@ if [ -z "$triple" ]; then
 fi
 
 case "$triple" in
-  aarch64-*) native_qemu=qemu-system-aarch64 ;;
-  x86_64-*)  native_qemu=qemu-system-x86_64 ;;
+  aarch64-*) arch=arm64; native_qemu=qemu-system-aarch64 ;;
+  x86_64-*)  arch=amd64; native_qemu=qemu-system-x86_64 ;;
   *)
     echo "unsupported host architecture in triple $triple" >&2
     exit 1 ;;
@@ -44,14 +46,12 @@ bundle_binary() {
   collect_deps "$src"
 }
 
-# Copies QEMU's firmware and option ROMs into libs_dir. $1 is an optional hint
-# printed if one is missing.
-#
-# Takes every small file from the datadir rather than naming them, since which
-# ROMs QEMU loads depends on the configured devices. The size cap excludes the
-# ARM UEFI blobs, which a direct kernel boot never uses.
+# Copies the ROMs needed by the launcher's q35 and virt machines. The amd64
+# list includes SeaBIOS, default VGA, the direct Linux loader and the KVM APIC
+# helper. Both architectures retain the virtio network device's option ROM.
+# $1 is an optional hint printed if a required ROM is missing.
 bundle_firmware() {
-  local hint="${1:-}" datadirs dir f required
+  local hint="${1:-}" datadirs dir f found
   # Ask QEMU rather than guessing at the package manager's layout, and ask the
   # binary on PATH, since the paths it reports are relative to its own location.
   datadirs="$("$native_qemu" -L help 2>/dev/null || true)"
@@ -59,24 +59,18 @@ bundle_firmware() {
     echo "could not determine QEMU's firmware datadirs via '$native_qemu -L help'" >&2
     exit 1
   fi
-  while IFS= read -r dir; do
-    [ -d "$dir" ] || continue
-    find -L "$dir" -maxdepth 1 \
-      \( -iname '*.bin' -o -iname '*.rom' -o -iname '*.fd' -o -iname '*.dtb' \) \
-      -size -5M -exec cp -L {} "$libs_dir/" \;
-  done <<EOF
+  while IFS= read -r f; do
+    found=false
+    while IFS= read -r dir; do
+      if [ -f "$dir/$f" ]; then
+        cp -L "$dir/$f" "$libs_dir/"
+        found=true
+        break
+      fi
+    done <<EOF
 $datadirs
 EOF
-
-  # A silent miss only surfaces later as an opaque QEMU firmware error, on a
-  # machine with no QEMU to fall back to. efi-virtio.rom is carried by every
-  # virtio-pci device; x86_64 also runs SeaBIOS and gets a default VGA device.
-  required="efi-virtio.rom"
-  if [ "$native_qemu" = "qemu-system-x86_64" ]; then
-    required="$required bios-256k.bin vgabios-stdvga.bin"
-  fi
-  for f in $required; do
-    if [ ! -f "$libs_dir/$f" ]; then
+    if [ "$found" = false ]; then
       echo "$f not found in any QEMU datadir:" >&2
       echo "$datadirs" >&2
       if [ -n "$hint" ]; then
@@ -84,7 +78,7 @@ EOF
       fi
       exit 1
     fi
-  done
+  done < "$repo_root/.github/packaging/qemu/$arch.roms"
 }
 
 # Walks the dependencies of everything in libs_dir matching the glob $1, until a
