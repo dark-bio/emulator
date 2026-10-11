@@ -149,7 +149,7 @@ jobs:
           path: |
             launcher/binaries
             launcher/qemu-libs
-          key: qemu-v1-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
+          key: qemu-v1-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh', '.github/packaging/qemu/*') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
 
       - name: Fetch bundled QEMU (Linux)
         if: runner.os == 'Linux' && steps.qemu-cache.outputs.cache-hit != 'true'
