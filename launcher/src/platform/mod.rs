@@ -32,13 +32,16 @@
 //!   - **Native console**: a Windows console carries the full palette without
 //!     anything in the environment saying so.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::diagnostics::{self, log};
+use crate::diagnostics;
+use tracing::debug;
 
 pub(crate) mod orphan;
+
+mod libraries;
+pub(crate) use libraries::{library_path_var, prepend_library_path};
 
 /// Recognize a terminal interrupt also delivered directly to QEMU.
 #[cfg(unix)]
@@ -110,28 +113,6 @@ pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
         Some(rest) => PathBuf::from(rest),
         None => path.to_path_buf(),
     }
-}
-
-/// Name of the platform's dynamic-linker library search-path variable.
-pub(crate) fn library_path_var() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "DYLD_LIBRARY_PATH"
-    } else if cfg!(target_os = "windows") {
-        "PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    }
-}
-
-/// `dir` prepended onto the current value of [`library_path_var`], pointing a
-/// spawned QEMU at its bundled libraries without patching the binaries. The
-/// loader consults this search path before a dependency's recorded path, even
-/// an absolute one, which is why the fetch scripts leave rpaths alone.
-pub(crate) fn prepend_library_path(dir: &Path) -> OsString {
-    let existing = std::env::var_os(library_path_var());
-    let existing = existing.iter().flat_map(std::env::split_paths);
-    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(existing))
-        .unwrap_or_else(|_| dir.as_os_str().to_owned())
 }
 
 /// Stops Windows allocating a console window for a console-subsystem child,
@@ -336,8 +317,8 @@ fn native_accel_flags() -> &'static [&'static str] {
     if kvm_available() {
         &["-accel", "kvm", "-accel", "tcg"]
     } else {
-        log!(
-            "[launcher] /dev/kvm is not accessible; falling back to software \
+        debug!(
+            "/dev/kvm is not accessible; falling back to software \
              emulation, which will be slower. Access normally comes from \
              membership of the kvm group."
         );
@@ -345,13 +326,10 @@ fn native_accel_flags() -> &'static [&'static str] {
     }
 }
 
-/// Whether KVM is usable, meaning `/dev/kvm` exists and this user may open it
-/// for reading and writing, which normally comes from the `kvm` group.
+/// Checks whether this user can read and write `/dev/kvm`.
 ///
-/// Probed for the same reason as [`hvf_available`] and [`whpx_probe`]: QEMU's
-/// `-accel kvm,tcg` list is not the clean fallback it looks like, and a
-/// refused `/dev/kvm` is much the most common way for a Linux host to end up
-/// without acceleration.
+/// Access normally comes from membership in the `kvm` group. A failed probe
+/// selects software emulation before QEMU starts.
 #[cfg(target_os = "linux")]
 fn kvm_available() -> bool {
     // SAFETY: a null-terminated literal in, a status code out. `access` reads
@@ -364,8 +342,8 @@ fn native_accel_flags() -> &'static [&'static str] {
     if hvf_available() {
         &["-accel", "hvf", "-accel", "tcg"]
     } else {
-        log!(
-            "[launcher] Hypervisor.framework unavailable on this Mac; \
+        debug!(
+            "Hypervisor.framework unavailable on this Mac; \
              falling back to software emulation, which will be slower"
         );
         &["-accel", "tcg"]
@@ -377,11 +355,12 @@ fn native_accel_flags() -> &'static [&'static str] {
     match whpx_probe() {
         Ok(()) => &["-accel", "whpx", "-accel", "tcg"],
         Err(reason) => {
-            log!(
-                "[launcher] Windows Hypervisor Platform unusable ({reason:#}); falling \
+            debug!(
+                "Windows Hypervisor Platform unusable ({:#}); falling \
                  back to software emulation, which will be slower. If the feature is \
                  simply switched off, enable it with: DISM /online /Enable-Feature \
-                 /FeatureName:HypervisorPlatform /All"
+                 /FeatureName:HypervisorPlatform /All",
+                reason
             );
             &["-accel", "tcg"]
         }

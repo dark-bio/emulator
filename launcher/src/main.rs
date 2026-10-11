@@ -76,34 +76,38 @@ fn main() {
                 if let Err(err) = error.print().and_then(|()| std::io::stdout().flush()) {
                     let err = Error::io(format!("could not print the help: {err}"));
                     output.error(&err);
-                    std::process::exit(err.exit());
+                    ipc::local::exit(err.exit());
                 }
-                std::process::exit(0);
+                ipc::local::exit(0);
             }
             output.error(&usage(&error));
-            std::process::exit(2);
+            ipc::local::exit(2);
         }
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
         platform::attach_console();
         let _ = error.print();
-        std::process::exit(2);
+        ipc::local::exit(2);
     });
     if cli.version || cli.command.is_some() || cli.boot.headless {
         platform::attach_console();
     }
     let output = output::Output::new(&cli.global);
     desktop::reporting(&output, cli.global.no_input || cli.boot.headless);
-    diagnostics::level(cli.global.log);
+    diagnostics::init(
+        &output,
+        cli.global.log,
+        cli.version || cli.command.is_some(),
+    );
 
     // This reads compiled metadata without initializing a window system
     let context = tauri::generate_context!();
     if let Err(err) = cli.validate() {
         output.error(&err);
-        std::process::exit(err.exit());
+        ipc::local::exit(err.exit());
     }
     if cli.version || cli.command.is_some() {
-        std::process::exit(commands::run(
+        ipc::local::exit(commands::run(
             cli.command,
             &cli.global,
             &output,
@@ -114,15 +118,12 @@ fn main() {
 
     // A source build gives stdout to the guest console in either launch mode
     output.release_stdout();
-    if output.json() {
-        diagnostics::log_sink(diagnostics::Sink::Events(output.clone()));
-    }
     if cli.boot.headless {
         update::start(&output, time::OffsetDateTime::now_utc());
         let result = Paths::resolve(&context.config().identifier, context.package_info())
             .and_then(|paths| cli::headless(&paths, cli.boot, output.clone()));
         if let Err(err) = result {
-            diagnostics::log!("[launcher] could not start: {err:#}");
+            tracing::debug!("could not start: {:#}", err);
             output.error(&Error::io(format!("{err:#}")));
             runtime::shut_down(1);
         }

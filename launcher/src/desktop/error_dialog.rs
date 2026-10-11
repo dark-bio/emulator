@@ -28,8 +28,9 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use super::MAIN_WINDOW;
 use crate::cli::output::Output;
-use crate::diagnostics::{self, log};
+use crate::diagnostics;
 use crate::error::{Code, Error};
+use tracing::debug;
 
 /// Label of the error window this module creates.
 const ERROR_WINDOW: &str = "error";
@@ -88,7 +89,7 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 #[tauri::command]
 pub(crate) fn report_issue() {
     if let Err(e) = crate::platform::open_url(ISSUES_URL) {
-        log!("[launcher] could not open {ISSUES_URL}: {e}");
+        debug!("could not open {}: {}", ISSUES_URL, e);
     }
 }
 
@@ -116,7 +117,7 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
     {
         // The event loop is gone, so no window is possible and nothing will
         // exit the process for us.
-        std::process::exit(1);
+        crate::ipc::local::exit(1);
     }
 }
 
@@ -127,7 +128,7 @@ pub(crate) fn show_from_thread(app: &AppHandle, title: &str, err: anyhow::Error)
 fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
     // Logged before the report is built, so the cause is in the log file a
     // command that started this emulator reads back, and in the report too.
-    log!("[launcher] {title}: {err:#}");
+    debug!("{}: {:#}", title, err);
     let report = diagnostics::report(title, &err);
     match EVENTS.lock().ok().and_then(|events| events.clone()) {
         Some(output) => output.error(&Error::new(code(title), report.clone())),
@@ -141,7 +142,7 @@ fn prepare(title: &str, err: anyhow::Error) -> Option<String> {
         // Not app.exit: there is no UI state worth unwinding here, and the
         // caller may still be inside `setup` with no event loop yet to carry
         // the request. QEMU dies with us either way, via `orphan`.
-        std::process::exit(1);
+        crate::ipc::local::exit(1);
     }
     Some(report)
 }
@@ -158,7 +159,7 @@ fn code(title: &str) -> Code {
 fn open_or_exit(app: &AppHandle, report: &str) {
     if let Err(e) = open(app, report) {
         eprintln!("could not open the error window: {e}");
-        std::process::exit(1);
+        crate::ipc::local::exit(1);
     }
 }
 

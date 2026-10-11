@@ -27,15 +27,17 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 toml = "1"
 rfd = "0.17"
 tiny_http = { version = "0.12", default-features = false }
-interprocess = "2.4.4"
-httparse = "1.10"
+socket2 = "0.6.5"
+polling = "3.11"
+libc = "0.2"
+ureq-proto = "0.6.4"
 sha2 = "0.10"
 console = "0.16"
 dirs = "6"
-tungstenite = "0.30"
-
-[dev-dependencies]
+darkbio-cobs = "1"
 tempfile = "3"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 
 # Orphan cleanup is OS-specific: PDEATHSIG (Linux) needs libc; macOS uses a
 # death pipe + /bin/sh (std only). Windows needs windows-sys for a Job Object,
@@ -44,7 +46,6 @@ tempfile = "3"
 # borrows from the terminal that started it. See src/platform/mod.rs,
 # src/cli/output.rs and src/platform/orphan.rs.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
 signal-hook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
@@ -59,6 +60,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
-    "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
 ] }

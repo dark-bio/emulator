@@ -22,10 +22,126 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)] // Scripted peers use the production transport without every client helper.
 mod local;
 
+#[path = "../src/ipc/http.rs"]
+#[allow(dead_code)] // Scripted peers use the production framing without the client helper.
+mod http;
+
+/// Isolate a lifecycle fixture's named endpoints and application data from live launchers.
+fn isolated(name: &str) -> bool {
+    if std::env::var_os("ARK_REGISTRY_TEST").is_some() {
+        let shared = std::env::var_os("ARK_REGISTRY_SHARED_ENDPOINT").unwrap();
+        assert_ne!(
+            local::address("registry-18180").unwrap(),
+            std::path::PathBuf::from(shared)
+        );
+        return false;
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env("ARK_REGISTRY_TEST", "1")
+        .env(local::TEST_NAMESPACE, local::identity())
+        .env(
+            "ARK_REGISTRY_SHARED_ENDPOINT",
+            local::address("registry-18180").unwrap(),
+        )
+        .env("XDG_DATA_HOME", directory.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{name}");
+    true
+}
+
+/// Invalid entries stay visible without diagnostics, and trace events retain metadata.
+#[test]
+fn test_listing_reports_invalid_entries_without_diagnostics() {
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if isolated("test_listing_reports_invalid_entries_without_diagnostics") {
+        return;
+    }
+    for (arguments, valid) in [
+        (vec!["list"], true),
+        (vec!["list", "--json"], true),
+        (vec!["list", "--json"], false),
+        (vec!["list", "--json", "--log", "trace"], true),
+    ] {
+        // Serve a malformed entry beside an optional valid emulator
+        let server = local::Server::bind_test("registry-18180").unwrap();
+        let mut entries = vec![serde_json::json!({"port":"invalid"})];
+        if valid {
+            entries.push(serde_json::json!({
+                "port":18181, "disk":"demo.ark", "disk_id":"0123abcd", "ready":false,
+            }));
+        }
+        let worker = thread::spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.method().as_str(), "GET");
+            let body = serde_json::json!({"version":1,"instances":entries});
+            request
+                .respond(tiny_http::Response::from_string(body.to_string()))
+                .unwrap();
+        });
+
+        // Normal CLI output must report incomplete discovery without requiring --log
+        let output = Command::new(env!("CARGO_BIN_EXE_ark-emulator"))
+            .args(&arguments)
+            .env("CI", "1")
+            .output()
+            .unwrap();
+        worker.join().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{arguments:?}: {stderr}");
+        if !arguments.contains(&"--json") {
+            assert!(stderr.contains("warning:"), "{stderr}");
+            assert!(stderr.contains("entry 1"), "{stderr}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("demo.ark"));
+            continue;
+        }
+
+        // JSON keeps valid results and carries warnings as separate stderr events
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["emulators"].as_array().unwrap().len(),
+            usize::from(valid)
+        );
+        let events: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            events.iter().any(|event| event["event"] == "warning"
+                && event["message"].as_str().unwrap().contains("entry 1")),
+            "{stderr}"
+        );
+        let logs: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "log")
+            .collect();
+        if arguments.contains(&"trace") {
+            assert!(
+                logs.iter().any(|event| event["level"] == "trace"),
+                "{stderr}"
+            );
+            for event in logs {
+                assert!(!event["target"].as_str().unwrap().is_empty());
+                assert_eq!(event["fields"]["message"], event["message"]);
+            }
+        } else {
+            assert!(logs.is_empty(), "{stderr}");
+        }
+    }
+}
+
 /// Refused initial and later publications stop the guest and reach either caller.
 #[test]
 fn test_registration_refusals_reach_standalone_and_start_commands() {
     let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if isolated("test_registration_refusals_reach_standalone_and_start_commands") {
+        return;
+    }
     // Never send test publications into an emulator's live registry
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
@@ -101,13 +217,20 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
             command.arg("start");
         }
         command
-            .args(["--headless", "--json", "--timeout", "20", "--image"])
+            .args([
+                "--headless",
+                "--json",
+                "--log",
+                "debug",
+                "--timeout",
+                "20",
+                "--image",
+            ])
             .arg(directory.path().join("image.ark"))
             .arg("--kernel")
             .arg(directory.path().join("kernel"))
             .arg("--initrd")
             .arg(directory.path().join("initrd"))
-            .env("XDG_DATA_HOME", directory.path().join("data"))
             .env("CI", "1")
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY");
@@ -123,6 +246,20 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
             "{stderr}"
         );
         assert!(!stderr.contains("error[timeout]"), "{stderr}");
+        let events: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let logs: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "log")
+            .collect();
+        assert!(!logs.is_empty(), "{stderr}");
+        for event in logs {
+            assert!(!event["level"].as_str().unwrap().is_empty());
+            assert!(!event["target"].as_str().unwrap().is_empty());
+            assert!(event["fields"]["message"].is_string());
+        }
         if parent {
             let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(result["error"]["code"], "stopped-unexpectedly");
@@ -144,6 +281,9 @@ fn test_registration_refusals_reach_standalone_and_start_commands() {
 #[test]
 fn test_direct_stop_all_survives_registry_loss_after_selection() {
     let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if isolated("test_direct_stop_all_survives_registry_loss_after_selection") {
+        return;
+    }
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
@@ -232,7 +372,6 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
             .arg(root.join("kernel"))
             .arg("--initrd")
             .arg(root.join("initrd"))
-            .env("XDG_DATA_HOME", root.join("data"))
             .env("CI", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -256,8 +395,7 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ark-emulator"));
     command
         .args(["stop", "--all", "--json", "--timeout", "5"])
-        .env("CI", "1")
-        .env("XDG_DATA_HOME", directory.path().join("cli"));
+        .env("CI", "1");
     let output = bounded(&mut command, &directory.path().join("unused.pid"));
     assert!(
         output.status.success(),
@@ -308,6 +446,9 @@ fn test_direct_stop_all_survives_registry_loss_after_selection() {
 #[test]
 fn test_direct_stop_all_preserves_partial_output_on_refusal() {
     let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if isolated("test_direct_stop_all_preserves_partial_output_on_refusal") {
+        return;
+    }
     let listener = match TcpListener::bind(("127.0.0.1", 18180)) {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
@@ -370,8 +511,7 @@ fn test_direct_stop_all_preserves_partial_output_on_refusal() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ark-emulator"));
     command
         .args(["stop", "--all", "--json", "--timeout", "5"])
-        .env("CI", "1")
-        .env("XDG_DATA_HOME", directory.path());
+        .env("CI", "1");
     let output = bounded(&mut command, &directory.path().join("unused.pid"));
     assert_eq!(output.status.code(), Some(3));
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

@@ -36,7 +36,9 @@ pub(crate) fn registry(replies: Vec<(&'static str, String)>) -> (Client, JoinHan
                 .unwrap();
             assert_eq!(incoming.method().as_str(), method);
             let mut writer = incoming.into_writer();
-            writer.write_all(reply.as_bytes()).unwrap();
+            if !reply.is_empty() {
+                writer.write_all(reply.as_bytes()).unwrap();
+            }
         }
         drop(server);
         drop(reservation);
@@ -44,10 +46,15 @@ pub(crate) fn registry(replies: Vec<(&'static str, String)>) -> (Client, JoinHan
     (client, worker)
 }
 
-/// Encode an HTTP reply with an explicit body length for the registry peer.
+/// Build a response with ordinary HTTP body framing.
 pub(crate) fn response(status: u16, body: &str) -> String {
-    format!(
-        "HTTP/1.0 {status} Test\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )
+    if status == 204 {
+        assert!(body.is_empty());
+        format!("HTTP/1.1 {status} Test\r\nConnection: close\r\n\r\n")
+    } else {
+        format!(
+            "HTTP/1.1 {status} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
 }
