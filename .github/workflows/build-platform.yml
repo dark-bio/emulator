@@ -51,53 +51,17 @@ jobs:
     runs-on: ${{ startsWith(inputs.os, 'windows-') && 'ubuntu-22.04' || inputs.os }}
     env:
       QEMU_PLATFORM: ${{ startsWith(inputs.os, 'windows-') && 'windows' || startsWith(inputs.os, 'macos-') && 'macos' || 'linux' }}
-      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install macOS build tools
-        if: runner.os == 'macOS'
-        run: brew install cmake ninja pkgconf python xz
-
-      - name: Identify QEMU build inputs
-        id: inputs
-        shell: bash
-        run: |
-          cat .github/packaging/qemu/source.json > "$RUNNER_TEMP/qemu-inputs"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            xcodebuild -version >> "$RUNNER_TEMP/qemu-inputs"
-            xcrun --show-sdk-version >> "$RUNNER_TEMP/qemu-inputs"
-            clang --version >> "$RUNNER_TEMP/qemu-inputs"
-          fi
-          digest=$(shasum -a 256 "$RUNNER_TEMP/qemu-inputs" | cut -d ' ' -f 1)
-          echo "hash=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Cache QEMU runtime and sources
-        if: github.ref_type != 'tag'
-        id: cache
-        uses: actions/cache@v6
+      - name: Build QEMU and matching sources
+        uses: ./.github/packaging/qemu/ci/build
         with:
-          path: |
-            target/qemu-${{ env.QEMU_PLATFORM }}/runtime
-            target/qemu-${{ env.QEMU_PLATFORM }}/artifacts
-          key: qemu-v3-${{ inputs.os }}-${{ inputs.arch }}-${{ hashFiles('.github/packaging/qemu/*', 'tools/qemu-build/**', 'Makefile', 'Cargo.lock') }}-${{ steps.inputs.outputs.hash }}
-
-      - name: Build QEMU
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: make qemu-${{ env.QEMU_PLATFORM }}
-
-      - name: Verify cached QEMU
-        if: steps.cache.outputs.cache-hit == 'true'
-        run: make qemu-${{ env.QEMU_PLATFORM }}-check
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: qemu-${{ inputs.os }}
-          path: target/qemu-${{ env.QEMU_PLATFORM }}/artifacts/*
-          retention-days: 7
-          if-no-files-found: error
+          os: ${{ inputs.os }}
+          arch: ${{ inputs.arch }}
+          platform: ${{ env.QEMU_PLATFORM }}
 
   build:
     needs: qemu
@@ -159,19 +123,6 @@ jobs:
             build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Download QEMU and its matching sources
-        uses: actions/download-artifact@v8
-        with:
-          name: qemu-${{ inputs.os }}
-          path: target/qemu-${{ env.QEMU_PLATFORM }}/artifacts
-
-      - name: Restore the QEMU runtime
-        shell: bash
-        run: |
-          directory="target/qemu-$QEMU_PLATFORM"
-          mkdir -p "$directory/runtime"
-          tar -xJf "$directory/artifacts/$QEMU_PLATFORM-${{ inputs.arch }}-qemu-runtime.tar.xz" -C "$directory/runtime"
-
       - name: Install Make on Windows
         if: runner.os == 'Windows'
         run: choco install make --no-progress -y
@@ -190,8 +141,11 @@ jobs:
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
 
       - name: Verify and stage QEMU on its native host
-        shell: bash
-        run: make qemu-$QEMU_PLATFORM-check
+        uses: ./.github/packaging/qemu/ci/stage
+        with:
+          os: ${{ inputs.os }}
+          arch: ${{ inputs.arch }}
+          platform: ${{ env.QEMU_PLATFORM }}
 
       - name: Import the Apple signing credentials
         # A throwaway keychain rather than the login one, which on a runner is

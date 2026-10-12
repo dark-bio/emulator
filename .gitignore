@@ -1,7 +1,6 @@
 target/
 launcher/gen/schemas/
 
-# Populated by .github/scripts/fetch-*; never checked in.
 launcher/binaries/
 launcher/firmware/
 launcher/qemu-libs/

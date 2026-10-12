@@ -6,6 +6,11 @@
 
 //! Builds and checks the QEMU runtimes shipped with the emulator.
 //!
+//! This package owns the source pins, configure flags, device and ROM lists,
+//! patches, toolchain definitions, Make targets and CI actions. The repository
+//! Makefile includes this package's Makefile; the platform workflow calls its
+//! `ci/build` and `ci/stage` actions to produce and consume runtime archives.
+//!
 //! `make qemu-linux` produces sidecars, licenses, a manifest and matching
 //! sources under `target/qemu-linux`, and stages the runtime for Tauri. The
 //! builder fetches the Git revision in `.github/packaging/qemu/source.json`

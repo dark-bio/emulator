@@ -242,10 +242,9 @@ fn parse_ldd(text: &str) -> Result<BTreeMap<String, String>> {
 pub(crate) fn source_archive(build: &Build) -> Result<()> {
     let sources = build.output.join("sources");
     let recipes = sources.join("build-recipe");
-    copy_tree(
-        &build.repo.join("tools/qemu-build"),
-        &recipes.join("tools/qemu-build"),
-    )?;
+    if recipes.exists() {
+        fs::remove_dir_all(&recipes)?;
+    }
     copy_tree(
         &build.repo.join(".github/packaging/qemu"),
         &recipes.join(".github/packaging/qemu"),
@@ -255,7 +254,7 @@ pub(crate) fn source_archive(build: &Build) -> Result<()> {
     fs::copy(build.repo.join("Makefile"), recipes.join("Makefile"))?;
     fs::write(
         recipes.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"tools/qemu-build\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\".github/packaging/qemu\"]\n",
     )?;
     // Keep selected tool dependencies while pruning unrelated workspace packages
     capture(
