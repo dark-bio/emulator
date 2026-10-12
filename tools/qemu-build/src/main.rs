@@ -8,7 +8,8 @@
 //!
 //! `make qemu-linux` produces sidecars, licenses, a manifest and matching
 //! sources under `target/qemu-linux`, and stages the runtime for Tauri. The
-//! source submodule stays untouched. Docker, Git, tar and Rust are required.
+//! builder fetches the Git revision in `.github/packaging/qemu/source.json`
+//! on demand into the output directory. Docker, Git, tar and Rust are required.
 //!
 //! The Dockerfile pins Ubuntu 22.04 and a package snapshot. The device and
 //! feature lists retain q35, KVM, TCG, qcow2, SLIRP and virtio serial sockets.
@@ -55,7 +56,7 @@ struct Args {
 enum Operation {
     /// Build and stage a runtime and its corresponding source archive.
     Build {
-        /// Emulator repository containing the pinned QEMU submodule.
+        /// Emulator repository containing the pinned QEMU build recipes.
         #[arg(long)]
         repo: PathBuf,
         /// Directory for sources, build products and release files.

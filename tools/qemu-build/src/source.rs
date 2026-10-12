@@ -4,7 +4,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Collects the pinned QEMU checkout, required subprojects and ROM sources.
+//! Fetches pinned QEMU, subproject and ROM sources into the build directory.
 
 use std::fs;
 use std::path::Path;
@@ -54,35 +54,13 @@ pub(crate) fn restore(build: &Build, source: &Path) -> Result<()> {
 
 /// Export source trees and retain their exact origins for the release manifest.
 pub(crate) fn prepare(build: &Build) -> Result<()> {
-    let qemu = build.repo.join("third_party/qemu");
-    ensure!(
-        qemu.join("configure").is_file(),
-        "initialize QEMU with git submodule update --init --depth 1 third_party/qemu"
-    );
-    ensure!(
-        output(Command::new("git").arg("-C").arg(&qemu).args([
-            "status",
-            "--porcelain",
-            "--untracked-files=no"
-        ]))?
-        .is_empty(),
-        "the QEMU submodule has local changes"
-    );
-    let revision = output(
-        Command::new("git")
-            .arg("-C")
-            .arg(&qemu)
-            .args(["rev-parse", "HEAD"]),
-    )?;
-    let pinned = output(Command::new("git").arg("-C").arg(&build.repo).args([
-        "ls-files",
-        "--stage",
-        "third_party/qemu",
-    ]))?;
-    ensure!(
-        pinned.split_whitespace().nth(1) == Some(&revision),
-        "QEMU does not match the recorded submodule revision"
-    );
+    let pinned: serde_json::Value = serde_json::from_slice(&fs::read(
+        build.repo.join(".github/packaging/qemu/source.json"),
+    )?)?;
+    let url = pinned["url"].as_str().context("missing QEMU source URL")?;
+    let revision = pinned["revision"]
+        .as_str()
+        .context("missing QEMU source revision")?;
     let sources = build.output.join("sources");
     fs::create_dir_all(&sources)?;
     let marker = sources.join("qemu-revision");
@@ -91,13 +69,21 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
             fs::read_to_string(&marker)? == revision,
             "QEMU revision changed; use a fresh QEMU_OUTPUT directory"
         );
-    } else {
-        export(&qemu, &sources.join("qemu"), &build.output.join("qemu.tar"))?;
-        fs::write(&marker, &revision)?;
     }
-    let mut origins = vec![
-        json!({"name": "qemu", "url": "https://gitlab.com/qemu-project/qemu.git", "revision": revision}),
-    ];
+
+    // Keep the Git cache separate from the exported tree that receives patches
+    let qemu = build.output.join("git/qemu");
+    fetch(&qemu, url, revision)?;
+    if !marker.exists() {
+        export(
+            &qemu,
+            revision,
+            &sources.join("qemu"),
+            &build.output.join("qemu.tar"),
+        )?;
+        fs::write(&marker, revision)?;
+    }
+    let mut origins = vec![json!({"name": "qemu", "url": url, "revision": revision})];
 
     // Meson wraps pin these build inputs independently of QEMU's submodules.
     let mut wraps = vec![
@@ -109,7 +95,7 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
         wraps.push("dtc");
     }
     for name in wraps {
-        let wrap = fs::read_to_string(qemu.join(format!("subprojects/{name}.wrap")))?;
+        let wrap = fs::read_to_string(sources.join(format!("qemu/subprojects/{name}.wrap")))?;
         let value = |key: &str| -> Result<&str> {
             wrap.lines()
                 .find_map(|line| line.strip_prefix(&format!("{key} = ")))
@@ -117,12 +103,13 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
         };
         let url = value("url")?;
         let revision = value("revision")?;
-        fetch(
-            build,
-            name,
-            url,
+        let cache = build.output.join("git").join(name);
+        fetch(&cache, url, revision)?;
+        export(
+            &cache,
             revision,
             &sources.join(format!("qemu/subprojects/{name}")),
+            &build.output.join(format!("{name}.tar")),
         )?;
         let overlay = sources.join(format!("qemu/subprojects/packagefiles/{name}"));
         if overlay.is_dir() {
@@ -138,25 +125,25 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
             Command::new("git")
                 .arg("-C")
                 .arg(&qemu)
-                .args(["ls-tree", "HEAD", &path]),
+                .args(["ls-tree", revision, &path]),
         )?;
         let revision = entry
             .split_whitespace()
             .nth(2)
             .context("missing ROM source revision")?;
-        let url = output(Command::new("git").arg("-C").arg(&qemu).args([
-            "config",
-            "-f",
-            ".gitmodules",
-            "--get",
-            &format!("submodule.{path}.url"),
-        ]))?;
-        fetch(
-            build,
-            name,
-            &url,
+        let url = output(
+            Command::new("git")
+                .args(["config", "-f"])
+                .arg(sources.join("qemu/.gitmodules"))
+                .args(["--get", &format!("submodule.{path}.url")]),
+        )?;
+        let cache = build.output.join("git").join(name);
+        fetch(&cache, &url, revision)?;
+        export(
+            &cache,
             revision,
             &sources.join(format!("qemu/{path}")),
+            &build.output.join(format!("{name}.tar")),
         )?;
         origins.push(json!({"name": name, "url": url, "revision": revision}));
     }
@@ -234,16 +221,19 @@ fn prune_blobs(build: &Build) -> Result<()> {
     Ok(())
 }
 
-/// Download an immutable Git revision and export it without repository metadata.
-fn fetch(build: &Build, name: &str, url: &str, revision: &str, destination: &Path) -> Result<()> {
-    let cache = build.output.join("git").join(name);
-    fs::create_dir_all(&cache)?;
+/// Fetch an immutable Git commit into a bare cache, reusing it without network access.
+fn fetch(cache: &Path, url: &str, revision: &str) -> Result<()> {
+    ensure!(
+        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "source revision must be a full Git commit hash"
+    );
+    fs::create_dir_all(cache)?;
     if !cache.join("HEAD").exists() {
-        run(Command::new("git").arg("init").arg("--bare").arg(&cache))?;
+        run(Command::new("git").arg("init").arg("--bare").arg(cache))?;
     }
     if !Command::new("git")
         .arg("-C")
-        .arg(&cache)
+        .arg(cache)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .output()?
         .status
@@ -251,34 +241,20 @@ fn fetch(build: &Build, name: &str, url: &str, revision: &str, destination: &Pat
     {
         run(Command::new("git")
             .arg("-C")
-            .arg(&cache)
+            .arg(cache)
             .args(["fetch", "--depth", "1", url, revision]))?;
     }
-    let archive = build.output.join(format!("{name}.tar"));
-    run(Command::new("git")
-        .arg("-C")
-        .arg(&cache)
-        .arg("archive")
-        .arg(format!("--output={}", archive.display()))
-        .arg(revision))?;
-    fs::create_dir_all(destination)?;
-    run(Command::new("tar")
-        .arg("-xf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(destination))?;
-    fs::remove_file(archive)?;
     Ok(())
 }
 
-/// Export the current QEMU revision without touching its checkout.
-fn export(repo: &Path, destination: &Path, archive: &Path) -> Result<()> {
+/// Export the pinned tree without repository metadata or a working checkout.
+fn export(repo: &Path, revision: &str, destination: &Path, archive: &Path) -> Result<()> {
     run(Command::new("git")
         .arg("-C")
         .arg(repo)
         .arg("archive")
         .arg(format!("--output={}", archive.display()))
-        .arg("HEAD"))?;
+        .arg(revision))?;
     fs::create_dir_all(destination)?;
     run(Command::new("tar")
         .arg("-xf")
@@ -287,4 +263,71 @@ fn export(repo: &Path, destination: &Path, archive: &Path) -> Result<()> {
         .arg(destination))?;
     fs::remove_file(archive)?;
     Ok(())
+}
+
+/// Checks immutable source selection and reuse without the upstream repository.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Export the selected commit even when upstream advances or becomes unavailable.
+    #[test]
+    fn test_pinned_sources_survive_upstream_changes() -> Result<()> {
+        // Create two upstream revisions so fetching HEAD would export the wrong file
+        let directory = tempfile::tempdir()?;
+        let upstream = directory.path().join("upstream");
+        run(Command::new("git").arg("init").arg(&upstream))?;
+        let mut revision = String::new();
+        for content in ["pinned source", "new upstream source"] {
+            fs::write(upstream.join("source.txt"), content)?;
+            run(Command::new("git")
+                .arg("-C")
+                .arg(&upstream)
+                .args(["add", "source.txt"]))?;
+            run(Command::new("git").arg("-C").arg(&upstream).args([
+                "-c",
+                "user.name=Source Test",
+                "-c",
+                "user.email=source@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                content,
+            ]))?;
+            if revision.is_empty() {
+                revision = output(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&upstream)
+                        .args(["rev-parse", "HEAD"]),
+                )?;
+            }
+        }
+
+        // A full hash fetches the older commit without following a moving reference
+        let cache = directory.path().join("cache");
+        let url = upstream.to_str().context("non-UTF-8 fixture path")?;
+        assert!(fetch(&cache, url, "HEAD").is_err());
+        fetch(&cache, url, &revision)?;
+        let destination = directory.path().join("exported sources");
+        let archive = directory.path().join("source.tar");
+        export(&cache, &revision, &destination, &archive)?;
+        assert_eq!(
+            fs::read_to_string(destination.join("source.txt"))?,
+            "pinned source"
+        );
+        assert!(!destination.join(".git").exists());
+
+        // Once cached, the same source can be exported without contacting upstream
+        fs::rename(&upstream, directory.path().join("offline"))?;
+        fetch(&cache, url, &revision)?;
+        fs::remove_dir_all(&destination)?;
+        export(&cache, &revision, &destination, &archive)?;
+        assert_eq!(
+            fs::read_to_string(destination.join("source.txt"))?,
+            "pinned source"
+        );
+        Ok(())
+    }
 }
