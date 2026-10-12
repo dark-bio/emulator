@@ -59,7 +59,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Homebrew's QEMU bottles set the minimum macOS version of the bundle.
+          # QEMU and the app target macOS 15 on both native architectures.
           # Keep these labels aligned with bundle.macOS.minimumSystemVersion.
           - os: macos-15
             arch: arm64

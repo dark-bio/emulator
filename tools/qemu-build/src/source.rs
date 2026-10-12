@@ -26,10 +26,18 @@ pub(crate) fn restore(build: &Build, source: &Path) -> Result<()> {
         source.join("qemu/configure").is_file(),
         "the source archive has no QEMU checkout"
     );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("manifest.json"))?)?;
+    ensure!(
+        manifest["target"] == build.target.label(),
+        "source archive target does not match the selected runtime"
+    );
     let target = build.output.join("sources");
     fs::create_dir_all(&target)?;
-    for name in ["qemu", "debian"] {
-        crate::bundle::copy_tree(&source.join(name), &target.join(name))?;
+    for name in ["qemu", "debian", "dependencies"] {
+        if source.join(name).is_dir() {
+            crate::bundle::copy_tree(&source.join(name), &target.join(name))?;
+        }
     }
     for entry in fs::read_dir(&source)? {
         let entry = entry?;
@@ -37,8 +45,6 @@ pub(crate) fn restore(build: &Build, source: &Path) -> Result<()> {
             fs::copy(entry.path(), target.join(entry.file_name()))?;
         }
     }
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(source.join("manifest.json"))?)?;
     fs::write(
         build.output.join("origins.json"),
         serde_json::to_vec_pretty(&manifest["origins"])?,
@@ -94,11 +100,15 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
     ];
 
     // Meson wraps pin these build inputs independently of QEMU's submodules.
-    for name in [
+    let mut wraps = vec![
         "keycodemapdb",
         "berkeley-softfloat-3",
         "berkeley-testfloat-3",
-    ] {
+    ];
+    if build.target.arch() == "arm64" {
+        wraps.push("dtc");
+    }
+    for name in wraps {
         let wrap = fs::read_to_string(qemu.join(format!("subprojects/{name}.wrap")))?;
         let value = |key: &str| -> Result<&str> {
             wrap.lines()
@@ -166,7 +176,7 @@ fn patch_blobs(build: &Build) -> Result<()> {
         build.repo.join(".github/packaging/qemu").join(name),
         build.output.join("sources").join(name),
     )?;
-    let path = format!("/work/sources/{name}");
+    let path = build.work_path(&format!("sources/{name}"));
     let forward = build
         .container("/work/sources/qemu")?
         .args(["patch", "--dry-run", "--forward", "-p1", "-i", &path])
@@ -195,7 +205,10 @@ fn patch_blobs(build: &Build) -> Result<()> {
 /// Keep only shipped ROM binaries in the source distribution.
 fn prune_blobs(build: &Build) -> Result<()> {
     let bios = build.output.join("sources/qemu/pc-bios");
-    let manifest = fs::read_to_string(build.repo.join(".github/packaging/qemu/amd64.roms"))?;
+    let manifest = fs::read_to_string(build.repo.join(format!(
+        ".github/packaging/qemu/{}.roms",
+        build.target.arch()
+    )))?;
     let keep: Vec<_> = manifest.lines().collect();
     let meson = fs::read_to_string(bios.join("meson.build"))?;
     let blobs = meson

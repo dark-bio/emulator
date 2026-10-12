@@ -4,7 +4,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! Builds and checks the Linux amd64 QEMU runtime in an Ubuntu container.
+//! Builds and checks the QEMU runtimes shipped with the emulator.
 //!
 //! `make qemu-linux` produces sidecars, licenses, a manifest and matching
 //! sources under `target/qemu-linux`, and stages the runtime for Tauri. The
@@ -17,10 +17,22 @@
 //! library resolution and live disk operations in a bare Ubuntu container,
 //! then stages the checked runtime. Firmware boot checks run on the final
 //! AppImage in CI. Corresponding sources include standalone rebuild instructions.
+//!
+//! macOS builds natively with Apple's SDK. Windows cross-compiles in an Ubuntu
+//! container and runs its checks on Windows. Both build the pinned dependency
+//! sources in `portable-sources.json` as static libraries, so runtime linking
+//! requires only operating system libraries. Their source archives contain
+//! every dependency, configuration and rebuild recipe.
+//!
+//! `QEMU_APT_MIRROR` can override the Windows toolchain's package snapshot for
+//! diagnostics. The manifest records an override and the resulting image ID.
 
 mod bundle;
 mod check;
+mod portable;
+mod portable_check;
 mod source;
+mod target;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,6 +40,7 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
+use target::Target;
 
 /// Arguments for the build helper invoked by Make.
 #[derive(Parser)]
@@ -40,7 +53,7 @@ struct Args {
 /// Build and verification entry points.
 #[derive(Subcommand)]
 enum Operation {
-    /// Build and stage the Linux runtime and corresponding source archive.
+    /// Build and stage a runtime and its corresponding source archive.
     Build {
         /// Emulator repository containing the pinned QEMU submodule.
         #[arg(long)]
@@ -54,6 +67,9 @@ enum Operation {
         /// Extracted corresponding-source directory to rebuild without Git.
         #[arg(long)]
         sources: Option<PathBuf>,
+        /// Runtime to build, defaulting to the host platform.
+        #[arg(long, value_enum)]
+        target: Option<Target>,
     },
     /// Verify the isolated runtime and stage it for Tauri packaging.
     Check {
@@ -63,6 +79,9 @@ enum Operation {
         /// Directory containing the completed runtime.
         #[arg(long)]
         output: PathBuf,
+        /// Runtime to verify, defaulting to the host platform.
+        #[arg(long, value_enum)]
+        target: Option<Target>,
     },
 }
 
@@ -76,6 +95,10 @@ pub(crate) struct Build {
     image: String,
     /// Bare Ubuntu image used to detect dependencies missing from the bundle.
     base_image: String,
+    /// Runtime selected for compilation and packaging.
+    target: Target,
+    /// Optional Windows toolchain mirror override, recorded in build provenance.
+    apt_mirror: Option<String>,
     /// Exclusive lock preventing concurrent builds from changing the same output.
     _lock: fs::File,
 }
@@ -88,23 +111,33 @@ fn main() -> Result<()> {
             output,
             jobs,
             sources,
+            target,
         } => {
             ensure!(jobs > 0, "--jobs must be positive");
-            let build = Build::new(&repo, &output)?;
+            let build = Build::new(&repo, &output, target)?;
             build.toolchain()?;
             if let Some(sources) = sources {
                 source::restore(&build, &sources)?;
             } else {
                 source::prepare(&build)?;
             }
-            build.compile(jobs)?;
-            bundle::package(&build)?;
-            check::runtime(&build)?;
+            if build.target == Target::LinuxAmd64 {
+                build.compile(jobs)?;
+                bundle::package(&build)?;
+            } else {
+                portable::build(&build, jobs)?;
+                portable::package(&build)?;
+            }
+            build.check()?;
             bundle::stage(&build)?;
         }
-        Operation::Check { repo, output } => {
-            let build = Build::new(&repo, &output)?;
-            check::runtime(&build)?;
+        Operation::Check {
+            repo,
+            output,
+            target,
+        } => {
+            let build = Build::new(&repo, &output, target)?;
+            build.check()?;
             bundle::stage(&build)?;
         }
     }
@@ -113,10 +146,12 @@ fn main() -> Result<()> {
 
 impl Build {
     /// Resolve paths and reject unsupported build hosts.
-    fn new(repo: &Path, output: &Path) -> Result<Self> {
+    fn new(repo: &Path, output: &Path, target: Option<Target>) -> Result<Self> {
+        let native = Target::native()?;
+        let target = target.unwrap_or(native);
         ensure!(
-            cfg!(all(target_os = "linux", target_arch = "x86_64")),
-            "this builder requires Linux amd64"
+            target == native || (native == Target::LinuxAmd64 && target == Target::WindowsAmd64),
+            "build macOS on its native architecture and cross-compile Windows on Linux amd64"
         );
         fs::create_dir_all(output)?;
         let repo = repo.canonicalize()?;
@@ -132,41 +167,158 @@ impl Build {
             .open(output.join(".lock"))?;
         lock.try_lock()
             .context("another QEMU build or check is using this output directory")?;
-        let dockerfile = fs::read(repo.join(".github/packaging/qemu/linux.Dockerfile"))?;
-        let text = std::str::from_utf8(&dockerfile)?;
-        let base_image = text
+        let marker = output.join("build-target");
+        if marker.exists() {
+            ensure!(
+                fs::read_to_string(&marker)? == target.label(),
+                "target changed; use a fresh QEMU_OUTPUT directory"
+            );
+        } else {
+            fs::write(marker, target.label())?;
+        }
+        let dockerfile = if target.is_macos() {
+            Vec::new()
+        } else {
+            let name = if target == Target::WindowsAmd64 {
+                "windows"
+            } else {
+                "linux"
+            };
+            fs::read(repo.join(format!(".github/packaging/qemu/{name}.Dockerfile")))?
+        };
+        let base_image = std::str::from_utf8(&dockerfile)?
             .lines()
             .find_map(|line| line.strip_prefix("FROM "))
-            .context("Dockerfile has no base image")?
+            .unwrap_or("")
             .to_owned();
-        let image = format!("ark-qemu-linux:{}", &bundle::digest(&dockerfile)[..16]);
+        let apt_mirror = if target == Target::WindowsAmd64 {
+            std::env::var("QEMU_APT_MIRROR").ok()
+        } else {
+            None
+        };
+        let mut image_inputs = dockerfile.clone();
+        if let Some(mirror) = &apt_mirror {
+            image_inputs.extend_from_slice(mirror.as_bytes());
+        }
+        let image = format!(
+            "ark-qemu-{}:{}",
+            target.label(),
+            &bundle::digest(&image_inputs)[..16]
+        );
         Ok(Self {
             repo,
             output,
             image,
             base_image,
+            target,
+            apt_mirror,
             _lock: lock,
         })
     }
 
     /// Build the compiler container from its pinned base and package snapshot.
     fn toolchain(&self) -> Result<()> {
-        run(Command::new("docker")
-            .args([
-                "build",
-                "--platform",
-                "linux/amd64",
-                "-t",
-                &self.image,
-                "-f",
-            ])
-            .arg(self.repo.join(".github/packaging/qemu/linux.Dockerfile"))
+        if self.target.is_macos() {
+            for program in [
+                "clang",
+                "cmake",
+                "ninja",
+                "pkg-config",
+                "python3",
+                "make",
+                "patch",
+                "xz",
+            ] {
+                run(Command::new("/usr/bin/which").arg(program))?;
+            }
+            let python = self.output.join("host-python/bin/python3");
+            if !python.is_file() {
+                run(Command::new("python3")
+                    .args(["-m", "venv"])
+                    .arg(self.output.join("host-python")))?;
+            }
+            run(Command::new(&python)
+                .args([
+                    "-m",
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "--only-binary=:all:",
+                    "-r",
+                ])
+                .arg(
+                    self.repo
+                        .join(".github/packaging/qemu/python-requirements.txt"),
+                ))?;
+            return Ok(());
+        }
+        ensure!(
+            cfg!(target_os = "linux"),
+            "cross-compile Windows with make qemu-windows on Linux amd64"
+        );
+        let name = if self.target == Target::WindowsAmd64 {
+            "windows"
+        } else {
+            "linux"
+        };
+        let mut command = Command::new("docker");
+        command.args(["build"]);
+        if let Some(mirror) = &self.apt_mirror {
+            command.args(["--build-arg", &format!("APT_MIRROR={mirror}")]);
+        }
+        run(command
+            .args(["--platform", "linux/amd64", "-t", &self.image, "-f"])
+            .arg(
+                self.repo
+                    .join(format!(".github/packaging/qemu/{name}.Dockerfile")),
+            )
             .arg(self.repo.join(".github/packaging/qemu")))
     }
 
     /// Prepare a container command with only generated build files writable.
     pub(crate) fn container(&self, directory: &str) -> Result<Command> {
+        if self.target.is_macos() {
+            let mut command = Command::new("env");
+            command
+                .current_dir(
+                    self.output.join(
+                        directory
+                            .trim_start_matches("/work")
+                            .trim_start_matches('/'),
+                    ),
+                )
+                .env("MACOSX_DEPLOYMENT_TARGET", "15.0")
+                .env("PKG_CONFIG_PATH", "")
+                .env(
+                    "PKG_CONFIG_LIBDIR",
+                    self.output.join("prefix/lib/pkgconfig"),
+                );
+            let mut paths = vec![self.output.join("host-python/bin")];
+            paths.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            command.env("PATH", std::env::join_paths(paths)?);
+            return Ok(command);
+        }
         self.container_image(directory, &self.image)
+    }
+
+    /// Translate a path under the output directory into the build host's view.
+    pub(crate) fn work_path(&self, relative: &str) -> String {
+        if self.target.is_macos() {
+            self.output.join(relative).to_string_lossy().into_owned()
+        } else {
+            format!("/work/{relative}")
+        }
+    }
+
+    /// Verify the selected runtime using its platform's executable format.
+    fn check(&self) -> Result<()> {
+        if self.target == Target::LinuxAmd64 {
+            check::runtime(self)
+        } else {
+            portable::check(self)
+        }
     }
 
     /// Prepare a container with an explicit image for build or portability checks.
@@ -194,7 +346,18 @@ impl Build {
                 "--volume",
             ])
             .arg(format!("{}:/work", self.output.display()))
-            .args(["--workdir", directory, image]);
+            .args(["--workdir", directory]);
+        if self.target == Target::WindowsAmd64 {
+            command.args([
+                "--env",
+                "PKG_CONFIG=pkg-config",
+                "--env",
+                "PKG_CONFIG_PATH=",
+                "--env",
+                "PKG_CONFIG_LIBDIR=/work/prefix/lib/pkgconfig",
+            ]);
+        }
+        command.arg(image);
         Ok(command)
     }
 
