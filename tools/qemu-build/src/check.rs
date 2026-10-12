@@ -179,8 +179,8 @@ fn smoke(build: &Build) -> Result<()> {
         }
     }
     let mut child = qemu(build)?.args([
-        "-M", "q35", "-cpu", "max", "-accel", "tcg", "-m", "128", "-S", "-nographic", "-monitor", "none", "-serial", "null",
-        "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:18181-:18181", "-device", "virtio-net-pci,netdev=net0",
+        "-M", "q35", "-cpu", "max", "-accel", "tcg", "-m", "128", "-S", "-nographic", "-vga", "none", "-monitor", "none", "-serial", "null",
+        "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:18181-:18181", "-device", "virtio-net-pci,netdev=net0,romfile=",
         "-drive", "file=/work/check/disk.qcow2,if=none,id=disk0,format=qcow2,discard=unmap,detect-zeroes=unmap",
         "-device", "virtio-blk-pci,drive=disk0", "-device", "virtio-serial-pci",
         "-chardev", "socket,id=hw,path=/work/check/serial.sock,server=on,wait=off",

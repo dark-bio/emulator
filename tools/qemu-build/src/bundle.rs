@@ -128,10 +128,6 @@ pub(crate) fn package(build: &Build) -> Result<()> {
     for (name, path) in [
         ("SeaBIOS", "roms/seabios/COPYING"),
         ("SeaBIOS-LGPL", "roms/seabios/COPYING.LESSER"),
-        ("iPXE", "roms/ipxe/COPYING"),
-        ("iPXE-GPL", "roms/ipxe/COPYING.GPLv2"),
-        ("iPXE-UBDL", "roms/ipxe/COPYING.UBDL"),
-        ("EDK2", "roms/edk2/License.txt"),
         ("keycodemapdb", "subprojects/keycodemapdb/LICENSE.BSD"),
         ("keycodemapdb-GPL", "subprojects/keycodemapdb/LICENSE.GPL2"),
     ] {
@@ -143,7 +139,7 @@ pub(crate) fn package(build: &Build) -> Result<()> {
     }
     fs::write(
         libs.join("THIRD_PARTY_NOTICES.txt"),
-        "This runtime contains QEMU, SeaBIOS, iPXE and the libraries listed in manifest.json.\nTheir copyright notices and licenses are in licenses/.\nComplete corresponding sources and build recipes accompany this emulator release\nas its *-linux-amd64-qemu-sources.tar.xz download at\nhttps://github.com/dark-bio/emulator/releases\nQEMU and its dependencies retain their own licenses; the emulator's BSD license\ndoes not replace them.\n",
+        "This runtime contains QEMU, SeaBIOS and the libraries listed in manifest.json.\nTheir copyright notices and licenses are in licenses/.\nComplete corresponding sources and build recipes accompany this emulator release\nas its *-linux-amd64-qemu-sources.tar.xz download at\nhttps://github.com/dark-bio/emulator/releases\nQEMU and its dependencies retain their own licenses; the emulator's BSD license\ndoes not replace them.\n",
     )?;
 
     // apt verifies source archives against the signed snapshot's package indexes
