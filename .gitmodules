@@ -1,0 +1,4 @@
+[submodule "third_party/qemu"]
+	path = third_party/qemu
+	url = https://gitlab.com/qemu-project/qemu.git
+	shallow = true

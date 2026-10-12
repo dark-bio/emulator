@@ -1,0 +1,21 @@
+--target-list=x86_64-softmmu
+--without-default-features
+--without-default-devices
+--with-devices-x86_64=ark
+--enable-system
+--enable-tools
+--enable-kvm
+--enable-tcg
+--enable-slirp
+--enable-pixman
+--disable-modules
+--disable-rust
+--disable-docs
+--disable-download
+--disable-install-blobs
+--disable-werror
+--enable-lto
+--extra-cflags=-Os
+--audio-drv-list=
+--with-pkgversion=Ark Emulator
+--prefix=/ark-qemu
