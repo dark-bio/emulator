@@ -54,8 +54,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Build QEMU and matching sources
         uses: ./.github/packaging/qemu/ci/build
         with:
