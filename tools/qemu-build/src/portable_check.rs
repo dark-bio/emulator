@@ -245,8 +245,9 @@ fn smoke(build: &Build) -> Result<()> {
     let mut guest = Guest(
         command(build, "qemu-system-guest")
             .current_dir(&directory)
+            // QEMU appends '/' to this path, which Windows verbatim paths reject
             .arg("-L")
-            .arg(build.output.join("runtime/qemu-libs"))
+            .arg("../runtime/qemu-libs")
             .args([
                 "-M",
                 machine,

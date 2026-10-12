@@ -301,7 +301,8 @@ jobs:
               configs+=(--config .github/packaging/windows/tauri.ci.conf.json)
             fi
           fi
-          cargo tauri build "${configs[@]}" --bundles ${{ inputs.bundles }} \
+          # Verbose output includes the underlying DMG script's diagnostics.
+          cargo tauri build --verbose "${configs[@]}" --bundles ${{ inputs.bundles }} \
             -- --locked --profile "$BUILD_PROFILE"
 
       - name: Test Windows command entry point
