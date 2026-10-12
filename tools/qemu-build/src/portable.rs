@@ -85,7 +85,8 @@ pub(crate) fn build(build: &Build, jobs: usize) -> Result<()> {
         args.push(format!("--extra-ldflags={libraries}"));
     }
     if build.target.arch() == "arm64" {
-        args.push("--enable-fdt".to_owned());
+        // With downloads disabled, plain --enable-fdt requires a system library
+        args.push("--enable-fdt=internal".to_owned());
     }
     fs::write(
         build.output.join("configure.json"),
