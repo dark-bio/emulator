@@ -65,7 +65,7 @@ While the kept answer names a newer version, start, list, stop, button and
 wipe open with a note naming both versions and how to upgrade, and so does
 a headless run with no command. Under --json it is an ordinary note event.
 The note never changes the result or the exit code, and -q hides it. doctor
-looks up afresh and reports the answer as its update check. A nonempty CI,
+looks up afresh and reports the answer as its ark-emulator check. A nonempty CI,
 or a local build whose version ends in -local, turns off both the lookup
 and the note.
 

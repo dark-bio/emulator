@@ -144,12 +144,6 @@ pub(crate) fn booted<'a>(instances: &'a [Instance], image: &Path) -> Option<&'a 
     instances.iter().find(|instance| instance.disk_id == id)
 }
 
-/// Whether something accepts connections on a loopback port.
-pub(crate) fn answering(port: u16) -> bool {
-    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    TcpStream::connect_timeout(&address.into(), TIMEOUT).is_ok()
-}
-
 /// Publish this emulator before the runtime starts its periodic heartbeats.
 pub(crate) fn register(
     port: u16,

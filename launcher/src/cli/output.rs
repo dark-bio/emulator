@@ -114,8 +114,8 @@ impl Output {
         self.result(document, |theme| table(theme, rows, columns, empty))
     }
 
-    /// Print a doctor's checks as a checklist, one row each with its mark,
-    /// detail and hint, or the whole document as JSON.
+    /// Print the doctor's report, its checks under a title and closed by a
+    /// summary, or the whole document as JSON.
     pub(crate) fn checklist(&self, document: &Value, rows: &[Value]) -> Result<(), Error> {
         self.result(document, |theme| checklist(theme, rows))
     }
@@ -618,57 +618,111 @@ pub(super) fn table(
     lines.join("\n")
 }
 
-/// One line per check, its mark in the result's color, its name muted like a
-/// label and its detail plain, wrapped under its own column. A hint follows on
-/// a line of its own beneath a warning or a failure.
-fn checklist(theme: &Theme, rows: &[Value]) -> String {
-    let labels = rows
+/// The doctor's checks under their title, one line each, then the count of
+/// problems and warnings. Skips with one cause share a row that says how many.
+pub(super) fn checklist(theme: &Theme, rows: &[Value]) -> String {
+    // Collapse skips with the same cause in first-seen order
+    let mut shown: Vec<(&Value, usize)> = Vec::new();
+    for row in rows {
+        if row["result"] == "skip"
+            && let Some((_, count)) = shown.iter_mut().find(|(previous, _)| {
+                previous["result"] == "skip"
+                    && previous["detail"] == row["detail"]
+                    && previous["hint"] == row["hint"]
+            })
+        {
+            *count += 1;
+        } else {
+            shown.push((row, 1));
+        }
+    }
+    let shown: Vec<_> = shown
+        .into_iter()
+        .map(|(row, count)| {
+            let name = if count > 1 {
+                format!("{count} checks")
+            } else {
+                style::cell(row["name"].as_str().unwrap_or("-"))
+            };
+            (name, row)
+        })
+        .collect();
+
+    // Align the details, leaving room for the two-letter ASCII ok mark
+    let labels = shown
         .iter()
-        .map(|row| console::measure_text_width(&style::cell(row["name"].as_str().unwrap_or("-"))))
+        .map(|(name, _)| console::measure_text_width(name))
+        .chain(rows.iter().map(|row| {
+            console::measure_text_width(&style::cell(row["name"].as_str().unwrap_or("-")))
+        }))
         .max()
         .unwrap_or(0);
-    // The mark is two cells as a glyph and three as its ASCII twin.
     let names = labels + if theme.unicode { 2 } else { 3 };
-    rows.iter()
-        .map(|row| {
-            let name = row["name"].as_str().unwrap_or("-");
-            let result = row["result"].as_str().unwrap_or("-");
-            let role = match result {
-                "ok" => Role::Success,
-                "warn" => Role::Attention,
-                "fail" => Role::Failure,
-                _ => Role::Muted,
-            };
-            let detail = style::cell(row["detail"].as_str().unwrap_or("-"));
-            let detail = if result == "skip" {
-                format!("skipped: {detail}")
-            } else {
-                detail
-            };
-            let name = theme.mark(role, &theme.paint(Role::Muted, style::cell(name)));
-            let line = format!(
-                "  {}{}  {}",
-                name,
-                " ".repeat(names.saturating_sub(console::measure_text_width(&name))),
-                detail
-            );
-            let mut line = wrap(&line, theme.width, names + 4);
-            if let Some(hint) = row["hint"].as_str() {
-                line.push('\n');
-                line.push_str(&wrap(
-                    &format!(
-                        "    {} {}",
-                        theme.paint(Role::Accent, "hint:"),
-                        theme.inline(&style::cell(hint))
-                    ),
-                    theme.width,
-                    10,
-                ));
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut lines = vec![wrap(
+        &theme.paint(Role::Heading, "This computer"),
+        theme.width,
+        0,
+    )];
+    lines.extend(
+        shown
+            .iter()
+            .map(|(name, row)| checklist_row(theme, name, row, names)),
+    );
+
+    // Count failures as problems and warns as warnings, leaving out a zero
+    let mut counts = Vec::new();
+    for (result, noun) in [("fail", "problem"), ("warn", "warning")] {
+        let count = rows.iter().filter(|row| row["result"] == result).count();
+        if count > 0 {
+            counts.push(format!(
+                "{count} {noun}{}",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    let summary = if counts.is_empty() {
+        "No problems found".into()
+    } else {
+        counts.join(", ")
+    };
+    lines.push(String::new());
+    lines.push(wrap(&summary, theme.width, 0));
+    lines.join("\n")
+}
+
+/// One check's line, its mark in the result's color, its name muted and its
+/// detail plain, with a hint indented beneath it.
+fn checklist_row(theme: &Theme, name: &str, row: &Value, width: usize) -> String {
+    // Only the mark takes the outcome's color
+    let role = match row["result"].as_str() {
+        Some("ok") => Role::Success,
+        Some("warn") => Role::Attention,
+        Some("fail") => Role::Failure,
+        _ => Role::Muted,
+    };
+    let name = theme.mark(role, &theme.paint(Role::Muted, name));
+    let line = format!(
+        "  {}{}  {}",
+        name,
+        " ".repeat(width.saturating_sub(console::measure_text_width(&name))),
+        style::cell(row["detail"].as_str().unwrap_or("-")),
+    );
+    let mut line = wrap(&line, theme.width, width + 4);
+
+    // The hint indents four spaces and wraps under its own text
+    if let Some(hint) = row["hint"].as_str() {
+        line.push('\n');
+        line.push_str(&wrap(
+            &format!(
+                "    {} {}",
+                theme.paint(Role::Accent, "hint:"),
+                theme.inline(&style::cell(hint))
+            ),
+            theme.width,
+            10,
+        ));
+    }
+    line
 }
 
 #[cfg(test)]
@@ -761,13 +815,13 @@ mod tests {
     fn test_a_checklist_marks_each_result_and_carries_the_hint() {
         let theme = Theme::fixed(80, Color::Off, false);
         let rows = [
-            json!({"name": "qemu", "result": "ok", "detail": "11.1.1 on PATH", "hint": null}),
+            json!({"name": "qemu", "result": "ok", "detail": "11.1.1 at /usr/bin/qemu-system-aarch64", "hint": null}),
             json!({"name": "acceleration", "result": "fail", "detail": "software emulation only", "hint": "add your user to the kvm group"}),
             json!({"name": "image", "result": "skip", "detail": "none chosen yet", "hint": null}),
         ];
         assert_eq!(
             checklist(&theme, &rows),
-            "  ok qemu          11.1.1 on PATH\n  x acceleration   software emulation only\n    hint: add your user to the kvm group\n  - image          skipped: none chosen yet",
+            "This computer\n  ok qemu          11.1.1 at /usr/bin/qemu-system-aarch64\n  x acceleration   software emulation only\n    hint: add your user to the kvm group\n  - image          none chosen yet\n\n1 problem",
             "ASCII checklist"
         );
     }
@@ -776,18 +830,18 @@ mod tests {
     #[test]
     fn test_a_checklist_warning_uses_attention_and_carries_its_hint() {
         let rows = [json!({
-            "name": "update", "result": "warn",
-            "detail": "Ark Emulator 0.2.3 is available, this is 0.2.2",
-            "hint": "download it from https://github.com/dark-bio/emulator",
+            "name": "ark-emulator", "result": "warn",
+            "detail": "0.3.1, and 0.3.2 is out",
+            "hint": "upgrade with `brew update && brew upgrade --cask ark-emulator`",
         })];
         assert_eq!(
             checklist(&Theme::fixed(80, Color::Off, false), &rows),
-            "  ! update   Ark Emulator 0.2.3 is available, this is 0.2.2\n    hint: download it from https://github.com/dark-bio/emulator",
+            "This computer\n  ! ark-emulator   0.3.1, and 0.3.2 is out\n    hint: upgrade with `brew update && brew upgrade --cask ark-emulator`\n\n1 warning",
             "plain warning"
         );
         assert_eq!(
             checklist(&Theme::fixed(80, Color::True, true), &rows),
-            "  \x1b[1m\x1b[38;2;232;162;74m!\x1b[0m \x1b[38;2;124;128;152mupdate\x1b[0m  Ark Emulator 0.2.3 is available, this is 0.2.2\n    \x1b[1m\x1b[38;2;137;180;250mhint:\x1b[0m download it from https://github.com/dark-bio/emulator",
+            "\x1b[1mThis computer\x1b[0m\n  \x1b[1m\x1b[38;2;232;162;74m!\x1b[0m \x1b[38;2;124;128;152mark-emulator\x1b[0m  0.3.1, and 0.3.2 is out\n    \x1b[1m\x1b[38;2;137;180;250mhint:\x1b[0m upgrade with `\x1b[1m\x1b[38;2;137;180;250mbrew update && brew upgrade --cask ark-emulator\x1b[0m`\n\n1 warning",
             "colored mark, muted name and plain detail"
         );
     }
@@ -804,10 +858,61 @@ mod tests {
             "hint": null,
         })];
         let text = checklist(&theme, &rows);
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines.len() > 1, "the long path wraps");
-        for line in &lines[1..] {
-            assert!(line.starts_with(&" ".repeat(11)), "{line:?}");
+        assert_eq!(
+            text,
+            "This computer\n  ok data  /Users/someone/Library/Applic\n           ation\n           Support/bio.dark.emulator\n\nNo problems found",
+            "long details wrap under their column"
+        );
+    }
+
+    /// Skips collapse across intervening checks only when cause and hint match.
+    #[test]
+    fn test_checklist_collapses_skips_with_one_cause() {
+        let rows = [
+            json!({"name":"firmware", "result":"skip", "detail":"needs a build", "hint":null}),
+            json!({"name":"data", "result":"ok", "detail":"/tmp/data", "hint":null}),
+            json!({"name":"image", "result":"skip", "detail":"needs a build", "hint":null}),
+            json!({"name":"logs", "result":"skip", "detail":"needs a directory", "hint":null}),
+            json!({"name":"registry", "result":"skip", "detail":"needs a build", "hint":"install it"}),
+        ];
+        for (unicode, ok, skip) in [(true, "✓", "·"), (false, "ok", "-")] {
+            let padding = if unicode { "" } else { " " };
+            assert_eq!(
+                checklist(&Theme::fixed(80, Color::Off, unicode), &rows),
+                format!(
+                    "This computer\n  {skip} 2 checks{padding}  needs a build\n  {ok} data      /tmp/data\n  {skip} logs{padding}      needs a directory\n  {skip} registry{padding}  needs a build\n    hint: install it\n\nNo problems found"
+                ),
+                "unicode={unicode}"
+            );
+        }
+    }
+
+    /// The summary counts failures and warnings in singular and plural.
+    #[test]
+    fn test_checklist_summary_counts_problems_and_warnings() {
+        for (results, summary) in [
+            (vec!["ok"], "No problems found"),
+            (vec!["skip", "skip"], "No problems found"),
+            (vec!["fail", "skip"], "1 problem"),
+            (vec!["warn", "skip"], "1 warning"),
+            (vec!["fail", "warn", "ok", "skip"], "1 problem, 1 warning"),
+            (
+                vec!["fail", "fail", "warn", "warn"],
+                "2 problems, 2 warnings",
+            ),
+        ] {
+            let rows: Vec<_> = results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    json!({"name":format!("check{index}"), "result":result, "detail":"detail"})
+                })
+                .collect();
+            let rendered = checklist(&Theme::fixed(80, Color::Off, true), &rows);
+            assert!(
+                rendered.ends_with(&format!("\n\n{summary}")),
+                "{results:?}: {rendered}"
+            );
         }
     }
 
@@ -1045,16 +1150,26 @@ mod tests {
     #[test]
     fn test_checklist_colors_and_wrapping() {
         let theme = Theme::fixed(80, Color::True, true);
-        for (result, mark, detail) in [
-            ("ok", "\x1b[1m\x1b[38;2;148;202;110m✓\x1b[0m", "detail"),
-            ("warn", "\x1b[1m\x1b[38;2;232;162;74m!\x1b[0m", "detail"),
-            ("fail", "\x1b[1m\x1b[38;2;235;96;112m✗\x1b[0m", "detail"),
-            ("skip", "\x1b[38;2;124;128;152m·\x1b[0m", "skipped: detail"),
+        for (result, mark, summary) in [
+            (
+                "ok",
+                "\x1b[1m\x1b[38;2;148;202;110m✓\x1b[0m",
+                "No problems found",
+            ),
+            ("warn", "\x1b[1m\x1b[38;2;232;162;74m!\x1b[0m", "1 warning"),
+            ("fail", "\x1b[1m\x1b[38;2;235;96;112m✗\x1b[0m", "1 problem"),
+            (
+                "skip",
+                "\x1b[38;2;124;128;152m·\x1b[0m",
+                "No problems found",
+            ),
         ] {
             let rows = [json!({"name":"image", "result":result, "detail":"detail"})];
             assert_eq!(
                 checklist(&theme, &rows),
-                format!("  {mark} \x1b[38;2;124;128;152mimage\x1b[0m  {detail}"),
+                format!(
+                    "\x1b[1mThis computer\x1b[0m\n  {mark} \x1b[38;2;124;128;152mimage\x1b[0m  detail\n\n{summary}"
+                ),
                 "{result}"
             );
         }
@@ -1063,7 +1178,7 @@ mod tests {
         ];
         assert_eq!(
             checklist(&Theme::fixed(40, Color::Off, true), &rows),
-            "  ✗ data  a path with a long explanation\n          for the reader\n    hint: run `ark-emulator doctor` for\n          details",
+            "This computer\n  ✗ data  a path with a long explanation\n          for the reader\n    hint: run `ark-emulator doctor` for\n          details\n\n1 problem",
             "details and hints hang under their text"
         );
         let rows = [
@@ -1071,7 +1186,7 @@ mod tests {
         ];
         assert_eq!(
             checklist(&Theme::fixed(80, Color::Off, true), &rows),
-            "  ✓ bad\\nname  bad\\nvalue\n    hint: bad\\u{1b}[2Jhint",
+            "This computer\n  ✓ bad\\nname  bad\\nvalue\n    hint: bad\\u{1b}[2Jhint\n\nNo problems found",
             "untrusted text cannot add rows or terminal controls"
         );
     }

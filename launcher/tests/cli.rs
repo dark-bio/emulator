@@ -224,7 +224,10 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
     let settings = data.join("settings.toml");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(image.parent().unwrap()).unwrap();
-    std::fs::write(&image, b"image").unwrap();
+    std::fs::File::create(&image)
+        .unwrap()
+        .set_len(19_864_223_744)
+        .unwrap();
     std::fs::write(
         &settings,
         format!("version = 1\ndisk = '{}'\n", image.display()),
@@ -268,18 +271,22 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
         );
         assert!(
             flat.contains(if present {
-                "✓ image ~/arks/lab.ark (5 B)"
+                "✓ image ~/arks/lab.ark, 18.5 GiB"
             } else {
                 "✗ image ~/arks/lab.ark is not there"
             }),
             "present={present}: {text}"
         );
         assert!(
+            flat.contains(&format!("✓ logs {data_path}/logs")),
+            "logs, present={present}: {text}"
+        );
+        assert!(
             !text.contains(&test_home.display().to_string()),
             "reading home, present={present}: {text}"
         );
         assert!(
-            !text.starts_with('\n') && !text.ends_with("\n\n"),
+            text.starts_with("This computer\n") && !text.ends_with("\n\n"),
             "stdout separators, present={present}: {text}"
         );
         assert!(
@@ -296,25 +303,64 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
 
         let json = invoke(true);
         let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        let mut keys: Vec<_> = document
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["checks", "version"], "JSON keys, present={present}");
+        let checks = document["checks"].as_array().unwrap();
         assert_eq!(
-            document["data_dir"],
-            data.display().to_string(),
-            "data path, present={present}"
+            checks
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "ark-emulator",
+                "qemu",
+                "firmware",
+                "acceleration",
+                "data",
+                "settings",
+                "image",
+                "logs",
+                "registry",
+                "ports"
+            ],
+            "check order, present={present}"
+        );
+        for check in checks {
+            let mut keys: Vec<_> = check
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["detail", "hint", "name", "result"],
+                "check keys: {check}"
+            );
+        }
+        let version = document["version"].as_str().unwrap();
+        assert_eq!(
+            checks[0]["result"], "skip",
+            "lookup is disabled, present={present}"
         );
         assert_eq!(
-            document["settings"],
-            settings.display().to_string(),
-            "settings path, present={present}"
-        );
-        assert_eq!(
-            document["disk"],
-            image.display().to_string(),
-            "image path, present={present}"
-        );
-        assert_eq!(
-            document["logs_dir"],
-            data.join("logs").display().to_string(),
-            "log path, present={present}"
+            checks[0]["detail"],
+            format!(
+                "{version}, not looked up {}",
+                if version.ends_with("-local") {
+                    "for a local build"
+                } else {
+                    "under CI"
+                }
+            ),
+            "version detail, present={present}"
         );
         for (name, expected) in [
             ("data", data.display().to_string()),
@@ -322,11 +368,16 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
             (
                 "image",
                 format!(
-                    "{} {}",
+                    "{}{}",
                     image.display(),
-                    if present { "(5 B)" } else { "is not there" }
+                    if present {
+                        ", 18.5 GiB"
+                    } else {
+                        " is not there"
+                    }
                 ),
             ),
+            ("logs", data.join("logs").display().to_string()),
         ] {
             let check = document["checks"]
                 .as_array()
@@ -336,6 +387,12 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
                 .unwrap();
             assert_eq!(check["detail"], expected, "{name}, present={present}");
         }
+        if checks[1]["result"] == "ok" {
+            let detail = checks[1]["detail"].as_str().unwrap();
+            let (version, binary) = detail.split_once(" at ").expect("QEMU version at binary");
+            assert!(!version.contains(' '), "QEMU version: {detail}");
+            assert!(!binary.is_empty(), "QEMU binary: {detail}");
+        }
         for line in stderr(&json).lines() {
             let event: serde_json::Value =
                 serde_json::from_str(line).expect("one JSON event per line");
@@ -343,8 +400,53 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
                 event["event"].is_string(),
                 "JSON event, present={present}: {line}"
             );
+            if event["event"] == "error" {
+                let first = checks.iter().find(|row| row["result"] == "fail").unwrap();
+                assert_eq!(
+                    event["error"]["message"], first["detail"],
+                    "first failure, present={present}"
+                );
+            }
         }
     }
+
+    // A blocked log directory reports its path and hint, and later checks still run
+    let logs = data.join("logs");
+    std::fs::remove_dir(&logs).unwrap();
+    std::fs::write(&logs, b"blocked").unwrap();
+    let json = invoke(true);
+    assert!(!json.status.success(), "blocked logs fail the command");
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let checks = document["checks"].as_array().unwrap();
+    assert_eq!(checks[7]["name"], "logs", "logs order");
+    assert_eq!(checks[7]["result"], "fail", "blocked logs");
+    assert!(
+        checks[7]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{} is not writable: ", logs.display())),
+        "full log path: {}",
+        checks[7]
+    );
+    assert_eq!(
+        checks[7]["hint"], "check the permissions on the logs directory",
+        "logs hint"
+    );
+    assert_eq!(
+        checks[9]["name"], "ports",
+        "checks continue after a logs failure"
+    );
+    let reading = invoke(false);
+    let text = stdout(&reading);
+    assert!(text.contains("✗ logs"), "logs failure: {text}");
+    assert!(
+        !text.contains(&test_home.display().to_string()),
+        "reading home: {text}"
+    );
+    assert!(
+        text.contains("    hint: check the permissions on the logs directory\n"),
+        "logs fix: {text}"
+    );
 }
 
 /// The private update entry point does nothing and prints nothing under CI.
@@ -543,10 +645,14 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .find(|check| check["name"] == "update")
+                    .find(|check| check["name"] == "ark-emulator")
                     .unwrap();
                 assert_eq!(check["result"], "skip", "local doctor lookup");
-                assert_eq!(check["detail"], "local build", "local doctor reason");
+                assert_eq!(
+                    check["detail"],
+                    format!("{version}, not looked up for a local build"),
+                    "local doctor reason"
+                );
                 assert_eq!(document["version"], version.to_string(), "doctor stamp");
             }
             assert_eq!(

@@ -402,17 +402,17 @@ const CONTRACTS: &[Contract] = &[
     },
     Contract {
         path: "doctor",
-        paragraph: "Runs every check in order and prints the whole list. It covers newer \
-            releases, QEMU, the bundled firmware, hardware acceleration, the data \
-            directory, the settings, the remembered image, the registry and a free \
-            port. Each check is ok, warn, fail or skip, with a hint where something \
-            needs action. It applies no fixes.",
+        paragraph: "Runs every check in order and prints the whole report, closed by a \
+            count of problems and warnings. It covers this build's version against \
+            the newest release, QEMU, the bundled firmware, hardware acceleration, \
+            the data directory, the settings, the remembered image, the log \
+            directory, the registry and a free port. Each check is ok, warn, fail or \
+            skip, with a hint where something needs action. It applies no fixes.",
         footer: Some(ContractFooter {
             requires: "nothing; a check that cannot run is skipped",
             time: "seconds; --timeout bounds each network reply of the release lookup",
-            prints: "result, name, detail and hint for each check; JSON adds version, \
-                firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir and \
-                registry",
+            prints: "result, name, detail and hint for each check, then a summary; JSON \
+                holds version and checks",
             exit: "0 no check failed; 1 or 3, the class of the first failed check; 1 \
                 output failure; 2 usage; 130/143 interrupted",
             examples: "ark-emulator doctor\nark-emulator doctor --json",

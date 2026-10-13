@@ -128,6 +128,7 @@ names it, by locator, serial, name or image, or pass --all for every one.
 
 ### Diagnose
 
-`ark-emulator doctor` checks for a newer release, QEMU, the bundled
-firmware, hardware acceleration, the data directory, the settings, the
-remembered image, the registry and a free port.
+`ark-emulator doctor` checks this build's version against the newest
+release, QEMU, the bundled firmware, hardware acceleration, the data
+directory, the settings, the remembered image, the log directory, the
+registry and a free port.
