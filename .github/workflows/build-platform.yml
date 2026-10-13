@@ -55,9 +55,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check out the pinned QEMU source
-        run: git submodule update --init --depth 1 third_party/qemu
-
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install macOS build tools
@@ -68,7 +65,7 @@ jobs:
         id: inputs
         shell: bash
         run: |
-          git rev-parse HEAD:third_party/qemu > "$RUNNER_TEMP/qemu-inputs"
+          cat .github/packaging/qemu/source.json > "$RUNNER_TEMP/qemu-inputs"
           if [ "$RUNNER_OS" = "macOS" ]; then
             xcodebuild -version >> "$RUNNER_TEMP/qemu-inputs"
             xcrun --show-sdk-version >> "$RUNNER_TEMP/qemu-inputs"

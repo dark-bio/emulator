@@ -128,6 +128,14 @@ cargo build --release -p launcher
   --initrd /path/to/initrd.gz
 ```
 
+Packaging builds QEMU with `make qemu-linux`, `make qemu-macos` or
+`make qemu-windows`. Linux and Windows targets build on Linux amd64 with
+Docker; macOS builds on its native architecture. The builder fetches the GitLab
+revision pinned in `.github/packaging/qemu/source.json` into `target/` on
+demand. CI reuses verified runtime and source archives when its cache matches
+the build inputs. Every packaged release includes the corresponding QEMU
+sources, dependency sources and build recipes.
+
 ## Layout
 
 | Path | Role |
@@ -135,4 +143,5 @@ cargo build --release -p launcher
 | `launcher/` | Rust runtime and optional Tauri window. Owns QEMU, the hardware connection and discovery, and carries the packaging configuration and macOS entitlements. |
 | `ui/` | Static HTML, CSS and JS. Renders the device state from Rust and forwards input through Tauri commands. |
 | `docs/` | Maintainer documentation, today the one-time Apple Developer setup that macOS signing in CI depends on. |
-| `.github/` | CI. Builds an installer per platform, then smoke tests each portable build on a clean machine. `scripts/` gathers a relocatable QEMU and the pinned firmware for packaging, and `packaging/` holds the Homebrew cask template a release publishes to the tap. |
+| `tools/qemu-build/` | Builds the pinned QEMU runtime and its source archive for each platform. |
+| `.github/` | CI. Builds and smoke tests packages, fetches pinned firmware, and holds QEMU build inputs and release packaging configuration. |
