@@ -243,7 +243,7 @@ fn parse_ldd(text: &str) -> Result<BTreeMap<String, String>> {
 }
 
 /// Archive all collected sources alongside the exact build recipes.
-fn source_archive(build: &Build) -> Result<()> {
+pub(crate) fn source_archive(build: &Build) -> Result<()> {
     let sources = build.output.join("sources");
     let recipes = sources.join("build-recipe");
     copy_tree(
@@ -266,11 +266,10 @@ fn source_archive(build: &Build) -> Result<()> {
         Command::new("cargo")
             .args([
                 "metadata",
-                "--offline",
                 "--format-version",
                 "1",
                 "--filter-platform",
-                "x86_64-unknown-linux-gnu",
+                crate::Target::native()?.triple(),
                 "--manifest-path",
             ])
             .arg(recipes.join("Cargo.toml")),
@@ -284,27 +283,50 @@ fn source_archive(build: &Build) -> Result<()> {
         sources.join("config-host.h"),
     )?;
     fs::copy(
-        build.output.join("build/x86_64-softmmu-config-devices.mak"),
+        build.output.join(format!(
+            "build/{}-softmmu-config-devices.mak",
+            build.target.cpu()
+        )),
         sources.join("config-devices.mak"),
     )?;
-    let packages = output(build.container("/work")?.args([
-        "dpkg-query",
-        "-W",
-        "-f=${binary:Package}\t${Version}\n",
-    ]))?;
+    let packages = if build.target.is_macos() {
+        format!(
+            "macos\t{}\ncompiler\t{}\nsdk\t{}\n",
+            output(Command::new("sw_vers").arg("-productVersion"))?,
+            output(Command::new("clang").arg("--version"))?.replace('\n', " "),
+            output(Command::new("xcrun").arg("--show-sdk-version"))?
+        )
+    } else {
+        output(build.container("/work")?.args([
+            "dpkg-query",
+            "-W",
+            "-f=${binary:Package}\t${Version}\n",
+        ]))?
+    };
     fs::write(sources.join("toolchain-packages.tsv"), packages)?;
     fs::write(
         sources.join("REBUILD.txt"),
-        "Install Rust, Docker, Git, tar and Make on Linux amd64.\nFrom the extracted sources directory, run:\n\ncargo run --locked --manifest-path build-recipe/Cargo.toml -p qemu-build -- build --repo build-recipe --output /path/outside/these/sources --sources .\n\nThe Ubuntu snapshot supplies the exact library binaries recorded in toolchain-packages.tsv.\nTheir complete source packages are in debian/, including upstream archives and distribution patches.\nUse dpkg-source -x on a .dsc file to extract a library's source and Debian build instructions.\nThe qemu/roms/Makefile contains the build recipes for the bundled upstream ROMs.\n",
+        format!(
+            "Install Rust, Git, tar and Make. Linux and Windows targets build on Linux amd64 with Docker.\nmacOS targets build natively with Xcode, CMake, Ninja, pkg-config, Python 3 and xz.\nFrom the extracted sources directory, run:\n\ncargo run --locked --manifest-path build-recipe/Cargo.toml -p qemu-build -- build --target {} --repo build-recipe --output /path/outside/these/sources --sources .\n\nThe exact toolchain is recorded in toolchain-packages.tsv.\nLinux library sources are in debian/, including distribution patches; extract them with dpkg-source -x.\nmacOS and Windows library sources are in dependencies/; the builder compiles them before QEMU.\nThe qemu/roms/Makefile contains build recipes for the bundled upstream ROMs.\n",
+            build.target.label()
+        ),
     )?;
+    if let Some(mirror) = &build.apt_mirror {
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(sources.join("REBUILD.txt"))?,
+            "\nThis build used QEMU_APT_MIRROR set to {mirror}.\nRestore that environment variable to use the same package repository."
+        )?;
+    }
     fs::create_dir_all(build.output.join("artifacts"))?;
     run(Command::new("tar")
         .arg("-cJf")
-        .arg(
-            build
-                .output
-                .join("artifacts/linux-amd64-qemu-sources.tar.xz"),
-        )
+        .arg(build.output.join(format!(
+            "artifacts/{}-qemu-sources.tar.xz",
+            build.target.label()
+        )))
         .arg("-C")
         .arg(&build.output)
         .arg("sources"))
@@ -353,7 +375,7 @@ pub(crate) fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 }
 
 /// Record sizes and hashes in stable path order.
-fn inventory(root: &Path) -> Result<Vec<Value>> {
+pub(crate) fn inventory(root: &Path) -> Result<Vec<Value>> {
     let mut pending = vec![root.to_owned()];
     let mut paths = BTreeSet::new();
     while let Some(directory) = pending.pop() {

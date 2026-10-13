@@ -47,23 +47,75 @@ permissions:
   contents: read
 
 jobs:
+  qemu:
+    runs-on: ${{ startsWith(inputs.os, 'windows-') && 'ubuntu-22.04' || inputs.os }}
+    env:
+      QEMU_PLATFORM: ${{ startsWith(inputs.os, 'windows-') && 'windows' || startsWith(inputs.os, 'macos-') && 'macos' || 'linux' }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the pinned QEMU source
+        run: git submodule update --init --depth 1 third_party/qemu
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja pkgconf python xz
+
+      - name: Identify QEMU build inputs
+        id: inputs
+        shell: bash
+        run: |
+          git rev-parse HEAD:third_party/qemu > "$RUNNER_TEMP/qemu-inputs"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            xcodebuild -version >> "$RUNNER_TEMP/qemu-inputs"
+            xcrun --show-sdk-version >> "$RUNNER_TEMP/qemu-inputs"
+            clang --version >> "$RUNNER_TEMP/qemu-inputs"
+          fi
+          digest=$(shasum -a 256 "$RUNNER_TEMP/qemu-inputs" | cut -d ' ' -f 1)
+          echo "hash=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Cache QEMU runtime and sources
+        if: github.ref_type != 'tag'
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/qemu-${{ env.QEMU_PLATFORM }}/runtime
+            target/qemu-${{ env.QEMU_PLATFORM }}/artifacts
+          key: qemu-v3-${{ inputs.os }}-${{ inputs.arch }}-${{ hashFiles('.github/packaging/qemu/*', 'tools/qemu-build/**', 'Makefile', 'Cargo.lock') }}-${{ steps.inputs.outputs.hash }}
+
+      - name: Build QEMU
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: make qemu-${{ env.QEMU_PLATFORM }}
+
+      - name: Verify cached QEMU
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: make qemu-${{ env.QEMU_PLATFORM }}-check
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: qemu-${{ inputs.os }}
+          path: target/qemu-${{ env.QEMU_PLATFORM }}/artifacts/*
+          retention-days: 7
+          if-no-files-found: error
+
   build:
+    needs: qemu
     runs-on: ${{ inputs.os }}
     environment: ${{ inputs.signing-environment }}
     env:
       BUILD_PROFILE: ${{ github.ref_type == 'tag' && 'production' || 'release' }}
-      # Keep the runner's package metadata for Intel-compatible bottles.
-      # Revisit Intel package sourcing by 2026-12-01.
-      HOMEBREW_NO_AUTO_UPDATE: "1"
+      QEMU_PLATFORM: ${{ startsWith(inputs.os, 'windows-') && 'windows' || startsWith(inputs.os, 'macos-') && 'macos' || 'linux' }}
       # Hoisted into env because the verify step needs it in the shell as well
       # as in a step `if`, and the smoke job reads the same value. Deliberately
       # not the certificate itself: Tauri's bundler runs a keychain import of
       # its own whenever it finds APPLE_CERTIFICATE in the environment, and this
-      # workflow has to do that import earlier, before the QEMU fetch signs the
-      # bundled dylibs.
+      # workflow imports a keychain before Tauri signs the app and sidecars.
       SIGN_MACOS: ${{ inputs.signing-environment != '' }}
-      # Read by fetch-qemu-macos.sh for those dylibs and by Tauri's bundler,
-      # which prefers this over bundle.macOS.signingIdentity in the config. It
+      # Tauri prefers this over bundle.macOS.signingIdentity in the config. It
       # has to fall back to the config's own "-" rather than to empty: an
       # unsigned bundle will not execute on Apple Silicon at all, and codesign
       # reads a set-but-empty identity as "no identity found".
@@ -71,10 +123,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
-
-      - name: Check out the pinned QEMU source
-        if: runner.os == 'Linux'
-        run: git submodule update --init --depth 1 third_party/qemu
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -114,60 +162,34 @@ jobs:
             build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Identify QEMU package versions
-        # Linux pins the source and container; macOS collects Homebrew packages.
-        # Windows pins its installer in the script.
-        if: github.ref_type != 'tag' && runner.os != 'Windows'
-        id: qemu-packages
+      - name: Download QEMU and its matching sources
+        uses: actions/download-artifact@v8
+        with:
+          name: qemu-${{ inputs.os }}
+          path: target/qemu-${{ env.QEMU_PLATFORM }}/artifacts
+
+      - name: Restore the QEMU runtime
         shell: bash
         run: |
-          packages="$RUNNER_TEMP/qemu-packages"
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            git rev-parse HEAD:third_party/qemu > "$packages"
-          else
-            formulae=(qemu)
-            brew deps --formula qemu > "$RUNNER_TEMP/qemu-dependencies"
-            while IFS= read -r formula; do
-              formulae+=("$formula")
-            done < "$RUNNER_TEMP/qemu-dependencies"
-            brew info --json=v2 "${formulae[@]}" | jq -Sc '
-              [.formulae[] | {full_name, versions, revision, bottle}]
-              | sort_by(.full_name)
-            ' > "$packages"
+          directory="target/qemu-$QEMU_PLATFORM"
+          mkdir -p "$directory/runtime"
+          tar -xJf "$directory/artifacts/$QEMU_PLATFORM-${{ inputs.arch }}-qemu-runtime.tar.xz" -C "$directory/runtime"
 
-            # An installed QEMU can still link older kegs than the current formula
-            brew info --json=v2 --installed | jq -Sc '
-              [.formulae[] | {full_name, linked_keg, installed: [.installed[].version]}]
-              | sort_by(.full_name)
-            ' >> "$packages"
-          fi
-          digest=$(shasum -a 256 "$packages" | cut -d ' ' -f 1)
-          echo "hash=$digest" >> "$GITHUB_OUTPUT"
+      - name: Install Make on Windows
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
 
-      - name: Cache bundled QEMU
-        if: github.ref_type != 'tag'
-        id: qemu-cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            launcher/binaries
-            launcher/qemu-libs
-            target/qemu-linux/runtime
-            target/qemu-linux/artifacts
-          key: qemu-v2-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh', '.github/packaging/qemu/*', 'tools/qemu-build/**', 'Makefile', 'Cargo.lock') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
+      - name: Enable Windows binary inspection
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build bundled QEMU (Linux)
-        if: runner.os == 'Linux' && steps.qemu-cache.outputs.cache-hit != 'true'
-        run: make qemu-linux
-
-      - name: Verify bundled QEMU (Linux)
-        if: runner.os == 'Linux'
-        run: make qemu-linux-check
+      - name: Verify and stage QEMU on its native host
+        shell: bash
+        run: make qemu-$QEMU_PLATFORM-check
 
       - name: Import the Apple signing credentials
         # A throwaway keychain rather than the login one, which on a runner is
-        # unlocked with a published password. It has to exist before the QEMU
-        # fetch, which signs the bundled dylibs with this identity.
+        # unlocked with a published password. Tauri uses it to sign the bundle.
         if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -242,15 +264,6 @@ jobs:
             echo "APPLE_API_KEY_PATH=$key"
           } >> "$GITHUB_ENV"
 
-      - name: Fetch bundled QEMU (macOS)
-        if: runner.os == 'macOS' && steps.qemu-cache.outputs.cache-hit != 'true'
-        run: .github/scripts/fetch-qemu-macos.sh
-
-      - name: Fetch bundled QEMU (Windows)
-        if: runner.os == 'Windows' && steps.qemu-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: .github/scripts/fetch-qemu-windows.ps1
-
       - name: Fetch pinned firmware release
         # shell: bash covers all three OSes: on Windows it runs via the Git for
         # Windows bash already on the runner. The repo is public, so the ambient
@@ -263,7 +276,7 @@ jobs:
       - name: Build
         # The release config is separate so that a plain `cargo run` from a fresh
         # clone works: tauri-build validates externalBin paths and resource globs
-        # on every cargo invocation, before the fetch scripts have run.
+        # on every cargo invocation, before the runtime has been staged.
         #
         # Signing identity and notarization credentials come from the job env.
         # Tauri notarizes and staples the .app between building it and sealing
@@ -341,17 +354,14 @@ jobs:
           rm -f "$key"
 
       - name: Verify macOS signature
-        # The per-dylib loop is not redundant with --deep: codesign seals a loose
-        # .dylib under Resources/ as data rather than nested code, so --deep alone
-        # passes a bundle full of unsigned libraries. The --display calls are
-        # logging.
+        # QEMU links its third-party libraries statically. Tauri signs the
+        # executable sidecars as part of the bundle.
         if: runner.os == 'macOS'
         run: |
           app="$(find "target/$BUILD_PROFILE/bundle/macos" -maxdepth 1 -name '*.app')"
           codesign --verify --deep --strict --verbose=2 "$app"
-          for lib in "$app/Contents/Resources/qemu-libs"/*.dylib; do
-            codesign --verify --strict "$lib"
-          done
+          codesign --verify --strict "$app/Contents/MacOS/qemu-system-guest"
+          codesign --verify --strict "$app/Contents/MacOS/qemu-img"
           codesign --display --entitlements - "$app"
           codesign --display --entitlements - "$app/Contents/MacOS/qemu-system-guest"
 
@@ -453,9 +463,7 @@ jobs:
           for f in "target/$BUILD_PROFILE/bundle/deb/"*.deb; do cp "$f" "${prefix}.deb"; done
           for f in "target/$BUILD_PROFILE/bundle/appimage/"*.AppImage; do cp "$f" "${prefix}.AppImage"; done
 
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            cp target/qemu-linux/artifacts/linux-amd64-qemu-sources.tar.xz "${prefix}-qemu-sources.tar.xz"
-          fi
+          cp "target/qemu-$QEMU_PLATFORM/artifacts/$os_name-$ARCH-qemu-sources.tar.xz" "${prefix}-qemu-sources.tar.xz"
 
           ls -la dist/
 
@@ -536,10 +544,9 @@ jobs:
         run: |
           unzip -q dist/*.zip -d gatekeeper
           app="$(find gatekeeper -maxdepth 1 -name '*.app')"
-          # upload-artifact does not preserve extended attributes, so the flag a
-          # browser would have set is applied by hand. On the bundle only, the
-          # way a download carries it: writing an xattr needs write permission
-          # on the file, and the QEMU payload arrives from Homebrew read-only.
+          # upload-artifact does not preserve extended attributes. Apply the
+          # browser's quarantine flag to the bundle so Gatekeeper checks it
+          # as a downloaded app.
           xattr -w com.apple.quarantine \
             "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$app"
           spctl --assess --type exec --verbose=4 "$app"

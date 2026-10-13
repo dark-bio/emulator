@@ -31,27 +31,5 @@
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
 
-	<!--
-	  The Hardened Runtime makes dyld ignore every DYLD_* variable, which would
-	  silently break the entire bundled-QEMU scheme: the sidecars still record
-	  Homebrew Cellar paths for their dependencies and are pointed at the
-	  bundled copies purely through DYLD_LIBRARY_PATH (see
-	  platform.rs's `prepend_library_path`). The alternative is rewriting each
-	  binary's load commands with install_name_tool, which the fetch script
-	  deliberately avoids.
-	-->
-	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
-	<true/>
-
-	<!--
-	  Library validation requires every loaded dylib to be signed by the same
-	  team as the binary loading it. An ad-hoc signature carries no team
-	  identifier at all, so QEMU would refuse to load its own bundled
-	  dependencies. A Developer ID build signs both sides with one identity and
-	  would not need this, but keeping it makes the ad-hoc and Developer ID
-	  builds behave identically.
-	-->
-	<key>com.apple.security.cs.disable-library-validation</key>
-	<true/>
 </dict>
 </plist>
