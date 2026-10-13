@@ -183,6 +183,15 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Select the Microsoft linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # Git Bash puts its unrelated link.exe before Visual Studio on PATH.
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\link.exe'
+          if (!(Test-Path $linker)) { throw "Microsoft linker not found: $linker" }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+
       - name: Verify and stage QEMU on its native host
         shell: bash
         run: make qemu-$QEMU_PLATFORM-check
