@@ -46,6 +46,147 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The doctor shows the home directory as `~` for reading, while JSON keeps
+/// every path whole.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn test_doctor_shortens_home_paths_only_for_reading() {
+    // Keep the settings and the image away from the owner's own
+    let directory = tempfile::TempDir::new().unwrap();
+    let test_home = directory.path().join("home");
+    let data_root = if cfg!(target_os = "macos") {
+        test_home.join("Library/Application Support")
+    } else {
+        test_home.join(".local/share")
+    };
+    let data = data_root.join("bio.dark.emulator");
+    let image = test_home.join("arks/lab.ark");
+    let settings = data.join("settings.toml");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+    std::fs::write(&image, b"image").unwrap();
+    std::fs::write(
+        &settings,
+        format!("version = 1\ndisk = '{}'\n", image.display()),
+    )
+    .unwrap();
+    let invoke = |json: bool| {
+        let mut command = Command::new(support::executable());
+        command
+            .arg("doctor")
+            .env("CI", "1")
+            .env("NO_COLOR", "1")
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("HOME", &test_home)
+            .env("XDG_DATA_HOME", &data_root);
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+
+    // Both a present and a missing image keep their full path in JSON
+    for present in [true, false] {
+        if !present {
+            std::fs::remove_file(&image).unwrap();
+        }
+        let reading = invoke(false);
+        let text = stdout(&reading);
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let data_path = if cfg!(target_os = "macos") {
+            "~/Library/Application Support/bio.dark.emulator"
+        } else {
+            "~/.local/share/bio.dark.emulator"
+        };
+        assert!(
+            flat.contains(&format!("✓ data {data_path}")),
+            "present={present}: {text}"
+        );
+        assert!(
+            flat.contains(&format!("✓ settings {data_path}/settings.toml")),
+            "present={present}: {text}"
+        );
+        assert!(
+            flat.contains(if present {
+                "✓ image ~/arks/lab.ark (5 B)"
+            } else {
+                "✗ image ~/arks/lab.ark is not there"
+            }),
+            "present={present}: {text}"
+        );
+        assert!(
+            !text.contains(&test_home.display().to_string()),
+            "reading home, present={present}: {text}"
+        );
+        assert!(
+            !text.starts_with('\n') && !text.ends_with("\n\n"),
+            "stdout separators, present={present}: {text}"
+        );
+        assert!(
+            !text.contains('\x1b'),
+            "pipe has no ANSI, present={present}"
+        );
+        if !reading.status.success() {
+            assert!(
+                stderr(&reading).starts_with("\nerror["),
+                "error follows the report, present={present}: {}",
+                stderr(&reading)
+            );
+        }
+
+        let json = invoke(true);
+        let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(
+            document["data_dir"],
+            data.display().to_string(),
+            "data path, present={present}"
+        );
+        assert_eq!(
+            document["settings"],
+            settings.display().to_string(),
+            "settings path, present={present}"
+        );
+        assert_eq!(
+            document["disk"],
+            image.display().to_string(),
+            "image path, present={present}"
+        );
+        assert_eq!(
+            document["logs_dir"],
+            data.join("logs").display().to_string(),
+            "log path, present={present}"
+        );
+        for (name, expected) in [
+            ("data", data.display().to_string()),
+            ("settings", settings.display().to_string()),
+            (
+                "image",
+                format!(
+                    "{} {}",
+                    image.display(),
+                    if present { "(5 B)" } else { "is not there" }
+                ),
+            ),
+        ] {
+            let check = document["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap();
+            assert_eq!(check["detail"], expected, "{name}, present={present}");
+        }
+        for line in stderr(&json).lines() {
+            let event: serde_json::Value =
+                serde_json::from_str(line).expect("one JSON event per line");
+            assert!(
+                event["event"].is_string(),
+                "JSON event, present={present}: {line}"
+            );
+        }
+    }
+}
+
 /// The private update entry point does nothing and prints nothing under CI.
 #[test]
 fn test_update_entry_point_is_silent_under_ci() {

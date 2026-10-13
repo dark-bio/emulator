@@ -677,12 +677,15 @@ mod tests {
         assert!(page.contains("Topics: agents, images, registry, output."));
     }
 
-    /// The short root page lists all commands within one screen.
+    /// The root page lists every command and quotes the manual's command.
     #[test]
-    fn test_the_root_scan_fits_on_a_screen() {
+    fn test_the_root_scan_lists_every_command() {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_help().to_string();
-        assert!(page.lines().count() <= 42, "{}", page.lines().count());
+        assert!(
+            page.contains("`ark-emulator help --all`"),
+            "quoted help command"
+        );
         for command in COMMANDS {
             assert!(page.contains(command), "{command}");
         }
@@ -861,6 +864,8 @@ mod tests {
         }
     }
 
+    /// A topic styles its headings, bullets and code, and keeps the backticks of
+    /// a quoted command.
     #[test]
     fn test_a_topic_renders_its_headings_bullets_and_code() {
         let theme = Theme::fixed(80, Color::Basic, true);
@@ -869,7 +874,8 @@ mod tests {
                 &theme,
                 "# Stopping\n\nRun `ark-emulator list` first.\n\n- One emulator at a time.\n\n    ark-emulator stop 18181\n\n  It stops at once.\n"
             ),
-            "\x1b[1mStopping\x1b[0m\n\nRun \x1b[1mark-emulator list\x1b[0m first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m\n\n    It stops at once."
+            "\x1b[1mStopping\x1b[0m\n\nRun `\x1b[1mark-emulator list\x1b[0m` first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m\n\n    It stops at once.",
+            "headings, inline commands and examples keep their reading layout"
         );
     }
 

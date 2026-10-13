@@ -8,11 +8,13 @@ apart when parsing.
 
 The default output is formatted for reading, the same on a terminal and in
 a pipe. One item prints as a block of labels and values, several as a
-table. Absent values print as -, empty lists as none and booleans as yes and
-no. Expiry prints as its date in UTC. The view may leave out fields, while
---json always has them all. A mark before a state is decoration, and the
-word beside it is the value. Colors need a terminal, and NO_COLOR or
-CLICOLOR=0 turns them off.
+table, and an empty list as a sentence in place of its table, such as "No
+emulators running". Absent values print as - and booleans as yes and no.
+Expiry prints as its date in UTC. Paths show the home directory as ~, and
+the view may leave out fields, while --json keeps every field and every
+path whole. A mark such as ✓ prints as its ASCII twin, such as ok, when the
+locale is not UTF-8. Colors need a terminal, and NO_COLOR or CLICOLOR=0
+turns them off.
 
 ## JSON
 

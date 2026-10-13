@@ -63,6 +63,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
             }),
         ),
     }
+    checks.shorten_path(&emulator.binary);
 
     let firmware = bundle::bundled_firmware(paths.resources.as_deref(), arch);
     let firmware_version = bundle::firmware_version(paths.resources.as_deref(), arch);
@@ -107,6 +108,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
                 .hint("check the permissions on the data directory"),
         ),
     }
+    checks.shorten_path(&paths.data);
 
     let settings = match Settings::load(&paths.data) {
         Ok(settings) => {
@@ -121,6 +123,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
             None
         }
     };
+    checks.shorten_path(&paths.data);
 
     let image = settings
         .as_ref()
@@ -144,6 +147,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
                 .hint("open or create one in the window, or start with --image"),
             ),
         },
+    }
+    if let Some(image) = &image {
+        checks.shorten_path(image);
     }
 
     let mut registry_warnings = Vec::new();
@@ -192,7 +198,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         },
         "checks": checks.rows,
     });
-    output.checklist(&document, &checks.rows)?;
+    output.checklist(&document, &checks.reading_rows)?;
     match checks.failure {
         Some(error) => Err(error),
         None => Ok(()),
@@ -205,6 +211,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
 struct Checks {
     /// Every check as the document carries it.
     rows: Vec<Value>,
+
+    /// The same checks with the home directory as `~`, for the reading view.
+    reading_rows: Vec<Value>,
 
     /// The earliest failure, kept while the later checks still run.
     failure: Option<Error>,
@@ -273,8 +282,20 @@ impl Checks {
 
     /// Append one check.
     fn add(&mut self, name: &str, result: &str, detail: &str, hint: Option<&str>) {
-        self.rows
-            .push(json!({"name": name, "result": result, "detail": detail, "hint": hint}));
+        let row = json!({"name": name, "result": result, "detail": detail, "hint": hint});
+        self.reading_rows.push(row.clone());
+        self.rows.push(row);
+    }
+
+    /// Show `path` with the home directory as `~` in the latest check's
+    /// reading detail.
+    fn shorten_path(&mut self, path: &Path) {
+        if let Some(row) = self.reading_rows.last_mut()
+            && let Some(detail) = row["detail"].as_str()
+        {
+            row["detail"] =
+                json!(detail.replace(&path.display().to_string(), &output::home_path(path)));
+        }
     }
 }
 

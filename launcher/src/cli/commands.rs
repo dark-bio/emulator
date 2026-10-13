@@ -135,6 +135,7 @@ fn version(output: &Output, paths: &Paths) -> Result<(), Error> {
             "firmware": bundle::firmware_version(paths.resources.as_deref(), arch),
             "qemu": qemu::resolve_qemu(arch).version(libs.as_deref()),
         }),
+        None,
         &[
             ("Version", "version"),
             ("Firmware", "firmware"),
@@ -316,6 +317,7 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
             ("SERIAL", "serial"),
             ("EXPIRES", "expires"),
         ],
+        "No emulators running",
     )
 }
 
@@ -349,14 +351,14 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
         };
         if let Err(mut err) = result {
             if !done.is_empty() || err.code == Code::Timeout {
-                output.block(&stopped(&done), &[("Stopped", "stopped")])?;
+                output.block(&stopped(&done), None, &[("Stopped", "stopped")])?;
             }
             err.message = format!("{}: {}", locator(instance), err.message);
             return Err(err);
         }
         done.push(instance.port);
     }
-    output.block(&stopped(&done), &[("Stopped", "stopped")])
+    output.block(&stopped(&done), None, &[("Stopped", "stopped")])
 }
 
 /// Set this emulator's CLI hold and report the state after hardware delivery.
@@ -407,6 +409,7 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
             "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
             "release_after_seconds": outcome.release_after_seconds,
         }),
+        None,
         &[
             ("Locator", "locator"),
             ("Pressed", "pressed"),
@@ -461,7 +464,11 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
 
     if !yes
         && !output.confirm(
-            &format!("Wipe {}, {}?", path.display(), output::bytes(size)),
+            &format!(
+                "Wipe {}, {}?",
+                output::home_path(&path),
+                output::bytes(size)
+            ),
             &format!("wiping {} was not confirmed", path.display()),
             "--yes",
         )?
@@ -476,6 +483,7 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
         .map_err(|err| Error::io(format!("could not reset {}: {err:#}", path.display())))?;
     output.block(
         &json!({"path": path.display().to_string(), "wiped": true}),
+        None,
         &[("Path", "path"), ("Wiped", "wiped")],
     )
 }
@@ -613,6 +621,7 @@ fn report(
     document["started"] = json!(started);
     output.block(
         &document,
+        None,
         &[
             ("Locator", "locator"),
             ("Image", "image"),
