@@ -13,7 +13,7 @@ use std::process::Command;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
-use crate::{Build, output, run};
+use crate::{Build, output, run, run_retry};
 
 /// Restore an extracted source release so rebuilding does not require Git repositories.
 pub(crate) fn restore(build: &Build, source: &Path) -> Result<()> {
@@ -246,10 +246,19 @@ fn fetch(cache: &Path, url: &str, revision: &str) -> Result<()> {
         .status
         .success()
     {
-        run(Command::new("git")
-            .arg("-C")
-            .arg(cache)
-            .args(["fetch", "--depth", "1", url, revision]))?;
+        run_retry(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "http.lowSpeedLimit=1024",
+                    "-c",
+                    "http.lowSpeedTime=60",
+                ])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .arg("-C")
+                .arg(cache)
+                .args(["fetch", "--depth", "1", url, revision]),
+        )?;
     }
     Ok(())
 }

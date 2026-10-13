@@ -705,10 +705,16 @@ mod tests {
                     }
                 };
 
-                // Consume request headers before sending a complete HTTP response
+                // Windows inherits the listener's nonblocking mode on accepted sockets
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+
+                // Consume request headers before sending a complete HTTP response
                 let mut reader = BufReader::new(&stream);
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
