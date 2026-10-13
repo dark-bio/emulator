@@ -133,9 +133,11 @@ Packaging builds QEMU with `make qemu-linux`, `make qemu-macos` or
 Docker; macOS builds on its native architecture. The builder fetches the GitLab
 revision pinned in `.github/packaging/qemu/source.json` into `target/` on
 demand. The builder, pinned inputs, Make targets and CI actions live together
-in `.github/packaging/qemu/`. CI reuses verified runtime and source archives
-when its cache matches the build inputs. Every packaged release includes the
-corresponding QEMU sources, dependency sources and build recipes.
+in `.github/packaging/qemu/`. CI reuses matching runtime and source archives
+without installing QEMU build tools on a cache hit. The native packaging job
+verifies the archives and runtime before staging them. Release tags rebuild
+QEMU from its pinned inputs. Every packaged release includes the corresponding
+QEMU sources, dependency sources and build recipes.
 
 ## Layout
 

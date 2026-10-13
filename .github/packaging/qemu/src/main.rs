@@ -10,6 +10,10 @@
 //! patches, toolchain definitions, Make targets and CI actions. The repository
 //! Makefile includes this package's Makefile; the platform workflow calls its
 //! `ci/build` and `ci/stage` actions to produce and consume runtime archives.
+//! CI caches the finished runtime and source archives together. A cache hit
+//! forwards them without installing build tools or compiling the builder. The
+//! native packaging job verifies both archives and exercises the runtime before
+//! staging it. Tags bypass the cache and rebuild from the pinned inputs.
 //!
 //! `make qemu-linux` produces sidecars, licenses, a manifest and matching
 //! sources under `target/qemu-linux`, and stages the runtime for Tauri. The
