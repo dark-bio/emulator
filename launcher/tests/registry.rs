@@ -97,7 +97,14 @@ fn test_listing_reports_invalid_entries_without_diagnostics() {
         if !arguments.contains(&"--json") {
             assert!(stderr.contains("warning:"), "{stderr}");
             assert!(stderr.contains("entry 1"), "{stderr}");
-            assert!(String::from_utf8_lossy(&output.stdout).contains("demo.ark"));
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("emulator:18181"),
+                "listed locator"
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("demo.ark"),
+                "image is JSON-only"
+            );
             continue;
         }
 

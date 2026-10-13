@@ -88,9 +88,9 @@ pub(crate) fn disabled() -> bool {
     std::env::var_os("CI").is_some_and(|value| !value.is_empty())
 }
 
-/// Parses the version stamped into this executable by Cargo.
+/// Parses the version stamped into this executable by the build script.
 pub(crate) fn running() -> Version {
-    Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo package version is semver")
+    Version::parse(env!("ARK_EMULATOR_VERSION")).expect("build version is semver")
 }
 
 /// Resolves the app's cache without creating a Tauri context or touching a display.
@@ -109,8 +109,8 @@ pub(crate) fn directory() -> Option<PathBuf> {
 
 /// Prints the kept note and starts a detached lookup when one is due.
 pub(crate) fn start(output: &Output, now: OffsetDateTime) {
-    // Under CI nothing is read, printed or looked up
-    if disabled() {
+    // Local builds and CI read no kept answer and start no lookup
+    if cfg!(emulator_local) || disabled() {
         return;
     }
     let Some(directory) = directory() else {
@@ -166,8 +166,8 @@ pub(crate) fn start(output: &Output, now: OffsetDateTime) {
 
 /// Runs the silent detached lookup, ending within 30s whatever happens.
 pub(crate) fn run() {
-    // Under CI the copy does nothing
-    if disabled() {
+    // Local builds and CI do nothing, even when the copy is started by hand
+    if cfg!(emulator_local) || disabled() {
         return;
     }
     let started = Instant::now();

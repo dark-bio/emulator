@@ -179,7 +179,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
     }
 
     let document = json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("ARK_EMULATOR_VERSION"),
         "firmware": firmware.as_ref().map(|_| json!({ "version": firmware_version })),
         "qemu": {
             "binary": emulator.binary.display().to_string(),
@@ -223,7 +223,11 @@ impl Checks {
     /// Looks up the newest release afresh. A newer one is a warn and a failed
     /// lookup a skip, so neither sets the exit code.
     fn update(&mut self, timeout: u64) {
-        // Under CI nothing is looked up
+        // Local builds and CI skip the release lookup
+        if cfg!(emulator_local) {
+            self.skip("update", "local build");
+            return;
+        }
         if update::disabled() {
             self.skip("update", "CI is set");
             return;
@@ -237,7 +241,7 @@ impl Checks {
             std::time::Duration::from_secs(timeout),
         );
 
-        // An unpublished local build newer than the release is current too
+        // Compare the stamped build with the newest release
         match result {
             Ok(newest) if newest.cmp_precedence(&running).is_gt() => self.warn(
                 "update",

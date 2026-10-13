@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use super::args::Global;
+use super::local_time;
 use super::style::{self, Role, Theme, wrap};
 use crate::error::{Code, Error};
 
@@ -97,18 +98,7 @@ impl Output {
         title: Option<&str>,
         rows: &[(&str, &str)],
     ) -> Result<(), Error> {
-        self.result(document, |theme| {
-            let rows: Vec<(String, String)> = rows
-                .iter()
-                .map(|(label, key)| {
-                    (
-                        (*label).to_owned(),
-                        value(theme, key, document.get(*key).unwrap_or(&Value::Null)),
-                    )
-                })
-                .collect();
-            block(theme, title, &rows)
-        })
+        self.result(document, |theme| fields(theme, document, title, rows))
     }
 
     /// Print several results as a table, one row each, or the whole document
@@ -133,7 +123,11 @@ impl Output {
     /// Claim the one result and write it. A second claim is ignored, so an
     /// error after a partial result cannot replace it. A write that fails is
     /// the command's failure, since a result nobody received is no result.
-    fn result(&self, document: &Value, render: impl FnOnce(&Theme) -> String) -> Result<(), Error> {
+    pub(super) fn result(
+        &self,
+        document: &Value,
+        render: impl FnOnce(&Theme) -> String,
+    ) -> Result<(), Error> {
         if self.0.printed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -398,12 +392,42 @@ fn value(theme: &Theme, key: &str, value: &Value) -> String {
     }
     let text = style::cell(&scalar(value));
     match key {
-        // The day is what a reader scans for; the document keeps the instant.
-        "expires" if text.len() >= 10 => text[..10].to_owned(),
+        "expires" => timestamp(theme, &text, true),
         "locator" => theme.paint(Role::Accent, text),
         "path" => style::cell(&home_path(Path::new(&scalar(value)))),
         _ => text,
     }
+}
+
+/// A UTC timestamp in local time, the date alone or in `full`, and in UTC when
+/// the local offset is unknown.
+fn timestamp(theme: &Theme, text: &str, full: bool) -> String {
+    let Ok(instant) =
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+    else {
+        return theme.paint(Role::Muted, "-");
+    };
+    let offset = local_time::offset(instant).unwrap_or(time::UtcOffset::UTC);
+    local_time::render(theme, instant, offset, full)
+}
+
+/// The named fields of a document as a block, under an optional title.
+pub(super) fn fields(
+    theme: &Theme,
+    document: &Value,
+    title: Option<&str>,
+    rows: &[(&str, &str)],
+) -> String {
+    let rows: Vec<(String, String)> = rows
+        .iter()
+        .map(|(label, key)| {
+            (
+                (*label).to_owned(),
+                value(theme, key, document.get(*key).unwrap_or(&Value::Null)),
+            )
+        })
+        .collect();
+    block(theme, title, &rows)
 }
 
 /// A local path as a person reads it, with the home directory as `~` on
@@ -449,7 +473,7 @@ pub(crate) fn bytes(count: u64) -> String {
 /// label and indented two spaces. A label wide enough to crowd the values
 /// stacks them instead, an empty row separates two groups, and a row without a
 /// label prints its value alone.
-fn block(theme: &Theme, title: Option<&str>, rows: &[(String, String)]) -> String {
+pub(super) fn block(theme: &Theme, title: Option<&str>, rows: &[(String, String)]) -> String {
     // The title sits at column 0, above its rows
     let mut lines = Vec::new();
     if let Some(title) = title {
@@ -491,7 +515,12 @@ fn block(theme: &Theme, title: Option<&str>, rows: &[(String, String)]) -> Strin
 /// One row per result, with muted uppercase headers and numbers aligned on
 /// the right. A table that does not fit becomes one block per row, so nothing
 /// is lost to the width.
-fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)], empty: &str) -> String {
+pub(super) fn table(
+    theme: &Theme,
+    rows: &[Value],
+    columns: &[(&str, &str)],
+    empty: &str,
+) -> String {
     if rows.is_empty() {
         return wrap(&style::cell(empty), theme.width, 0);
     }
@@ -500,7 +529,15 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)], empty: &str) -
         .map(|row| {
             columns
                 .iter()
-                .map(|(_, key)| value(theme, key, row.get(*key).unwrap_or(&Value::Null)))
+                .map(|(_, key)| {
+                    if *key == "expires"
+                        && let Some(text) = row[*key].as_str()
+                    {
+                        timestamp(theme, text, false)
+                    } else {
+                        value(theme, key, row.get(*key).unwrap_or(&Value::Null))
+                    }
+                })
                 .collect()
         })
         .collect();
@@ -536,16 +573,9 @@ fn table(theme: &Theme, rows: &[Value], columns: &[(&str, &str)], empty: &str) -
             .max(console::measure_text_width(columns[index].0).max(8));
     }
     if total(&widths) > theme.width {
-        return cells
+        return rows
             .iter()
-            .map(|row| {
-                let rows: Vec<(String, String)> = columns
-                    .iter()
-                    .zip(row)
-                    .map(|((label, _), cell)| ((*label).to_owned(), cell.clone()))
-                    .collect();
-                block(theme, None, &rows)
-            })
+            .map(|row| fields(theme, row, None, columns))
             .collect::<Vec<_>>()
             .join("\n\n");
     }

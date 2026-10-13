@@ -62,9 +62,10 @@ Read `ark help agents` before driving the Ark itself.
 
 ## Checking state
 
-`ark-emulator list` shows every running emulator with its locator, image,
-readiness, environment, name, serial and when its identity expires, under
-the names `ark devices` uses. `ark-emulator doctor` checks this computer and
+`ark-emulator list` shows every running emulator with its locator, name,
+serial, environment, readiness and the date its identity expires, under the
+names `ark devices` uses. Its JSON adds the port, the image's file name and
+the log file. `ark-emulator doctor` checks this computer and
 this build, and suggests fixes without applying them. Its JSON names where
 the data directory, the settings and the logs live. Every emulator writes
 its launcher log to a file named after its port, which
@@ -72,7 +73,7 @@ its launcher log to a file named after its port, which
 failed start quotes the end of it.
 
 An emulator runs the firmware bundled with Ark Emulator, which
-`ark-emulator --version` names, unless --kernel and --initrd boot another
+`ark-emulator doctor` names, unless --kernel and --initrd boot another
 build. `ark firmware update` is unsupported on an emulator, so newer
 firmware comes with a newer Ark Emulator.
 

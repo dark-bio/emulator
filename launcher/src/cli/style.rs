@@ -238,6 +238,17 @@ pub(crate) fn cell(text: &str) -> String {
     printable(text).replace('\n', "\\n")
 }
 
+/// A duration in the house format, `14s`, `1m 02s` or `1h 05m`.
+pub(crate) fn duration(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// Wrap styled text at `width` cells, indenting every line after the first by
 /// `indent`. Styling sequences take no width, and a word too long for a line
 /// of its own is broken rather than dropped.

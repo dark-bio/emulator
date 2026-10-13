@@ -10,9 +10,9 @@ The default output is formatted for reading, the same on a terminal and in
 a pipe. One item prints as a block of labels and values, several as a
 table, and an empty list as a sentence in place of its table, such as "No
 emulators running". Absent values print as - and booleans as yes and no.
-Expiry prints as its date in UTC. Paths show the home directory as ~, and
-the view may leave out fields, while --json keeps every field and every
-path whole. A mark such as ✓ prints as its ASCII twin, such as ok, when the
+Times print in local time, as the date in a table and in full in a block.
+Paths show the home directory as ~, and the view may leave out fields,
+while --json keeps every field, every path whole and times in UTC. A mark such as ✓ prints as its ASCII twin, such as ok, when the
 locale is not UTF-8. Colors need a terminal, and NO_COLOR or CLICOLOR=0
 turns them off.
 
@@ -63,10 +63,11 @@ emulator's cache directory.
 
 While the kept answer names a newer version, start, list, stop, button and
 wipe open with a note naming both versions and how to upgrade, and so does
-a headless bare run. Under --json it is an ordinary note event. The note
-never changes the result or the exit code, and -q hides it. doctor looks up
-afresh and reports the answer as its update check. A nonempty CI turns off
-both the lookup and the note.
+a headless run with no command. Under --json it is an ordinary note event.
+The note never changes the result or the exit code, and -q hides it. doctor
+looks up afresh and reports the answer as its update check. A nonempty CI,
+or a local build whose version ends in -local, turns off both the lookup
+and the note.
 
 ## Failures
 

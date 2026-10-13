@@ -226,7 +226,7 @@ pub(crate) fn record_path(key: &'static str, path: &Path) {
 /// [`record`] is collected.
 pub(crate) fn report(title: &str, err: &anyhow::Error) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "{PRODUCT} {}: {title}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(out, "{PRODUCT} {}: {title}", env!("ARK_EMULATOR_VERSION"));
     let _ = writeln!(out);
     let _ = writeln!(out, "Error: {err}");
 

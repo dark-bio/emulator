@@ -26,6 +26,7 @@ use tauri::PackageInfo;
 
 use super::args::{Boot, ButtonAction, Command, Global};
 use super::output::{self, Output};
+use super::style::{self, Theme};
 use crate::bundle::{self, Paths};
 use crate::diagnostics;
 use crate::error::{Code, Error};
@@ -42,6 +43,19 @@ const POLL: Duration = Duration::from_millis(250);
 /// How much of a failed launcher's log an error carries, in lines. Enough to
 /// hold what QEMU said about why it would not start.
 const TAIL: usize = 20;
+
+/// The columns a list compares emulators by, in `ark devices`' order.
+const LIST_COLUMNS: &[(&str, &str)] = &[
+    ("LOCATOR", "locator"),
+    ("NAME", "name"),
+    ("SERIAL", "serial"),
+    ("ENVIRONMENT", "environment"),
+    ("READY", "ready"),
+    ("EXPIRES", "expires"),
+];
+
+/// The one row a finished wipe shows.
+const WIPE_ROWS: &[(&str, &str)] = &[("Path", "path")];
 
 /// Run one command, print what it answers, and hand back the exit code. No
 /// command at all is the root's own answer, which is what `--version` asks
@@ -89,6 +103,7 @@ fn dispatch(
     match command {
         Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all, true),
         Some(Command::Completions { shell }) => return completions(shell, output),
+        None => return version(output),
         _ => {}
     }
     let paths = Paths::resolve(identifier, package).map_err(|err| Error::io(format!("{err:#}")))?;
@@ -99,10 +114,9 @@ fn dispatch(
         Some(Command::Button { action }) => button(action, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
         Some(Command::Doctor) => super::doctor::doctor(output, &paths, global.timeout),
-        Some(Command::Completions { .. } | Command::Help { .. }) => {
+        Some(Command::Completions { .. } | Command::Help { .. }) | None => {
             unreachable!("answered above")
         }
-        None => version(output, &paths),
     }
 }
 
@@ -125,23 +139,12 @@ fn completions(shell: clap_complete::Shell, output: &Output) -> Result<(), Error
         .map_err(|err| Error::io(format!("could not write the completions: {err}")))
 }
 
-/// What this build is made of, which is what a bug report needs naming.
-fn version(output: &Output, paths: &Paths) -> Result<(), Error> {
-    let arch = architecture(None)?;
-    let libs = bundle::resolve_qemu_libs(paths.resources.as_deref());
-    output.block(
-        &json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "firmware": bundle::firmware_version(paths.resources.as_deref(), arch),
-            "qemu": qemu::resolve_qemu(arch).version(libs.as_deref()),
-        }),
-        None,
-        &[
-            ("Version", "version"),
-            ("Firmware", "firmware"),
-            ("QEMU", "qemu"),
-        ],
-    )
+/// Print the stamped version, as one line or as one JSON field.
+fn version(output: &Output) -> Result<(), Error> {
+    let version = env!("ARK_EMULATOR_VERSION");
+    output.result(&json!({"version": version}), |_| {
+        format!("ark-emulator {version}")
+    })
 }
 
 /// Boot an emulator on the image this run settles on, and answer once the
@@ -308,15 +311,7 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
     output.table(
         &json!({ "emulators": rows }),
         &rows,
-        &[
-            ("LOCATOR", "locator"),
-            ("IMAGE", "image"),
-            ("READY", "ready"),
-            ("ENV", "environment"),
-            ("NAME", "name"),
-            ("SERIAL", "serial"),
-            ("EXPIRES", "expires"),
-        ],
+        LIST_COLUMNS,
         "No emulators running",
     )
 }
@@ -403,21 +398,26 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
     }
 
     // Report the accepted schedule; the command does not wait for its expiry
-    output.block(
+    output.result(
         &json!({
             "locator": locator(instance), "pressed": outcome.pressed,
             "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
             "release_after_seconds": outcome.release_after_seconds,
         }),
-        None,
-        &[
-            ("Locator", "locator"),
-            ("Pressed", "pressed"),
-            ("CLI held", "cli_pressed"),
-            ("Changed", "changed"),
-            ("Release after", "release_after_seconds"),
-        ],
+        |theme| button_block(theme, outcome.pressed, outcome.release_after_seconds),
     )
+}
+
+/// The button's state after the command, with any release it scheduled.
+fn button_block(theme: &Theme, pressed: bool, release_after: Option<u32>) -> String {
+    let state = match (pressed, release_after) {
+        (false, _) => "up".to_owned(),
+        (true, Some(seconds)) if seconds > 0 => {
+            format!("down, released in {}", style::duration(u64::from(seconds)))
+        }
+        (true, _) => "down".to_owned(),
+    };
+    output::block(theme, None, &[("Button".into(), state)])
 }
 
 /// Reset a stopped image to a fresh device, so that its next boot needs
@@ -484,7 +484,7 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
     output.block(
         &json!({"path": path.display().to_string(), "wiped": true}),
         None,
-        &[("Path", "path"), ("Wiped", "wiped")],
+        WIPE_ROWS,
     )
 }
 
@@ -619,16 +619,25 @@ fn report(
     document["path"] = json!(image.display().to_string());
     document["created"] = json!(created);
     document["started"] = json!(started);
-    output.block(
-        &document,
-        None,
+    output.result(&document, |theme| start_block(theme, &document))
+}
+
+/// The started emulator's block, titled with its name, or with its image's
+/// file name when it has none.
+fn start_block(theme: &Theme, document: &Value) -> String {
+    let title = document["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .or_else(|| document["image"].as_str());
+    output::fields(
+        theme,
+        document,
+        title,
         &[
             ("Locator", "locator"),
-            ("Image", "image"),
-            ("Created", "created"),
-            ("Started", "started"),
+            ("Serial", "serial"),
+            ("Image", "path"),
             ("Environment", "environment"),
-            ("Ready", "ready"),
             ("Expires", "expires"),
         ],
     )
@@ -767,17 +776,112 @@ fn iso8601(seconds: u64) -> Option<String> {
         .ok()
 }
 
+/// Tests of the result layouts, on invented emulators.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::style::Color;
     use tempfile::TempDir;
 
+    /// A list prints its columns in order, and an empty one its sentence.
+    #[test]
+    fn test_list_result_columns_and_empty_sentence() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        let rows = [
+            json!({
+                "locator": "emulator:18181", "image": "lab.ark", "ready": true,
+                "name": "Lab Emulator", "serial": "emulator-1234567-1",
+                "environment": "develop", "expires": null,
+            }),
+            json!({"locator": "emulator:18182", "ready": false}),
+        ];
+        assert_eq!(
+            output::table(&theme, &rows, LIST_COLUMNS, "No emulators running"),
+            "LOCATOR         NAME          SERIAL              ENVIRONMENT  READY  EXPIRES\nemulator:18181  Lab Emulator  emulator-1234567-1  develop      yes    -\nemulator:18182  -             -                   -            no     -",
+            "list columns and plain readiness"
+        );
+        assert_eq!(
+            output::table(&theme, &[], LIST_COLUMNS, "No emulators running"),
+            "No emulators running",
+            "empty inventory"
+        );
+    }
+
+    /// A start's block takes the emulator's name as its title, or the image's
+    /// file name, and shows the image's full path.
+    #[test]
+    fn test_start_result_uses_the_name_or_image_title() {
+        let path = dirs::home_dir().unwrap().join("arks/lab.ark");
+        let shown = if cfg!(any(target_os = "macos", target_os = "linux")) {
+            "~/arks/lab.ark".to_owned()
+        } else {
+            path.display().to_string()
+        };
+        let theme = Theme::fixed(200, Color::Off, true);
+        for (name, title) in [
+            (Some("Lab Emulator"), "Lab Emulator"),
+            (None, "lab.ark"),
+            (Some(""), "lab.ark"),
+        ] {
+            let document = json!({
+                "locator": "emulator:18181", "name": name,
+                "serial": "emulator-1234567-1", "image": "lab.ark",
+                "path": path.display().to_string(), "environment": "develop",
+                "ready": true, "created": true, "started": true, "expires": null,
+            });
+            assert_eq!(
+                start_block(&theme, &document),
+                format!(
+                    "{title}\n  Locator      emulator:18181\n  Serial       emulator-1234567-1\n  Image        {shown}\n  Environment  develop\n  Expires      -"
+                ),
+                "name={name:?}"
+            );
+        }
+    }
+
+    /// A wipe's block shows only its path, and JSON keeps the wiped flag.
+    #[test]
+    fn test_wipe_result_keeps_only_the_path() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        let document = json!({"path": "lab.ark", "wiped": true});
+        assert_eq!(
+            output::fields(&theme, &document, None, WIPE_ROWS),
+            "  Path  lab.ark",
+            "wipe block"
+        );
+        assert_eq!(document["wiped"], true, "JSON completion flag");
+    }
+
+    /// A button's result is its state after the command, with durations in the
+    /// house format.
+    #[test]
+    fn test_button_result_states_and_scheduled_releases() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        for (pressed, delay, expected) in [
+            (false, None, "up"),
+            (false, Some(0), "up"),
+            (true, None, "down"),
+            (true, Some(0), "down"),
+            (true, Some(5), "down, released in 5s"),
+            (true, Some(62), "down, released in 1m 02s"),
+            (true, Some(3900), "down, released in 1h 05m"),
+        ] {
+            assert_eq!(
+                button_block(&theme, pressed, delay),
+                format!("  Button  {expected}"),
+                "pressed={pressed}, delay={delay:?}"
+            );
+        }
+    }
+
+    /// JSON keeps a timestamp as its whole UTC instant.
     #[test]
     fn test_a_timestamp_reads_as_a_utc_instant() {
-        assert_eq!(iso8601(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(iso8601(0).as_deref(), Some("1970-01-01T00:00:00Z"), "epoch");
         assert_eq!(
             iso8601(1_788_000_000).as_deref(),
-            Some("2026-08-29T10:40:00Z")
+            Some("2026-08-29T10:40:00Z"),
+            "expiry instant"
         );
     }
 

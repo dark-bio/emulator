@@ -10,6 +10,7 @@ pub(crate) mod args;
 pub(crate) mod commands;
 mod doctor;
 pub(crate) mod help;
+mod local_time;
 pub(crate) mod output;
 mod style;
 

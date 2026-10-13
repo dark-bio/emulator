@@ -13,6 +13,16 @@ use std::process::{Command, Output};
 
 mod support;
 
+#[cfg(unix)]
+#[path = "../src/ipc/local.rs"]
+#[allow(dead_code)] // only its listener serves the fixtures
+mod local;
+
+#[cfg(unix)]
+#[path = "../src/ipc/http.rs"]
+#[allow(dead_code)] // only its request reader serves the fixtures
+mod http;
+
 /// Every command the tool has, in the order the root lists them.
 const COMMANDS: [&str; 9] = [
     "start",
@@ -44,6 +54,156 @@ fn stdout(output: &Output) -> String {
 /// What a run put on stderr.
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The version is one plain line, or one JSON field, with nothing on stderr.
+#[test]
+fn test_version_is_one_line_or_one_json_field() {
+    let json = run(&["--json", "--version"]);
+    assert!(json.status.success(), "JSON version: {}", stderr(&json));
+    assert!(json.stderr.is_empty(), "JSON version stderr");
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(document.as_object().unwrap().len(), 1, "version document");
+    let version = document["version"].as_str().unwrap();
+    if let Some(stamp) = option_env!("ARK_EMULATOR_VERSION") {
+        assert_eq!(version, stamp, "build script's stamp");
+    }
+    for flag in ["--version", "-V"] {
+        let output = run(&[flag]);
+        assert!(output.status.success(), "{flag}: {}", stderr(&output));
+        assert!(output.stderr.is_empty(), "{flag} stderr");
+        assert_eq!(
+            stdout(&output),
+            format!("ark-emulator {version}\n"),
+            "{flag}"
+        );
+    }
+}
+
+/// A list sorts by port, and a start on a booted image prints its note and
+/// keeps its whole JSON.
+#[cfg(unix)]
+#[test]
+fn test_running_emulator_results() {
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::time::Duration;
+
+    // Keep the fixture and its commands apart from any live emulator
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if std::env::var_os("ARK_EMULATOR_RESULT_TEST").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "test_running_emulator_results", "--nocapture"])
+            .env("ARK_EMULATOR_RESULT_TEST", "1")
+            .env(local::TEST_NAMESPACE, local::identity())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        return;
+    }
+
+    // The registry knows the invented image by its path's digest
+    let directory = tempfile::TempDir::new().unwrap();
+    let home = directory.path().canonicalize().unwrap();
+    let image = home.join("lab.ark");
+    std::fs::write(&image, []).unwrap();
+    let digest = format!("{:x}", Sha256::digest(image.as_os_str().as_bytes()));
+    let server = local::Server::bind_test("registry-18180").unwrap();
+    // The expiry is 2026-11-12 at 23:30 UTC
+    let instance = serde_json::json!({
+        "port": 18181, "disk": "lab.ark", "disk_id": &digest[..16],
+        "ready": true, "name": "Lab Emulator", "serial": "emulator-1234567-1",
+        "env": "develop", "expiry": 1_794_526_200_u64,
+    });
+    let unready = serde_json::json!({
+        "port": 18182, "disk": "other.ark", "disk_id": "0123456789abcdef", "ready": false,
+    });
+    let listing = serde_json::json!({"version": 1, "instances": [unready, instance]});
+
+    // Serve the expected reads without waiting for a guest or a timer
+    let worker = std::thread::spawn(move || {
+        for _ in 0..6 {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.method().as_str(), "GET", "registry request");
+            request
+                .respond(tiny_http::Response::from_string(listing.to_string()))
+                .unwrap();
+        }
+    });
+    let invoke = |args: &[&str]| {
+        Command::new(support::executable())
+            .args(args)
+            .env("CI", "1")
+            .env("NO_COLOR", "1")
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("TZ", "UTC-1")
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join("data"))
+            .output()
+            .unwrap()
+    };
+
+    // The local date crosses midnight, and the image stays out of the table
+    let list = invoke(&["list"]);
+    assert!(list.status.success(), "list: {}", stderr(&list));
+    assert_eq!(
+        stdout(&list),
+        "LOCATOR         NAME          SERIAL              ENVIRONMENT  READY  EXPIRES\nemulator:18181  Lab Emulator  emulator-1234567-1  develop      yes    2026-11-13\nemulator:18182  -             -                   -            no     -\n",
+        "list result"
+    );
+    let json = invoke(&["list", "--json"]);
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json.status.success(), "JSON list: {}", stderr(&json));
+    assert_eq!(document["emulators"][0]["image"], "lab.ark", "JSON image");
+    assert_eq!(
+        document["emulators"][0]["expires"], "2026-11-12T23:30:00Z",
+        "UTC expiry"
+    );
+    assert_eq!(document["emulators"][1]["port"], 18182, "port order");
+
+    // A booted image gets its note before the titled block
+    let started = invoke(&["start", "--image", image.to_str().unwrap()]);
+    assert!(started.status.success(), "start: {}", stderr(&started));
+    assert_eq!(
+        stderr(&started),
+        "note: lab.ark is already booted\n\n",
+        "already booted note"
+    );
+    assert_eq!(
+        stdout(&started),
+        "Lab Emulator\n  Locator      emulator:18181\n  Serial       emulator-1234567-1\n  Image        ~/lab.ark\n  Environment  develop\n  Expires      2026-11-13 00:30 +01:00\n",
+        "start result"
+    );
+    let json = invoke(&["start", "--image", image.to_str().unwrap(), "--json"]);
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json.status.success(), "JSON start: {}", stderr(&json));
+    assert_eq!(document["image"], "lab.ark", "JSON image name");
+    assert_eq!(
+        document["path"],
+        image.display().to_string(),
+        "JSON full path"
+    );
+    assert_eq!(document["ready"], true, "JSON readiness");
+    assert_eq!(document["created"], false, "JSON image creation");
+    assert_eq!(document["started"], false, "JSON boot result");
+    assert_eq!(
+        document["expires"], "2026-11-12T23:30:00Z",
+        "JSON start expiry"
+    );
+    assert_eq!(
+        stderr(&json),
+        "{\"event\":\"note\",\"message\":\"lab.ark is already booted\"}\n",
+        "JSON note"
+    );
+    worker.join().unwrap();
 }
 
 /// The doctor shows the home directory as `~` for reading, while JSON keeps
@@ -196,7 +356,8 @@ fn test_update_entry_point_is_silent_under_ci() {
     assert!(output.stderr.is_empty());
 }
 
-/// A fresh isolated answer prints one note while help and invalid invocations stay quiet.
+/// A published build prints the kept answer's note, and a local build never
+/// reads it.
 #[cfg(unix)]
 #[test]
 fn test_update_note_preserves_command_output_and_excludes_noncommands() {
@@ -252,7 +413,7 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
         command.output().unwrap()
     };
 
-    // The note repeats in both outputs without changing the result or exit
+    // Published builds repeat the note without changing the result or exit
     let message = format!(
         "Ark Emulator {newest} is available, this is {version}; download it from https://github.com/dark-bio/emulator"
     );
@@ -287,7 +448,9 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
                     "{case:?}, json={json}, CI={ci:?}"
                 );
                 let text = stderr(&output);
-                if json {
+                if version.pre.as_str() == "local" {
+                    assert_eq!(text, stderr(&baseline), "local build: {arguments:?}");
+                } else if json {
                     let events: Vec<serde_json::Value> = text
                         .lines()
                         .map(|line| serde_json::from_str(line).unwrap())
@@ -359,6 +522,40 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
         assert!(!stderr(&output).contains("is available"), "{arguments:?}");
     }
     assert_eq!(std::fs::read(cache.join("update.json")).unwrap(), answer);
+
+    // A local build's entry points leave even a stale answer alone
+    if version.pre.as_str() == "local" {
+        let stale = b"{\"asked\":\"2000-01-01T00:00:00Z\",\"newest\":\"99.0.0\"}";
+        std::fs::write(cache.join("update.json"), stale).unwrap();
+        for arguments in [vec!["list"], vec!["__update"], vec!["doctor", "--json"]] {
+            let output = invoke(&arguments, None);
+            assert!(!stderr(&output).contains("is available"), "{arguments:?}");
+            if arguments[0] == "__update" {
+                assert!(output.status.success(), "local detached lookup");
+                assert!(
+                    output.stdout.is_empty() && output.stderr.is_empty(),
+                    "silent lookup"
+                );
+            }
+            if arguments[0] == "doctor" {
+                let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let check = document["checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|check| check["name"] == "update")
+                    .unwrap();
+                assert_eq!(check["result"], "skip", "local doctor lookup");
+                assert_eq!(check["detail"], "local build", "local doctor reason");
+                assert_eq!(document["version"], version.to_string(), "doctor stamp");
+            }
+            assert_eq!(
+                std::fs::read(cache.join("update.json")).unwrap(),
+                stale,
+                "{arguments:?}"
+            );
+        }
+    }
 }
 
 #[test]
