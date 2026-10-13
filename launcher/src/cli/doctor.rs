@@ -26,6 +26,7 @@ use crate::update;
 /// Run every check and print the list, then fail with the first failure.
 pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(), Error> {
     let mut checks = Checks::default();
+    let notice = output.checking("ark-emulator");
     checks.ark_emulator(
         env!("ARK_EMULATOR_VERSION"),
         cfg!(emulator_local),
@@ -38,6 +39,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
             )
         },
     );
+    drop(notice);
     let arch = GuestArch::native().ok_or_else(|| {
         Error::new(
             Code::FirmwareMissing,
@@ -49,6 +51,7 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
     })?;
     let libs = bundle::resolve_qemu_libs(paths.resources.as_deref());
 
+    let notice = output.checking("qemu");
     let emulator = qemu::resolve_qemu(arch);
     let qemu_version = emulator.version(libs.as_deref());
     match &qemu_version {
@@ -70,7 +73,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         ),
     }
     checks.shorten_path(&emulator.binary);
+    drop(notice);
 
+    let notice = output.checking("firmware");
     let firmware = bundle::bundled_firmware(paths.resources.as_deref(), arch);
     let firmware_version = bundle::firmware_version(paths.resources.as_deref(), arch);
     match &firmware {
@@ -92,6 +97,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         ),
     }
 
+    drop(notice);
+
+    let notice = output.checking("acceleration");
     let accel = qemu::accelerator(arch);
     if accel == "tcg" {
         checks.fail(
@@ -106,8 +114,13 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         checks.ok("acceleration", accel);
     }
 
-    checks.directory("data", &paths.data);
+    drop(notice);
 
+    let notice = output.checking("data");
+    checks.directory("data", &paths.data);
+    drop(notice);
+
+    let notice = output.checking("settings");
     let settings = match Settings::load(&paths.data) {
         Ok(settings) => {
             checks.ok("settings", &settings.path().display().to_string());
@@ -122,7 +135,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         }
     };
     checks.shorten_path(&paths.data);
+    drop(notice);
 
+    let notice = output.checking("image");
     let image = settings
         .as_ref()
         .and_then(|settings| settings.disk().map(Path::to_path_buf));
@@ -150,8 +165,13 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         checks.shorten_path(image);
     }
 
-    checks.directory("logs", &diagnostics::logs_dir(&paths.data));
+    drop(notice);
 
+    let notice = output.checking("logs");
+    checks.directory("logs", &diagnostics::logs_dir(&paths.data));
+    drop(notice);
+
+    let notice = output.checking("registry");
     let mut registry_warnings = Vec::new();
     let registry = discovery::CLIENT.list(|warning| registry_warnings.push(warning));
     match &registry {
@@ -169,6 +189,9 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
         ),
     }
 
+    drop(notice);
+
+    let notice = output.checking("ports");
     match HostPort::reserve() {
         Ok(port) => checks.ok("ports", &format!("{} free", port.port())),
         Err(err) => checks.fail(
@@ -177,6 +200,8 @@ pub(crate) fn doctor(output: &Output, paths: &Paths, timeout: u64) -> Result<(),
                 .hint("stop an emulator, or pass --port to choose one"),
         ),
     }
+
+    drop(notice);
 
     let document = json!({
         "version": env!("ARK_EMULATOR_VERSION"),

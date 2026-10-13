@@ -193,6 +193,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
 
     let created = !image.exists();
     output.event("step", format!("booting {}", image.display()));
+    output.booting(&image, created);
     let child = spawn(boot, arch, &image, address).map_err(|err| Error::io(format!("{err:#}")))?;
     // Held until the child exists, so two starts issued together cannot both
     // settle on this port. The moment between here and the child's QEMU
@@ -212,6 +213,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     };
     let wait = Wait::new(&image, unready, created, true);
     let instance = wait.ready(Some((child, &log)), global, output, paths)?;
+    output.end_stage();
     warn_environment(output, boot, &instance);
     report(output, paths, &instance, &image, created, true)
 }
@@ -278,6 +280,7 @@ impl<'a> Wait<'a> {
                 self.last = instance.clone();
             }
             if Instant::now() >= deadline {
+                output.fail_stage();
                 report(
                     output,
                     paths,
@@ -336,6 +339,15 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
     let deadline = Instant::now() + Duration::from_secs(global.timeout);
     for instance in &targets {
         output.event("step", format!("asking {} to stop", locator(instance)));
+        let notice = output.notice(&format!(
+            "Stopping {}",
+            instance
+                .name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| locator(instance))
+        ));
         let result = match &instance.control {
             Some(endpoint) => control::stop(endpoint, instance.port, deadline),
             None => Err(Error::new(
@@ -344,6 +356,7 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
             )
             .hint("update Ark Emulator and restart all running emulators, including the registry host")),
         };
+        drop(notice);
         if let Err(mut err) = result {
             if !done.is_empty() || err.code == Code::Timeout {
                 output.block(&stopped(&done), None, &[("Stopped", "stopped")])?;

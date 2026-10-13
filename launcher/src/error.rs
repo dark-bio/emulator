@@ -49,13 +49,14 @@ pub(crate) enum Code {
     ButtonUnavailable,
     /// A wait on a machine ran out.
     Timeout,
+    /// Ctrl-C answered a question.
+    Interrupted,
 }
 
 impl Code {
-    /// Every code, in the order the output topic lists them, which the test
-    /// on that topic walks.
+    /// Every code, grouped by exit class, which the topic's test walks.
     #[cfg(test)]
-    pub(crate) const ALL: [Code; 18] = [
+    pub(crate) const ALL: [Code; 19] = [
         Code::ConfirmationRequired,
         Code::DiskMissing,
         Code::Io,
@@ -74,6 +75,7 @@ impl Code {
         Code::ControlUnreachable,
         Code::ButtonUnavailable,
         Code::Timeout,
+        Code::Interrupted,
     ];
 
     /// The code as a caller reads it.
@@ -97,12 +99,13 @@ impl Code {
             Code::ControlUnreachable => "control-unreachable",
             Code::ButtonUnavailable => "button-unavailable",
             Code::Timeout => "timeout",
+            Code::Interrupted => "interrupted",
         }
     }
 
     /// The exit class, one of the numbers the house tools share: 1 for a
     /// local file or a confirmation, 2 for usage, 3 for an emulator that
-    /// cannot be reached, 7 for a wait that ran out.
+    /// cannot be reached, 7 for a wait that ran out, 130 for an interruption.
     pub(crate) fn exit(self) -> i32 {
         match self {
             Code::Usage => 2,
@@ -123,6 +126,7 @@ impl Code {
             | Code::ControlUnreachable
             | Code::ButtonUnavailable => 3,
             Code::Timeout => 7,
+            Code::Interrupted => 130,
         }
     }
 }
@@ -169,7 +173,7 @@ impl Error {
 
     /// The error object, which is what `--json` carries.
     pub(crate) fn json(&self) -> serde_json::Value {
-        serde_json::json!({"code": self.code.name(), "message": self.message})
+        serde_json::json!({"code": self.code.name(), "message": self.message, "hints": self.hints})
     }
 }
 

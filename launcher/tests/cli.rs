@@ -400,6 +400,10 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
                 event["event"].is_string(),
                 "JSON event, present={present}: {line}"
             );
+            assert_ne!(
+                event["event"], "hint",
+                "doctor keeps error hints inside the error event"
+            );
             if event["event"] == "error" {
                 let first = checks.iter().find(|row| row["result"] == "fail").unwrap();
                 assert_eq!(
@@ -778,6 +782,20 @@ fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
     let event: serde_json::Value = serde_json::from_str(first).expect("one event per line");
     assert_eq!(event["event"], "error");
     assert_eq!(event["error"]["code"], "usage");
+    assert_eq!(
+        stderr(&json).lines().count(),
+        1,
+        "error hints are not separate events"
+    );
+    assert_eq!(
+        event["error"]["hints"],
+        serde_json::json!(["`ark-emulator help` lists the commands and the topics"]),
+        "error event hints"
+    );
+    assert_eq!(
+        document["error"], event["error"],
+        "the result and event carry the same error"
+    );
 }
 
 #[test]
@@ -882,27 +900,39 @@ fn test_headless_startup_error_without_a_display_or_no_input_flag() {
         "not a directory",
     )
     .unwrap();
-    let output = Command::new(support::executable())
-        .args(["--headless", "--json"])
-        .env_remove("DISPLAY")
-        .env_remove("WAYLAND_DISPLAY")
-        .env("XDG_DATA_HOME", directory.path())
-        .env("CI", "1")
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let events: Vec<serde_json::Value> = stderr(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let error = events
-        .iter()
-        .find(|event| event["event"] == "error")
-        .unwrap();
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("could not create the data directory")
-    );
+    for log in [false, true] {
+        let mut command = Command::new(support::executable());
+        command.args(["--headless", "--json"]);
+        if log {
+            command.args(["--log", "debug"]);
+        }
+        let output = command
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env("XDG_DATA_HOME", directory.path())
+            .env("CI", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "log={log}");
+        let events: Vec<serde_json::Value> = stderr(&output)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let error = events
+            .iter()
+            .find(|event| event["event"] == "error")
+            .unwrap();
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("could not create the data directory"),
+            "log={log}, startup cause"
+        );
+        assert_eq!(
+            events.iter().any(|event| event["event"] == "log"),
+            log,
+            "foreground logs need --log"
+        );
+    }
 }

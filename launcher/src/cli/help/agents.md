@@ -49,9 +49,10 @@ Read `ark help agents` before driving the Ark itself.
 
 - The exit code is the outcome. 0 is done, 1 a local file, a confirmation
   or a failed launch, 2 usage, 3 an emulator in the way or out of reach, 7
-  a wait that ran out, 130 Ctrl-C and 143 SIGTERM.
+  a wait that ran out, 130 Ctrl-C, or Ctrl-Break on Windows, and 143
+  SIGTERM.
 - A failure prints error[code]: message, then hint: lines naming the next
-  step. Codes are stable, and `ark-emulator help output` lists every one
+  step. Under --json the error object carries the hints. Codes are stable, and `ark-emulator help output` lists every one
   with its next step.
 - A command that did part of its work keeps that result on stdout and still
   exits non-zero, such as a stop that stopped some emulators before one

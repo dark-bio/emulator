@@ -1,8 +1,8 @@
 # Output
 
 stdout carries only the result of a command. stderr carries everything read
-along the way: notes, warnings, hints, steps, logs and errors. Keep the two
-apart when parsing.
+along the way: progress, notes, warnings, hints, steps, logs and errors.
+Keep the two apart when parsing.
 
 ## Reading output
 
@@ -26,23 +26,26 @@ Every stderr line under --json is one event, however long its message:
 
     {"event":"note","message":"emulator.ark is already booted"}
 
-The kinds are note, warning, hint, step, log and error. An error event
-carries the error object in place of a message, and a log event also
-carries level, target and fields. A caller that merged the two streams
+The kinds are progress, note, warning, hint, step, log and error. A
+progress event also carries stage, phase, step, steps, percent, done_bytes,
+total_bytes and remaining_seconds, each null when unknown. An error event
+carries the error object, hints included, in place of a message, and a log
+event also carries level, target and fields. A caller that merged the two streams
 drops the lines starting with `{"event":` and keeps the document.
 
 ## Events and verbosity
 
--q hides notes, warnings and steps, and keeps errors, hints and logs. -v
-adds steps. --log debug adds the launcher's diagnostics, including the log
+-q hides progress, notes, warnings and steps, and keeps errors, hints and
+logs. -v adds steps. --log debug adds the launcher's diagnostics, including the log
 of an emulator that start launches, and --log trace adds every request to
 the registry.
 
-## Bare runs and log files
+## Runs with no command, and log files
 
-A bare run has no result, so its stdout stays empty, apart from a run with
---kernel and --initrd, which gives stdout to the guest console. Its stderr
-carries the launcher's log lines, as log events under --json.
+A run with no command has no result, so its stdout stays empty, apart from
+a run with --kernel and --initrd, which gives stdout to the guest console.
+Its stderr narrates the boot, and carries the launcher's log lines only
+with --log, as log events under --json.
 
 Every emulator writes its launcher's diagnostics, what QEMU says included,
 to a log file in the data directory, named after the port it holds. Each
@@ -73,10 +76,11 @@ and the note.
 
 A failure prints error[code]: message on stderr, then hint: lines naming
 the next step. Under --json the error event carries the error object, with
-its code and message. A command with no result prints nothing on stdout, or
-under --json a document holding only the error:
+its code, message and hints, and no separate hint events follow. A command
+with no result prints nothing on stdout, or under --json a document holding
+only the error:
 
-    {"error": {"code": "no-emulator", "message": "no emulator is running"}}
+    {"error": {"code": "no-emulator", "message": "no emulator is running", "hints": ["`ark-emulator start` boots one"]}}
 
 A command that did part of its work keeps that result on stdout and still
 exits non-zero. A stop that fails or times out lists the emulators it
@@ -138,5 +142,9 @@ Exit 7 is a wait that ran out.
   the emulator keeps booting or is still shutting down, or a button reply
   did not come and its outcome is unknown.
 
-Exit 130 and 143 are Ctrl-C and SIGTERM. During a start they end only the
+Exit 130 and 143 are Ctrl-C and SIGTERM, and on Windows Ctrl-Break counts
+as Ctrl-C and a closed console as SIGTERM. During a start they end only the
 wait, and the emulator keeps booting.
+
+- `interrupted` means Ctrl-C answered the wipe question, so the image stays
+  as it was.

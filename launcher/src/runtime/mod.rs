@@ -27,6 +27,7 @@ use tracing::debug;
 
 use crate::bundle::{Firmware, Paths, resolve_firmware, resolve_qemu_libs};
 use crate::cli::args::Boot;
+use crate::cli::output::Output;
 use crate::diagnostics;
 use crate::ipc::{control, discovery, registry};
 use crate::platform;
@@ -151,14 +152,17 @@ pub(crate) fn prepare(
 pub(crate) struct Runtime {
     /// The hardware state shown by an optional frontend.
     pub(crate) hardware: Controller,
+    /// Where the boot narrates, shared with the command line or the window.
+    output: Output,
 }
 
 impl Runtime {
     /// Install lifecycle handling before starting QEMU.
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(output: Output) -> Result<Self> {
         platform::install_shutdown()?;
         Ok(Self {
             hardware: Controller::default(),
+            output,
         })
     }
 
@@ -203,8 +207,10 @@ impl Runtime {
             });
         }
         let hardware = self.hardware.clone();
+        let output = self.output.clone();
         thread::spawn(move || {
-            let result = wait(&mut child, &hardware);
+            let result = wait(&mut child, &hardware, &output);
+            output.fail_stage();
             if result.is_err() {
                 stop_child(&mut child);
             }
@@ -228,12 +234,22 @@ impl Runtime {
 }
 
 /// Wait for QEMU while publishing heartbeats and surfacing registry failures.
-fn wait(child: &mut Child, hardware: &Controller) -> Result<ExitStatus> {
+fn wait(child: &mut Child, hardware: &Controller, output: &Output) -> Result<ExitStatus> {
     let mut next_beat = Instant::now() + discovery::HEARTBEAT;
+    let mut booted = false;
     loop {
         // Notice guest exit without waiting for another heartbeat interval
         if let Some(status) = child.try_wait().context("lost track of the QEMU process")? {
             return Ok(status);
+        }
+
+        // The boot ends where the registry's ready field turns true
+        if !booted {
+            let state = hardware.snapshot();
+            if state.connected && state.nameplate.known {
+                output.end_stage();
+                booted = true;
+            }
         }
 
         // Publication retries connection loss but returns permanent refusals

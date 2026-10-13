@@ -270,8 +270,8 @@ const CONTRACTS: &[Contract] = &[
                 Ctrl-C or SIGTERM; the firmware boots in about 10s with hardware \
                 acceleration, minutes without; --timeout plays no part",
             prints: "nothing on stdout, apart from the guest console of a run with \
-                --kernel and --initrd; the launcher's log lines on stderr, as log events \
-                under --json",
+                --kernel and --initrd; the boot's narration on stderr, and the \
+                launcher's log lines only with --log, as log events under --json",
             exit: "0 stopped; 1 launch, launcher or QEMU failure; 2 usage; 130/143 \
                 interrupted, device stopped",
             examples: "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
@@ -850,8 +850,7 @@ mod tests {
         }
     }
 
-    /// The output topic is checked against the codes the tool defines, not
-    /// against a second list of them.
+    /// The output topic names every error code the tool defines.
     #[test]
     fn test_the_output_topic_names_every_error_code() {
         let output = topic("output").unwrap();

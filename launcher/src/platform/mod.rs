@@ -88,8 +88,8 @@ pub(crate) fn install_shutdown() -> std::io::Result<()> {
     /// Keep the handler alive until cleanup ends, including console closure.
     unsafe extern "system" fn handler(event: u32) -> i32 {
         match event {
-            CTRL_C_EVENT => crate::runtime::shut_down(130),
-            CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            CTRL_C_EVENT | CTRL_BREAK_EVENT => crate::runtime::shut_down(130),
+            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
                 crate::runtime::shut_down(143)
             }
             _ => 0,

@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::Serialize;
+use tauri::Manager as _;
 
 use super::error_dialog;
 use crate::runtime::Pending;
@@ -232,6 +233,8 @@ pub(crate) fn start_emulator(
     }
 
     let pending = launcher.take().expect("checked just above");
+    app.state::<crate::cli::output::Output>()
+        .booting(&disk, false);
 
     // Past this point the ingredients are spent: a failure is QEMU's, and the
     // error window replaces the device face rather than the panel offering a

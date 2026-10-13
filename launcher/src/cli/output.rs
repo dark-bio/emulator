@@ -15,7 +15,10 @@
 //! line of a log, goes through the style module's escaping first, so nothing
 //! a device says can steer the terminal or pass for a line of the tool's own.
 
-use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
+mod narration;
+mod prompt;
+
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,9 +26,14 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use super::args::Global;
+use super::clock::Clock;
 use super::local_time;
 use super::style::{self, Role, Theme, wrap};
 use crate::error::{Code, Error};
+use narration::{Activity, Ticker, close_line, draw, end_activity};
+
+/// A stream shared with the redraw worker, which tests swap for a capture.
+type Writer = Arc<Mutex<Box<dyn io::Write + Send>>>;
 
 /// The two streams of one run, shared by everything that prints.
 #[derive(Clone)]
@@ -54,19 +62,62 @@ struct State {
     /// Whether a result has already been claimed.
     printed: AtomicBool,
 
-    /// Blank lines owed between the two streams.
-    spacing: Mutex<Spacing>,
+    /// The clock that times stages, redraws and the prompt's type-ahead.
+    clock: Clock,
+
+    /// The worker that redraws a live stage. It locks before the page, and
+    /// stops before an outcome prints.
+    ticker: Mutex<Option<Ticker>>,
+
+    /// What the page shows, shared with the redraw worker.
+    spacing: Arc<Mutex<Spacing>>,
+
+    /// Where results go, locked after the page.
+    stdout: Writer,
+
+    /// Where events go, locked after the page.
+    stderr: Writer,
 }
 
 /// What each stream last put on screen, which is what decides the blank lines
 /// between them. The two are read together as one page.
 #[derive(Default)]
 struct Spacing {
+    /// Whether a live line holds the cursor's row.
+    live: bool,
+
+    /// The stage in progress, kept until its outcome prints.
+    active: Option<Activity>,
+
+    /// The notice that holds the live line, if any.
+    notice: Option<u64>,
+
+    /// The next notice's number, so an old guard never erases a newer line.
+    next_notice: u64,
+
     /// Whether stderr has printed anything yet.
     err_printed: bool,
 
     /// Whether a result block is the last thing on stdout.
     out_block: bool,
+}
+
+/// A transient line, erased when its guard drops while it still holds the
+/// line.
+pub(crate) struct Notice(
+    /// The output and the line's number, absent when the notice was skipped.
+    Option<(Output, u64)>,
+);
+
+impl Drop for Notice {
+    fn drop(&mut self) {
+        if let Some((output, id)) = &self.0 {
+            let mut page = output.0.spacing.lock().expect("output not poisoned");
+            if page.notice == Some(*id) {
+                close_line(&mut page, &mut *output.0.stderr.lock().unwrap());
+            }
+        }
+    }
 }
 
 impl Output {
@@ -80,7 +131,11 @@ impl Output {
             out: Theme::new(global.json, false),
             err: Theme::new(global.json, true),
             printed: AtomicBool::new(false),
-            spacing: Mutex::new(Spacing::default()),
+            clock: Clock::default(),
+            ticker: Mutex::new(None),
+            spacing: Arc::new(Mutex::new(Spacing::default())),
+            stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
+            stderr: Arc::new(Mutex::new(Box::new(io::stderr()))),
         }))
     }
 
@@ -139,8 +194,8 @@ impl Output {
         let mut spacing = self.0.spacing.lock().expect("output not poisoned");
         write_result(
             &mut spacing,
-            &mut io::stdout().lock(),
-            &mut io::stderr().lock(),
+            &mut *self.0.stdout.lock().unwrap(),
+            &mut *self.0.stderr.lock().unwrap(),
             &text,
             self.json(),
         )
@@ -160,6 +215,120 @@ impl Output {
         self.0.printed.store(true, Ordering::SeqCst);
     }
 
+    /// Start the boot's stage, named after the image's file and whether the
+    /// image is new.
+    pub(crate) fn booting(&self, image: &Path, created: bool) {
+        let name = crate::runtime::disk::name_of(image);
+        let suffix = if created { ", a new image" } else { "" };
+        self.stage(
+            "booting",
+            &format!("Booting {name}{suffix}"),
+            &format!("Booted {name}{suffix}"),
+        );
+    }
+
+    /// Start a timed stage, ending the one before it, and show its first line
+    /// at once.
+    pub(crate) fn stage(&self, stage: &str, message: &str, completed: &str) {
+        if self.0.quiet {
+            return;
+        }
+        let mut ticker = self.0.ticker.lock().expect("output not poisoned");
+        drop(ticker.take());
+        {
+            let mut page = self.0.spacing.lock().expect("output not poisoned");
+            let mut writer = self.0.stderr.lock().unwrap();
+            let now = self.0.clock.now();
+            end_activity(
+                &self.0.err,
+                &mut page,
+                &mut *writer,
+                now,
+                self.json(),
+                false,
+            );
+            page.active = Some(Activity {
+                stage: style::printable(stage),
+                message: style::printable(message),
+                completed: style::printable(completed),
+                started: now,
+                drawn: None,
+            });
+            draw(&self.0.err, &mut page, &mut *writer, now, self.json());
+        }
+
+        // The worker holds the page and the stream, never this output
+        let (theme, page, writer, json) = (
+            self.0.err.clone(),
+            self.0.spacing.clone(),
+            self.0.stderr.clone(),
+            self.json(),
+        );
+        *ticker = Some(Ticker::start(self.0.clock.clone(), move |now| {
+            let mut page = page.lock().expect("output not poisoned");
+            draw(&theme, &mut page, &mut *writer.lock().unwrap(), now, json);
+        }));
+    }
+
+    /// End the stage in progress with its finished words and its time.
+    pub(crate) fn end_stage(&self) {
+        self.outcome(false);
+    }
+
+    /// End the stage in progress as failed, with its own words and its time.
+    pub(crate) fn fail_stage(&self) {
+        self.outcome(true);
+    }
+
+    /// Stop the redraws, then print the stage's outcome.
+    fn outcome(&self, failed: bool) {
+        let mut ticker = self.0.ticker.lock().expect("output not poisoned");
+        drop(ticker.take());
+        let mut page = self.0.spacing.lock().expect("output not poisoned");
+        end_activity(
+            &self.0.err,
+            &mut page,
+            &mut *self.0.stderr.lock().unwrap(),
+            self.0.clock.now(),
+            self.json(),
+            failed,
+        );
+    }
+
+    /// Show `Checking <name>` until the guard drops.
+    pub(crate) fn checking(&self, name: &str) -> Notice {
+        self.notice(&format!("Checking {name}"))
+    }
+
+    /// Show a transient line on a terminal until the guard drops, unless a
+    /// stage holds the line.
+    pub(crate) fn notice(&self, message: &str) -> Notice {
+        let mut page = self.0.spacing.lock().expect("output not poisoned");
+        if self.json() || self.0.quiet || !self.0.err.interactive || page.active.is_some() {
+            return Notice(None);
+        }
+        let mut writer = self.0.stderr.lock().unwrap();
+        close_line(&mut page, &mut *writer);
+        separate(&mut page, &mut *writer);
+        let theme = &self.0.err;
+        let line = format!(
+            "{} {}",
+            theme.glyph("›", ">"),
+            theme.inline(&style::printable(message))
+        );
+        let _ = write!(
+            writer,
+            "{}",
+            theme.truncate(&line, theme.width.saturating_sub(1))
+        );
+        page.live = true;
+        page.next_notice += 1;
+        let id = page.next_notice;
+        page.notice = Some(id);
+        let _ = writer.flush();
+        Notice(Some((self.clone(), id)))
+    }
+
     /// Write one stderr event, as a reading line or as one JSON object.
     pub(crate) fn event(&self, kind: &str, message: impl AsRef<str>) {
         if self.0.quiet && matches!(kind, "progress" | "note" | "warning" | "step") {
@@ -170,12 +339,17 @@ impl Output {
         }
         let message = style::printable(message.as_ref());
         let mut spacing = self.0.spacing.lock().expect("output not poisoned");
-        let mut stderr = io::stderr().lock();
+        let mut stderr = self.0.stderr.lock().unwrap();
+        let document = if kind == "progress" {
+            narration::progress(None, &message)
+        } else {
+            json!({"event": kind, "message": message})
+        };
         emit(
             &mut spacing,
-            &mut stderr,
+            &mut *stderr,
             self.json(),
-            &json!({"event": kind, "message": message}),
+            &document,
             &event(&self.0.err, kind, &message),
         );
     }
@@ -200,7 +374,7 @@ impl Output {
             })
             .collect();
         let mut spacing = self.0.spacing.lock().expect("output not poisoned");
-        let mut stderr = io::stderr().lock();
+        let mut stderr = self.0.stderr.lock().unwrap();
         let _ = writeln!(
             stderr,
             "{}",
@@ -217,10 +391,11 @@ impl Output {
     /// also lands on stdout, as the one member of an `error` envelope, when
     /// there is no result to replace.
     pub(crate) fn error(&self, error: &Error) {
+        self.fail_stage();
         if self.json() {
             if !self.printed() {
                 self.0.printed.store(true, Ordering::SeqCst);
-                let mut stdout = io::stdout().lock();
+                let mut stdout = self.0.stdout.lock().unwrap();
                 let _ = writeln!(
                     stdout,
                     "{}",
@@ -230,7 +405,7 @@ impl Output {
                 let _ = stdout.flush();
             }
             let mut spacing = self.0.spacing.lock().expect("output not poisoned");
-            let mut stderr = io::stderr().lock();
+            let mut stderr = self.0.stderr.lock().unwrap();
             let _ = writeln!(
                 stderr,
                 "{}",
@@ -238,10 +413,11 @@ impl Output {
             );
             spacing.err_printed = true;
             let _ = stderr.flush();
+            return;
         } else {
             let mut spacing = self.0.spacing.lock().expect("output not poisoned");
-            let mut stderr = io::stderr().lock();
-            separate(&mut spacing, &mut stderr);
+            let mut stderr = self.0.stderr.lock().unwrap();
+            separate(&mut spacing, &mut *stderr);
             let code = error.code.name();
             let line = event(
                 &self.0.err,
@@ -264,35 +440,54 @@ impl Output {
             return Err(Error::new(Code::ConfirmationRequired, refusal)
                 .hint(format!("pass `{flag}` to confirm without being asked")));
         }
-        {
-            let mut spacing = self.0.spacing.lock().expect("output not poisoned");
-            let mut stderr = io::stderr().lock();
-            separate(&mut spacing, &mut stderr);
-            let theme = &self.0.err;
-            let question = style::printable(question);
-            let line = if theme.interactive {
-                format!(
-                    "{} {} {}",
-                    theme.paint(Role::Attention, "?"),
-                    theme.inline(&question),
-                    theme.paint(Role::Muted, "(y/N)")
-                )
-            } else {
-                format!("{question} (y/N)")
-            };
-            let _ = write!(stderr, "{} ", wrap(&line, theme.width, 2));
-            spacing.err_printed = true;
+        self.confirm_with(
+            &mut prompt::Input::new()
+                .map_err(|err| Error::io(format!("could not open terminal input: {err}")))?,
+            question,
+        )
+    }
+
+    /// Ask the question through `input`, after dropping the keys typed ahead.
+    fn confirm_with(&self, input: &mut impl prompt::Keys, question: &str) -> Result<bool, Error> {
+        prompt::confirm(
+            input,
+            &self.0.clock,
+            false,
+            || {
+                let mut spacing = self.0.spacing.lock().expect("output not poisoned");
+                let mut stderr = self.0.stderr.lock().unwrap();
+                close_line(&mut spacing, &mut *stderr);
+                separate(&mut spacing, &mut *stderr);
+                let theme = &self.0.err;
+                let question = style::printable(question);
+                let line = if theme.interactive {
+                    format!(
+                        "{} {} {}",
+                        theme.paint(Role::Attention, "?"),
+                        theme.inline(&question),
+                        theme.paint(Role::Muted, "(y/N)")
+                    )
+                } else {
+                    format!("? {question} (y/N)")
+                };
+                write!(stderr, "{} ", wrap(&line, theme.width, 2))
+                    .and_then(|()| stderr.flush())
+                    .map_err(|err| Error::io(format!("could not write the question: {err}")))?;
+                spacing.err_printed = true;
+                Ok(())
+            },
+            |answer| {
+                let mut stderr = self.0.stderr.lock().unwrap();
+                writeln!(stderr, "{}", if answer { "yes" } else { "no" })
+                    .and_then(|()| stderr.flush())
+                    .map_err(|err| Error::io(format!("could not write the answer: {err}")))
+            },
+        )
+        .inspect_err(|_| {
+            let mut stderr = self.0.stderr.lock().unwrap();
+            let _ = writeln!(stderr);
             let _ = stderr.flush();
-        }
-        let mut answer = String::new();
-        io::stdin()
-            .lock()
-            .read_line(&mut answer)
-            .map_err(|err| Error::io(format!("could not read the answer: {err}")))?;
-        Ok(matches!(
-            answer.trim().to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ))
+        })
     }
 }
 
@@ -304,6 +499,7 @@ fn write_result(
     text: &str,
     json: bool,
 ) -> io::Result<()> {
+    close_line(spacing, stderr);
     if !json && spacing.err_printed {
         writeln!(stderr)?;
         stderr.flush()?;
@@ -322,6 +518,7 @@ fn emit(
     document: &Value,
     line: &str,
 ) {
+    close_line(spacing, stderr);
     if json {
         let _ = writeln!(stderr, "{document}");
     } else {

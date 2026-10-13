@@ -94,11 +94,7 @@ fn main() {
     }
     let output = output::Output::new(&cli.global);
     desktop::reporting(&output, cli.global.no_input || cli.boot.headless);
-    diagnostics::init(
-        &output,
-        cli.global.log,
-        cli.version || cli.command.is_some(),
-    );
+    diagnostics::init(&output, cli.global.log);
 
     // This reads compiled metadata without initializing a window system
     let context = tauri::generate_context!();

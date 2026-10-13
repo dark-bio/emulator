@@ -79,10 +79,10 @@ struct State {
 ///
 /// # Panics
 /// Panics if a global tracing subscriber has already been installed.
-pub(crate) fn init(output: &Output, level: Option<Log>, command: bool) {
-    // Commands keep diagnostics off stderr unless the caller requests them
+pub(crate) fn init(output: &Output, level: Option<Log>) {
+    // Diagnostics reach stderr only under --log
     if let Ok(mut state) = STATE.lock() {
-        state.output = (!command || level.is_some()).then(|| output.clone());
+        state.output = level.is_some().then(|| output.clone());
     }
     let level = if level == Some(Log::Trace) {
         LevelFilter::TRACE
