@@ -285,7 +285,7 @@ impl<'a> Wait<'a> {
                 return Err(Error::new(
                     Code::Timeout,
                     format!(
-                        "the device was not ready within {} s and is still booting",
+                        "the device was not ready within {}s and is still booting",
                         global.timeout
                     ),
                 )

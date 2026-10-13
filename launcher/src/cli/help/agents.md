@@ -24,7 +24,7 @@ Read `ark help agents` before driving the Ark itself.
   display. Otherwise its process opens the device window, and a covered
   window or a locked screen does not pause the device.
 - A start takes seconds with hardware acceleration and minutes without.
-  --timeout, 120 s unless set, bounds the wait for the firmware. On a
+  --timeout, 120s unless set, bounds the wait for the firmware. On a
   timeout the emulator keeps booting, the command exits 7, and
   `ark-emulator list` shows when it is ready. Ctrl-C ends only the wait.
   Run a slow start in the background. Use your harness's background mode
@@ -104,7 +104,7 @@ on the Ark match their phone, and the press confirms the pairing at once. A
 headless emulator shows no colors, so `ark-emulator button press
 --release-after 0` presses it when the person asks for that. At any other
 time, a press without --release-after holds the button until
-`ark-emulator button release`, and a hold of 5 s arms a factory reset,
+`ark-emulator button release`, and a hold of 5s arms a factory reset,
 which erases the device's data and pairing once the button is let go.
 
 ### Start over

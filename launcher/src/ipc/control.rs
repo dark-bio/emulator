@@ -1344,7 +1344,7 @@ mod tests {
             drop(post);
         });
 
-        // Allow both accepts to pass through the listener's 100 ms accept poll
+        // Allow both accepts to pass through the listener's 100ms accept poll
         let error = button(&endpoint, true, None, Duration::from_secs(1)).unwrap_err();
         finished.send(()).unwrap();
         worker.join().unwrap();

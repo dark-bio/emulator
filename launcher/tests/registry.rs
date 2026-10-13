@@ -547,7 +547,7 @@ fn bounded(command: &mut Command, pid_file: &Path) -> Output {
                 // The pid comes only from the guest this fixture just launched
                 let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
             }
-            panic!("the registry failure did not reach the caller within 10 s");
+            panic!("the registry failure did not reach the caller within 10s");
         }
         thread::sleep(Duration::from_millis(20));
     }

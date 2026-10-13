@@ -50,6 +50,6 @@ incomplete, and a reader says so rather than showing an empty list.
   other readers ignore it.
 
 Every emulator republishes itself once a second, and an entry not refreshed
-for 15 s drops out, so an emulator that was killed outright leaves the
+for 15s drops out, so an emulator that was killed outright leaves the
 listing on its own. The listing is discovery, not identity, since only a
 handshake with the emulated Ark proves which device answered.

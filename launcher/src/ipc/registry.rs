@@ -16,11 +16,11 @@
 //! ```
 //!
 //! On host exit, the next publisher claims the port and native name. Every
-//! launcher republishes once a second, and entries expire after 15 s without
+//! launcher republishes once a second, and entries expire after 15s without
 //! a heartbeat. See [`super::discovery`] for takeover and failure handling.
 //!
 //! Browser discovery allows every origin and publishes basenames, never paths.
-//! It accepts bodyless requests with at most 8 KiB of headers and a 2 s read
+//! It accepts bodyless requests with at most 8 KiB of headers and a 2s read
 //! deadline. Four workers isolate slow clients while bounding concurrent work.
 //! Lifecycle commands use [`super::control`] without consulting the registry
 //! again after selecting targets.

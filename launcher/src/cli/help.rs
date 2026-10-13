@@ -267,7 +267,7 @@ const CONTRACTS: &[Contract] = &[
             requires: "a display unless --headless; a source build needs --kernel, --initrd \
                 and QEMU on PATH",
             time: "runs in the foreground until the window closes, `ark-emulator stop`, \
-                Ctrl-C or SIGTERM; the firmware boots in about 10 s with hardware \
+                Ctrl-C or SIGTERM; the firmware boots in about 10s with hardware \
                 acceleration, minutes without; --timeout plays no part",
             prints: "nothing on stdout, apart from the guest console of a run with \
                 --kernel and --initrd; the launcher's log lines on stderr, as log events \
@@ -289,7 +289,7 @@ const CONTRACTS: &[Contract] = &[
         footer: Some(ContractFooter {
             requires: "a free port from 18181 to 18280, or --port; a display unless \
                 --headless; a source build needs --kernel and --initrd",
-            time: "about 10 s with hardware acceleration, minutes without; --timeout \
+            time: "about 10s with hardware acceleration, minutes without; --timeout \
                 bounds the wait for the firmware, after which the emulator keeps \
                 booting",
             prints: "locator, image, created, started, environment, ready, expires; JSON \
@@ -340,7 +340,7 @@ const CONTRACTS: &[Contract] = &[
         paragraph: "Presses an emulated Ark's reset button from the command line. The window \
             and the command line hold the button independently, and it is down while \
             either holds it. While `ark pair` waits for the button, a press confirms \
-            the pairing at once. At any other time, a hold of 5 s arms a factory \
+            the pairing at once. At any other time, a hold of 5s arms a factory \
             reset, which erases the device's data and pairing once the button is let \
             go, and keeps its enrollment.",
         footer: None,

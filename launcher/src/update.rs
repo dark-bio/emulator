@@ -164,7 +164,7 @@ pub(crate) fn start(output: &Output, now: OffsetDateTime) {
     }
 }
 
-/// Runs the silent detached lookup, ending within 30 s whatever happens.
+/// Runs the silent detached lookup, ending within 30s whatever happens.
 pub(crate) fn run() {
     // Under CI the copy does nothing
     if disabled() {

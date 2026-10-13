@@ -55,7 +55,7 @@ emulator's file. The device itself never writes to it.
 At most once an hour, ark-emulator reads the redirect at
 https://github.com/dark-bio/emulator/releases/latest to learn the newest
 release. The request carries nothing about this computer, its emulators or
-the running version. It runs in a detached copy that exits within 30 s, so
+the running version. It runs in a detached copy that exits within 30s, so
 no command waits for it. The answer is kept in update.json in the
 emulator's cache directory.
 
