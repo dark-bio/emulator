@@ -72,6 +72,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Check out the pinned QEMU source
+        if: runner.os == 'Linux'
+        run: git submodule update --init --depth 1 third_party/qemu
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -108,19 +112,18 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-            qemu-system-x86 qemu-utils ipxe-qemu
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Identify QEMU package versions
-        # Unix bundles include package-manager dependencies that can change
-        # without a QEMU version bump. Windows pins its installer in the script.
+        # Linux pins the source and container; macOS collects Homebrew packages.
+        # Windows pins its installer in the script.
         if: github.ref_type != 'tag' && runner.os != 'Windows'
         id: qemu-packages
         shell: bash
         run: |
           packages="$RUNNER_TEMP/qemu-packages"
           if [ "$RUNNER_OS" = "Linux" ]; then
-            dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort > "$packages"
+            git rev-parse HEAD:third_party/qemu > "$packages"
           else
             formulae=(qemu)
             brew deps --formula qemu > "$RUNNER_TEMP/qemu-dependencies"
@@ -149,11 +152,17 @@ jobs:
           path: |
             launcher/binaries
             launcher/qemu-libs
-          key: qemu-v1-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh', '.github/packaging/qemu/*') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
+            target/qemu-linux/runtime
+            target/qemu-linux/artifacts
+          key: qemu-v2-${{ inputs.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/fetch-qemu-*', '.github/scripts/qemu-common.sh', '.github/packaging/qemu/*', 'tools/qemu-build/**', 'Makefile', 'Cargo.lock') }}-${{ steps.qemu-packages.outputs.hash || 'pinned' }}
 
-      - name: Fetch bundled QEMU (Linux)
+      - name: Build bundled QEMU (Linux)
         if: runner.os == 'Linux' && steps.qemu-cache.outputs.cache-hit != 'true'
-        run: .github/scripts/fetch-qemu-linux.sh
+        run: make qemu-linux
+
+      - name: Verify bundled QEMU (Linux)
+        if: runner.os == 'Linux'
+        run: make qemu-linux-check
 
       - name: Import the Apple signing credentials
         # A throwaway keychain rather than the login one, which on a runner is
@@ -443,6 +452,10 @@ jobs:
           for f in "target/$BUILD_PROFILE/portable/"*.zip; do cp "$f" "${prefix}.zip"; done
           for f in "target/$BUILD_PROFILE/bundle/deb/"*.deb; do cp "$f" "${prefix}.deb"; done
           for f in "target/$BUILD_PROFILE/bundle/appimage/"*.AppImage; do cp "$f" "${prefix}.AppImage"; done
+
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cp target/qemu-linux/artifacts/linux-amd64-qemu-sources.tar.xz "${prefix}-qemu-sources.tar.xz"
+          fi
 
           ls -la dist/
 

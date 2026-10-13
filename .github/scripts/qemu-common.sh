@@ -1,5 +1,5 @@
-# qemu-common.sh: the half of fetch-qemu-linux.sh and fetch-qemu-macos.sh that
-# does not differ between them. Sourced by both, never run on its own.
+# qemu-common.sh: QEMU sidecar, dependency and ROM collection for macOS.
+# Sourced by fetch-qemu-macos.sh, never run on its own.
 #
 # Only the host's own architecture is bundled, as the generic
 # "qemu-system-guest" sidecar. Bundling both would double the installer size.

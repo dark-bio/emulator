@@ -1,0 +1,12 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -173,6 +173,7 @@ foreach target : edk2_targets
+   if target in target_dirs
+     bzip2 = find_program('bzip2', required: get_option('install_blobs'))
+-    unpack_edk2_blobs = bzip2.found()
++    # Modified by Dark Bio AG, 2026-10-09: omit uninstalled firmware blobs.
++    unpack_edk2_blobs = bzip2.found() and get_option('install_blobs')
+     break
+   endif
+ endforeach
