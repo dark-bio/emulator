@@ -118,9 +118,16 @@ pub(crate) fn prepare(build: &Build) -> Result<()> {
         origins.push(json!({"name": name, "url": url, "revision": revision}));
     }
 
-    // The shipped BIOS and network ROMs have their own corresponding sources.
+    // Only amd64 ships a BIOS; discard source trees for unbundled firmware
     for name in ["seabios", "ipxe", "edk2"] {
         let path = format!("roms/{name}");
+        if name != "seabios" || build.target.arch() != "amd64" {
+            let unused = sources.join("qemu").join(&path);
+            if unused.is_dir() {
+                fs::remove_dir_all(unused)?;
+            }
+            continue;
+        }
         let entry = output(
             Command::new("git")
                 .arg("-C")

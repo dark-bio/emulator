@@ -378,7 +378,7 @@ pub(crate) fn spawn_qemu(
     let console = arch.serial();
     cmd.arg("-m")
         .arg(memory.to_string())
-        .args(["-nographic", "-kernel"])
+        .args(["-nographic", "-vga", "none", "-kernel"])
         .arg(&firmware.kernel)
         .args(["-initrd"])
         .arg(&firmware.initrd)
@@ -395,7 +395,8 @@ pub(crate) fn spawn_qemu(
             "user,id=net0,hostfwd=tcp:{}-:{GUEST_PORT}",
             host_port.addr()
         ))
-        .args(["-device", "virtio-net-pci,netdev=net0", "-drive"])
+        // Direct kernel boot needs no network boot ROM
+        .args(["-device", "virtio-net-pci,netdev=net0,romfile=", "-drive"])
         .arg(format!(
             "file={},if=none,id=disk0,format=qcow2,discard=unmap,detect-zeroes=unmap",
             disk.display()

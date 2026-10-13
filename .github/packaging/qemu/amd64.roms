@@ -1,5 +1,3 @@
 bios-256k.bin
-vgabios-stdvga.bin
 linuxboot_dma.bin
 kvmvapic.bin
-efi-virtio.rom

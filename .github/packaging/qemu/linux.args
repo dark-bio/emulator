@@ -7,7 +7,8 @@
 --enable-kvm
 --enable-tcg
 --enable-slirp
---enable-pixman
+--disable-pixman
+--enable-trace-backends=nop
 --disable-modules
 --disable-rust
 --disable-docs

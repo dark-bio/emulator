@@ -15,6 +15,6 @@ RUN printf '%s\n' \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential ca-certificates git ninja-build pkg-config python3 python3-venv \
     python3-tomli python3-wheel \
-    libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev xz-utils
+    libglib2.0-dev libslirp-dev zlib1g-dev xz-utils
 
 ENV LC_ALL=C.UTF-8

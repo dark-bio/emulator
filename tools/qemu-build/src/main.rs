@@ -13,6 +13,8 @@
 //!
 //! The Dockerfile pins Ubuntu 22.04 and a package snapshot. The device and
 //! feature lists retain q35, KVM, TCG, qcow2, SLIRP and virtio serial sockets.
+//! Graphics, network boot ROMs and trace instrumentation are omitted. The guest
+//! uses `-vga none` and `romfile=` on its virtio network device.
 //! Packaging rejects libraries outside `linux.libs` and collects their source
 //! packages, ROM sources and notices. `make qemu-linux-check` verifies hashes,
 //! library resolution and live disk operations in a bare Ubuntu container,

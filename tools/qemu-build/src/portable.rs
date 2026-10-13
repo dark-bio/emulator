@@ -78,7 +78,6 @@ pub(crate) fn build(build: &Build, jobs: usize) -> Result<()> {
             "--libs",
             "glib-2.0",
             "gmodule-no-export-2.0",
-            "pixman-1",
             "slirp",
             "zlib",
         ]))?;
@@ -300,15 +299,6 @@ fn dependencies(build: &Build, jobs: usize) -> Result<()> {
                 "--force-fallback-for=intl",
             ],
         ),
-        (
-            "pixman",
-            vec![
-                "-Dtests=disabled",
-                "-Ddemos=disabled",
-                "-Dgtk=disabled",
-                "-Dlibpng=disabled",
-            ],
-        ),
         ("libslirp", vec![]),
     ] {
         let directory = format!("dependency-build/{name}");
@@ -517,12 +507,6 @@ pub(crate) fn package(build: &Build) -> Result<()> {
         ("QEMU-LICENSE", "LICENSE"),
         ("QEMU-COPYING", "COPYING"),
         ("QEMU-COPYING.LIB", "COPYING.LIB"),
-        ("SeaBIOS", "roms/seabios/COPYING"),
-        ("SeaBIOS-LGPL", "roms/seabios/COPYING.LESSER"),
-        ("iPXE", "roms/ipxe/COPYING"),
-        ("iPXE-GPL", "roms/ipxe/COPYING.GPLv2"),
-        ("iPXE-UBDL", "roms/ipxe/COPYING.UBDL"),
-        ("EDK2", "roms/edk2/License.txt"),
         ("keycodemapdb", "subprojects/keycodemapdb/LICENSE.BSD"),
         ("keycodemapdb-GPL", "subprojects/keycodemapdb/LICENSE.GPL2"),
     ] {
@@ -538,6 +522,13 @@ pub(crate) fn package(build: &Build) -> Result<()> {
                 .join("sources/qemu/subprojects/dtc/BSD-2-Clause"),
             licenses.join("libfdt"),
         )?;
+    } else {
+        for (name, path) in [("SeaBIOS", "COPYING"), ("SeaBIOS-LGPL", "COPYING.LESSER")] {
+            fs::copy(
+                build.output.join("sources/qemu/roms/seabios").join(path),
+                licenses.join(name),
+            )?;
+        }
     }
     if build.target == Target::WindowsAmd64 {
         run(build.container("/work")?.args([
