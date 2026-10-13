@@ -268,6 +268,7 @@ impl Build {
             cfg!(target_os = "linux"),
             "cross-compile Windows with make qemu-windows on Linux amd64"
         );
+        self.prepare_base_image()?;
         let name = if self.target == Target::WindowsAmd64 {
             "windows"
         } else {
@@ -285,6 +286,24 @@ impl Build {
                     .join(format!(".github/packaging/qemu/{name}.Dockerfile")),
             )
             .arg(self.repo.join(".github/packaging/qemu")))
+    }
+
+    /// Pull the pinned base image with retries unless Docker already has it.
+    fn prepare_base_image(&self) -> Result<()> {
+        if Command::new("docker")
+            .args(["image", "inspect", &self.base_image])
+            .output()?
+            .status
+            .success()
+        {
+            return Ok(());
+        }
+        run_retry(Command::new("docker").args([
+            "pull",
+            "--platform",
+            "linux/amd64",
+            &self.base_image,
+        ]))
     }
 
     /// Prepare a container command with only generated build files writable.
@@ -359,6 +378,9 @@ impl Build {
             ])
             .arg(format!("{}:/work", self.output.display()))
             .args(["--workdir", directory]);
+        if image == self.base_image {
+            command.args(["--pull", "never"]);
+        }
         if self.target == Target::WindowsAmd64 {
             command.args([
                 "--env",
@@ -404,6 +426,18 @@ pub(crate) fn run(command: &mut Command) -> Result<()> {
         .with_context(|| format!("could not run {command:?}"))?;
     ensure!(status.success(), "{command:?} exited with {status}");
     Ok(())
+}
+
+/// Run a network command up to three times, waiting five then fifteen seconds.
+pub(crate) fn run_retry(command: &mut Command) -> Result<()> {
+    for delay in [5, 15] {
+        match run(command) {
+            Ok(()) => return Ok(()),
+            Err(error) => eprintln!("{error:#}; retrying in {delay} seconds"),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(delay));
+    }
+    run(command)
 }
 
 /// Capture stdout and include stderr when a command fails.

@@ -59,6 +59,9 @@ pub(crate) fn runtime(build: &Build) -> Result<()> {
             "runtime checksum mismatch for {path}"
         );
     }
+
+    // BuildKit's base layers may not exist in Docker's runnable image store
+    build.prepare_base_image()?;
     for name in ["qemu-system-guest", "qemu-img"] {
         let deps = output(
             build

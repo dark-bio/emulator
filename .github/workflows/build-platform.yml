@@ -306,7 +306,7 @@ jobs:
             exit 1
           fi
 
-          xcrun stapler staple "$dmg"
+          make -f .github/packaging/macos/Makefile staple ARTIFACT="$dmg"
 
           # Last use of the key. The cleanup step at the end of the job is the
           # backstop for the paths that exit before here.
@@ -326,10 +326,10 @@ jobs:
 
           if [ "$SIGN_MACOS" = "true" ]; then
             dmg="$(find "target/$BUILD_PROFILE/bundle/dmg" -maxdepth 1 -name '*.dmg')"
-            # stapler is the offline half: spctl alone also passes on an
-            # unstapled build for as long as this runner can reach Apple.
-            xcrun stapler validate "$app"
-            xcrun stapler validate "$dmg"
+            # Validate attached tickets as well as Gatekeeper acceptance.
+            # stapler also contacts Apple's ticket service during validation.
+            make -f .github/packaging/macos/Makefile validate ARTIFACT="$app"
+            make -f .github/packaging/macos/Makefile validate ARTIFACT="$dmg"
             spctl --assess --type exec --verbose=4 "$app"
             spctl --assess --type install --verbose=4 "$dmg"
 
@@ -353,7 +353,7 @@ jobs:
               ls -la "$mount" >&2
               status=1
             else
-              xcrun stapler validate "$inner" || status=$?
+              make -f .github/packaging/macos/Makefile validate ARTIFACT="$inner" || status=$?
             fi
 
             hdiutil detach "$mount" || hdiutil detach "$mount" -force
@@ -509,9 +509,10 @@ jobs:
           xattr -w com.apple.quarantine \
             "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$app"
           spctl --assess --type exec --verbose=4 "$app"
-          xcrun stapler validate "$app"
-          spctl --assess --type install --verbose=4 dist/*.dmg
-          xcrun stapler validate dist/*.dmg
+          make -f .github/packaging/macos/Makefile validate ARTIFACT="$app"
+          dmg="$(find dist -maxdepth 1 -name '*.dmg')"
+          spctl --assess --type install --verbose=4 "$dmg"
+          make -f .github/packaging/macos/Makefile validate ARTIFACT="$dmg"
 
       - name: Smoke test the portable app bundle
         # The bundle's own executable rather than `open`, which returns
