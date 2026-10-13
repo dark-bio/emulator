@@ -59,7 +59,7 @@ const WIPE_ROWS: &[(&str, &str)] = &[("Path", "path")];
 
 /// Run one command, print what it answers, and hand back the exit code. No
 /// command at all is the root's own answer, which is what `--version` asks
-/// for, since a bare run opens a window instead of coming through here.
+/// for, since a run with no command opens a window instead of coming here.
 pub(crate) fn run(
     command: Option<Command>,
     global: &Global,
@@ -101,7 +101,7 @@ fn dispatch(
     // Answered before anything is resolved, since a reader asking what a
     // command does may be on a computer where nothing else would work.
     match command {
-        Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all, true),
+        Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all),
         Some(Command::Completions { shell }) => return completions(shell, output),
         None => return version(output),
         _ => {}
@@ -175,7 +175,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
         Some(port) => HostPort::fixed(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
         None => HostPort::reserve().map_err(|err| {
             Error::new(Code::PortExhausted, format!("{err:#}"))
-                .hint("pass `--port` to choose the port yourself")
+                .hint("pass --port to choose the port yourself")
         })?,
     };
     let address = reservation.addr();
@@ -328,7 +328,7 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
     let mut targets = if all {
         running
     } else {
-        pick(&running, selector)?
+        pick(&running, selector, "stop")?
     };
     targets.sort_by_key(|instance| instance.port);
     if targets.is_empty() {
@@ -379,7 +379,12 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
         } => (true, emulator, release_after),
         ButtonAction::Release { emulator } => (false, emulator, None),
     };
-    let targets = pick(&listing(output)?, selector.as_deref())?;
+    let command = if pressed {
+        "button press"
+    } else {
+        "button release"
+    };
+    let targets = pick(&listing(output)?, selector.as_deref(), command)?;
     let instance = &targets[0];
     let endpoint = instance.control.as_ref().ok_or_else(|| {
         Error::new(
@@ -555,19 +560,23 @@ fn stopped(ports: &[u16]) -> Value {
 /// The running emulators a selector names, as `ark -d` reads one: an exact
 /// locator, a unique serial, a unique name or a unique image basename. The
 /// bare word `emulator`, like no selector at all, means the only one running.
-fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, Error> {
+fn pick(
+    running: &[Instance],
+    selector: Option<&str>,
+    command: &str,
+) -> Result<Vec<Instance>, Error> {
     let listed =
         |instances: &[Instance]| instances.iter().map(locator).collect::<Vec<_>>().join(", ");
     let Some(selector) = selector.filter(|selector| *selector != "emulator") else {
         return match running {
             [] => Err(Error::new(Code::NoEmulator, "no emulator is running")
-                .hint("`ark-emulator start` boots one")),
+                .hint("run `ark-emulator start` to boot one")),
             [only] => Ok(vec![only.clone()]),
             _ => Err(Error::new(
                 Code::AmbiguousEmulator,
                 format!("several emulators are running: {}", listed(running)),
             )
-            .hint("name one by its locator")),
+            .hint(selection_hint(command, &running[0]))),
         };
     };
     if let Some(port) = selector.strip_prefix("emulator:") {
@@ -578,7 +587,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                 Code::NoEmulator,
                 format!("no emulator is running as {selector}"),
             )
-            .hint("`ark-emulator list` shows what is")),
+            .hint("run `ark-emulator list` to see what is running")),
         };
     }
     let matches: Vec<&Instance> = running
@@ -600,7 +609,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                     "a port is named by its locator, emulator:{selector}"
                 ));
             }
-            Err(error.hint("`ark-emulator list` shows what is running"))
+            Err(error.hint("run `ark-emulator list` to see what is running"))
         }
         [only] => Ok(vec![only.clone()]),
         _ => Err(Error::new(
@@ -614,8 +623,22 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                     .join(", ")
             ),
         )
-        .hint("name one by its locator")),
+        .hint(selection_hint(command, matches[0]))),
     }
+}
+
+/// The hint for an ambiguous selection, the running command with a locator
+/// to paste.
+fn selection_hint(command: &str, instance: &Instance) -> String {
+    format!(
+        "name one, as in `ark-emulator {command} {}`{}",
+        locator(instance),
+        if command == "stop" {
+            ", or pass --all"
+        } else {
+            ""
+        },
+    )
 }
 
 /// Print what a start settled on: where the emulator is, which image it holds,
@@ -682,7 +705,7 @@ fn architecture(named: Option<GuestArch>) -> Result<GuestArch, Error> {
                 std::env::consts::ARCH
             ),
         )
-        .hint("pass `--arch` to name the architecture to boot")
+        .hint("pass --arch to name the architecture to boot")
     })
 }
 
@@ -922,21 +945,58 @@ mod tests {
             running(18182, "b.ark", None, Some("abc123")),
         ];
         let ports = |picked: Vec<Instance>| picked.iter().map(|i| i.port).collect::<Vec<_>>();
-        assert_eq!(ports(pick(&both, Some("emulator:18182")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both, Some("demo")).unwrap()), [18181]);
-        assert_eq!(ports(pick(&both, Some("b.ark")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both, Some("abc123")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both[..1], None).unwrap()), [18181]);
-        assert_eq!(ports(pick(&both[..1], Some("emulator")).unwrap()), [18181]);
-
-        assert_eq!(pick(&both, None).unwrap_err().code, Code::AmbiguousEmulator);
-        assert_eq!(pick(&[], None).unwrap_err().code, Code::NoEmulator);
         assert_eq!(
-            pick(&both, Some("emulator:1")).unwrap_err().code,
-            Code::NoEmulator
+            ports(pick(&both, Some("emulator:18182"), "stop").unwrap()),
+            [18182],
+            "locator"
         );
-        let bare = pick(&both, Some("18181")).unwrap_err();
-        assert_eq!(bare.code, Code::NoEmulator);
+        assert_eq!(
+            ports(pick(&both, Some("demo"), "stop").unwrap()),
+            [18181],
+            "name"
+        );
+        assert_eq!(
+            ports(pick(&both, Some("b.ark"), "stop").unwrap()),
+            [18182],
+            "image"
+        );
+        assert_eq!(
+            ports(pick(&both, Some("abc123"), "stop").unwrap()),
+            [18182],
+            "serial"
+        );
+        assert_eq!(
+            ports(pick(&both[..1], None, "stop").unwrap()),
+            [18181],
+            "only instance"
+        );
+        assert_eq!(
+            ports(pick(&both[..1], Some("emulator"), "stop").unwrap()),
+            [18181],
+            "emulator kind"
+        );
+
+        assert_eq!(
+            pick(&both, None, "stop").unwrap_err().code,
+            Code::AmbiguousEmulator,
+            "several instances"
+        );
+        assert_eq!(
+            pick(&[], None, "stop").unwrap_err().code,
+            Code::NoEmulator,
+            "no instance"
+        );
+        assert_eq!(
+            pick(&both, Some("emulator:1"), "stop").unwrap_err().code,
+            Code::NoEmulator,
+            "unmatched locator"
+        );
+        let bare = pick(&both, Some("18181"), "stop").unwrap_err();
+        assert_eq!(
+            bare.code,
+            Code::NoEmulator,
+            "a port needs its locator prefix"
+        );
         assert!(bare.hints[0].contains("emulator:18181"), "{:?}", bare.hints);
 
         let twins = [
@@ -944,9 +1004,34 @@ mod tests {
             running(18182, "same.ark", None, None),
         ];
         assert_eq!(
-            pick(&twins, Some("same.ark")).unwrap_err().code,
-            Code::AmbiguousEmulator
+            pick(&twins, Some("same.ark"), "stop").unwrap_err().code,
+            Code::AmbiguousEmulator,
+            "shared image name"
         );
+
+        // The example locator comes from the matches, never another emulator
+        let matches = [
+            running(18180, "other.ark", None, None),
+            twins[0].clone(),
+            twins[1].clone(),
+        ];
+        for (command, hint) in [
+            (
+                "stop",
+                "name one, as in `ark-emulator stop emulator:18181`, or pass --all",
+            ),
+            (
+                "button press",
+                "name one, as in `ark-emulator button press emulator:18181`",
+            ),
+            (
+                "button release",
+                "name one, as in `ark-emulator button release emulator:18181`",
+            ),
+        ] {
+            let error = pick(&matches, Some("same.ark"), command).unwrap_err();
+            assert_eq!(error.hints, [hint], "{command}: matching locator");
+        }
     }
 
     /// The tail is the end of the log, not its beginning, and a log that is

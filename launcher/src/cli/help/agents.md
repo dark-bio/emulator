@@ -39,21 +39,22 @@ Read `ark help agents` before driving the Ark itself.
 - Starting an image that is already booted is no error. start waits for
   that emulator and reports it with started false and exit 0, in the window
   mode and the lock state it already has.
-- A bare `ark-emulator` runs an emulator in the foreground with its device
-  window. Unless --no-input or --headless is given, the window may ask where
-  to keep the image, and a failure opens an error window. A bare run with
-  --headless never asks, and Ctrl-C or SIGTERM stops its device. Use start
-  instead, unless a foreground process is what you need.
+- `ark-emulator` with no command runs an emulator in the foreground with
+  its device window. Unless --no-input or --headless is given, the window
+  may ask where to keep the image, and a failure opens an error window. With
+  --headless it never asks, and Ctrl-C or SIGTERM stops its device. Use
+  start instead, unless a foreground process is what you need.
 
 ## Reading results
 
 - The exit code is the outcome. 0 is done, 1 a local file, a confirmation
   or a failed launch, 2 usage, 3 an emulator in the way or out of reach, 7
   a wait that ran out, 130 Ctrl-C, or Ctrl-Break on Windows, and 143
-  SIGTERM.
+  SIGTERM, or a closed console on Windows.
 - A failure prints error[code]: message, then hint: lines naming the next
-  step. Under --json the error object carries the hints. Codes are stable, and `ark-emulator help output` lists every one
-  with its next step.
+  step. Under --json the error object carries the hints. Codes are stable,
+  and `ark-emulator help errors` lists every one with when another run
+  helps.
 - A command that did part of its work keeps that result on stdout and still
   exits non-zero, such as a stop that stopped some emulators before one
   failed.

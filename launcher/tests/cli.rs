@@ -127,7 +127,7 @@ fn test_running_emulator_results() {
 
     // Serve the expected reads without waiting for a guest or a timer
     let worker = std::thread::spawn(move || {
-        for _ in 0..6 {
+        for _ in 0..18 {
             let request = server
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
@@ -203,6 +203,45 @@ fn test_running_emulator_results() {
         "{\"event\":\"note\",\"message\":\"lab.ark is already booted\"}\n",
         "JSON note"
     );
+    // Selection errors name the current command and the first matching locator
+    for command in ["stop", "button press", "button release"] {
+        for selector in [None, Some("emulator")] {
+            let mut arguments: Vec<_> = command.split_whitespace().collect();
+            arguments.extend(selector);
+            let hint = format!(
+                "name one, as in `ark-emulator {command} emulator:18182`{}",
+                if command == "stop" {
+                    ", or pass --all"
+                } else {
+                    ""
+                },
+            );
+            let reading = invoke(&arguments);
+            assert_eq!(reading.status.code(), Some(3), "{arguments:?}");
+            assert!(reading.stdout.is_empty(), "{arguments:?}: no result");
+            let message = stderr(&reading)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                message.contains(&format!("hint: {hint}")),
+                "{arguments:?}: {message}"
+            );
+            arguments.push("--json");
+            let json = invoke(&arguments);
+            assert_eq!(json.status.code(), Some(3), "{arguments:?}");
+            let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+            assert_eq!(
+                document["error"]["code"], "ambiguous-emulator",
+                "{arguments:?}"
+            );
+            assert_eq!(
+                document["error"]["hints"],
+                serde_json::json!([hint]),
+                "{arguments:?}"
+            );
+        }
+    }
     worker.join().unwrap();
 }
 
@@ -668,24 +707,35 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     }
 }
 
+/// Every way of asking for help prints the same page, under --json too.
 #[test]
 fn test_both_help_forms_answer_on_every_command() {
-    for command in COMMANDS {
+    for command in std::iter::once("").chain(COMMANDS).chain(["button"]) {
         let mut arguments: Vec<_> = command.split_whitespace().collect();
         arguments.push("-h");
         let scan = run(&arguments);
         assert_eq!(scan.status.code(), Some(0), "{command} -h");
-        assert!(!stdout(&scan).contains("Requires:"), "{command} -h");
+        assert!(scan.stderr.is_empty(), "{command} -h stderr");
 
         *arguments.last_mut().unwrap() = "--help";
         let contract = run(&arguments);
         assert_eq!(contract.status.code(), Some(0), "{command} --help");
-        assert!(stdout(&contract).contains("Requires:"), "{command} --help");
+        assert_eq!(stdout(&scan), stdout(&contract), "{command} help flags");
+        assert_eq!(
+            stdout(&contract).contains("  Requires  "),
+            command != "button",
+            "{command} contract"
+        );
 
         let mut arguments = vec!["help"];
         arguments.extend(command.split_whitespace());
         let page = run(&arguments);
-        assert_eq!(stdout(&contract).trim(), stdout(&page).trim(), "{command}");
+        assert!(page.status.success(), "{command} help command");
+        assert_eq!(stdout(&contract), stdout(&page), "{command}");
+        arguments.push("--json");
+        let json = run(&arguments);
+        assert!(json.status.success(), "{command} JSON help");
+        assert_eq!(stdout(&json), stdout(&page), "{command} text under JSON");
     }
 }
 
@@ -693,10 +743,20 @@ fn test_both_help_forms_answer_on_every_command() {
 #[test]
 fn test_button_group_and_invalid_arguments() {
     let group = run(&["button", "--help"]);
-    assert!(group.status.success());
-    assert!(!stdout(&group).contains("Requires:"));
-    assert!(stdout(&group).contains("Each subcommand has its own requirements and output"));
-    assert_eq!(stdout(&group), stdout(&run(&["help", "button"])));
+    assert!(group.status.success(), "button help");
+    assert!(
+        !stdout(&group).contains("Contract:"),
+        "group has no contract"
+    );
+    assert!(
+        stdout(&group).contains("Each subcommand has its own requirements and output"),
+        "group footer"
+    );
+    assert_eq!(
+        stdout(&group),
+        stdout(&run(&["help", "button"])),
+        "group help spelling"
+    );
     for arguments in [
         vec!["--json", "button"],
         vec!["button", "press", "--all", "--json"],
@@ -716,11 +776,12 @@ fn test_button_group_and_invalid_arguments() {
     ] {
         let output = run(&arguments);
         assert!(output.status.success(), "{arguments:?}");
-        assert!(stdout(&output).contains("cli_pressed"));
+        assert!(stdout(&output).contains("cli_pressed"), "{arguments:?}");
     }
 }
 
 /// Timed release is a press-only option with a bounded nonnegative duration.
+/// A usage error keeps its message and hints in both outputs.
 #[test]
 fn test_timed_release_option_validation_and_help() {
     // Both help forms advertise the option only on the command that accepts it
@@ -789,7 +850,7 @@ fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
     );
     assert_eq!(
         event["error"]["hints"],
-        serde_json::json!(["`ark-emulator help` lists the commands and the topics"]),
+        serde_json::json!(["see `ark-emulator list --help`"]),
         "error event hints"
     );
     assert_eq!(
@@ -798,10 +859,174 @@ fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
     );
 }
 
+/// A typo keeps clap's suggestion, and other mistakes point at the command's
+/// help.
+#[test]
+fn test_usage_messages_and_recovery_hints() {
+    for (arguments, message, hint) in [
+        (
+            vec!["statr"],
+            "unknown command 'statr'",
+            "a similar command exists: `ark-emulator start`",
+        ),
+        (
+            vec!["button", "pres"],
+            "unknown command 'pres'",
+            "a similar command exists: `ark-emulator button press`",
+        ),
+        (
+            vec!["list", "--jsno"],
+            "unknown option '--jsno'",
+            "a similar option exists: `--json`",
+        ),
+        (
+            vec!["start", "--env", "stagng"],
+            "unknown environment 'stagng'",
+            "a similar value exists: `staging`",
+        ),
+        (
+            vec!["--log", "trce", "list"],
+            "unknown value 'trce' for --log",
+            "a similar value exists: `trace`",
+        ),
+        (
+            vec!["completions", "bsh"],
+            "unknown shell 'bsh'",
+            "a similar value exists: `bash`",
+        ),
+        (
+            vec!["help", "imgaes"],
+            "unknown help topic 'imgaes'",
+            "a similar topic exists: `ark-emulator help images`",
+        ),
+        (
+            vec!["help", "statr"],
+            "unknown help command 'statr'",
+            "a similar command exists: `ark-emulator start`",
+        ),
+        (
+            vec!["help", "button", "pres"],
+            "unknown help command 'pres'",
+            "a similar command exists: `ark-emulator button press`",
+        ),
+        (
+            vec!["help", "bogus"],
+            "unknown help topic 'bogus'",
+            "see `ark-emulator help --help`",
+        ),
+        (
+            vec!["help", "button", "bogus"],
+            "unknown help command 'bogus'",
+            "see `ark-emulator button --help`",
+        ),
+        (
+            vec!["completions"],
+            "missing the shell for completions",
+            "see `ark-emulator completions --help`",
+        ),
+        (
+            vec!["button"],
+            "missing a command",
+            "see `ark-emulator button --help`",
+        ),
+        (
+            vec!["start", "--kernel", "kernel"],
+            "missing the initramfs (--initrd)",
+            "see `ark-emulator start --help`",
+        ),
+        (
+            vec!["start", "--initrd", "initrd"],
+            "missing the kernel image (--kernel)",
+            "see `ark-emulator start --help`",
+        ),
+        (
+            vec!["button", "press", "--release-after"],
+            "missing a value for --release-after",
+            "see `ark-emulator button press --help`",
+        ),
+        (
+            vec!["list", "--bogus"],
+            "unknown option '--bogus'",
+            "see `ark-emulator list --help`",
+        ),
+        (
+            vec!["button", "release", "one", "two"],
+            "unexpected argument 'two'",
+            "see `ark-emulator button release --help`",
+        ),
+        (
+            vec!["--timeout", "17", "button", "release", "--bogus"],
+            "unknown option '--bogus'",
+            "see `ark-emulator button release --help`",
+        ),
+        (
+            vec!["--timeout=17", "button", "-v", "release", "--bogus"],
+            "unknown option '--bogus'",
+            "see `ark-emulator button release --help`",
+        ),
+        (
+            vec!["--headless", "list"],
+            "boot options belong to `ark-emulator start` or to no command",
+            "see `ark-emulator --help`",
+        ),
+        (
+            vec!["list", "--headless"],
+            "boot options belong to `ark-emulator start` or to no command",
+            "see `ark-emulator --help`",
+        ),
+        (
+            vec!["button", "release", "--image=lab.ark"],
+            "boot options belong to `ark-emulator start` or to no command",
+            "see `ark-emulator --help`",
+        ),
+    ] {
+        // Clap finds both button actions near this spelling and keeps their order
+        let hints = if arguments.last() == Some(&"pres") {
+            vec![
+                "a similar command exists: `ark-emulator button release`",
+                hint,
+            ]
+        } else {
+            vec![hint]
+        };
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}: usage stdout");
+        let text = stderr(&output)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            text,
+            format!("error[usage]: {message} hint: {}", hints.join(" hint: ")),
+            "{arguments:?}"
+        );
+
+        // JSON carries the same failure on stdout and in its single stderr event
+        let mut json_arguments = vec!["--json"];
+        json_arguments.extend_from_slice(&arguments);
+        let output = run(&json_arguments);
+        assert_eq!(output.status.code(), Some(2), "{json_arguments:?}");
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let event: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            document["error"],
+            serde_json::json!({"code": "usage", "message": message, "hints": hints}),
+            "{json_arguments:?}"
+        );
+        assert_eq!(
+            event["error"], document["error"],
+            "{json_arguments:?}: event"
+        );
+    }
+}
+
+/// The manual holds every contract, every linked entry point and the errors
+/// topic.
 #[test]
 fn test_the_manual_keeps_its_shape_and_its_links_in_a_pipe() {
     let manual = run(&["help", "--all"]);
-    assert_eq!(manual.status.code(), Some(0));
+    assert_eq!(manual.status.code(), Some(0), "manual exit");
     let text = stdout(&manual);
     // Wrapped, so a phrase is looked for across line breaks.
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -812,10 +1037,43 @@ fn test_the_manual_keeps_its_shape_and_its_links_in_a_pipe() {
     ] {
         assert!(flat.contains(link), "{link}");
     }
-    assert_eq!(text.matches("\nRequires: ").count(), COMMANDS.len() + 1);
+    assert_eq!(
+        text.matches("\n  Requires  ").count(),
+        COMMANDS.len() + 1,
+        "contract rows"
+    );
+    assert!(text.contains("\nErrors\n"), "errors topic in manual");
     assert!(!text.contains("\n  $ "), "examples carry no prompt");
     for line in text.lines() {
         assert!(line.chars().count() <= 80, "{line}");
+    }
+}
+
+/// Every topic prints as text under --json, the errors topic included.
+#[test]
+fn test_topics_print_text_on_both_outputs() {
+    for (topic, heading) in [
+        ("agents", "Driving ark-emulator from an AI agent"),
+        ("images", "Images"),
+        ("registry", "The registry of running emulators"),
+        ("output", "Output"),
+        ("errors", "Errors"),
+    ] {
+        let reading = run(&["help", topic]);
+        let json = run(&["help", topic, "--json"]);
+        assert!(
+            reading.status.success() && json.status.success(),
+            "{topic}: status"
+        );
+        assert!(
+            reading.stderr.is_empty() && json.stderr.is_empty(),
+            "{topic}: stderr"
+        );
+        assert!(
+            stdout(&reading).starts_with(&format!("{heading}\n\n")),
+            "{topic}: heading"
+        );
+        assert_eq!(reading.stdout, json.stdout, "{topic}: text under JSON");
     }
 }
 

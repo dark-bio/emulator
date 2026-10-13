@@ -283,7 +283,7 @@ pub(crate) fn button(
             Code::ControlUnreachable,
             format!("could not read button delivery: {err}"),
         )
-        .hint("the button state is unknown; use `ark-emulator button release` to clear a CLI hold")
+        .hint("run `ark-emulator button release` to clear the command line's hold, since the button's state is unknown")
     })?;
 
     // A successful timed command must acknowledge the requested schedule
@@ -293,7 +293,7 @@ pub(crate) fn button(
             "the launcher did not confirm the requested release schedule",
         )
         .hint(
-            "the button state is unknown; use `ark-emulator button release` to clear a CLI hold",
+            "run `ark-emulator button release` to clear the command line's hold, since the button's state is unknown",
         ));
     }
     Ok(outcome)
@@ -413,7 +413,7 @@ impl Failure {
         Error::new(code, message).hint(if code == Code::ControlUnsupported {
             "update Ark Emulator and restart the selected emulator"
         } else {
-            "check the selected emulator's window or log; shutdown may still be in progress"
+            "check the emulator's window or log, since it may still be shutting down"
         })
     }
 }
@@ -462,9 +462,9 @@ fn request(
         if error.code != Code::ControlUnsupported {
             error.hints.clear();
             error = error.hint(if uncertain {
-                "the button state is unknown; use `ark-emulator button release` to clear a CLI hold"
+                "run `ark-emulator button release` to clear the command line's hold, since the button's state is unknown"
             } else {
-                "check `ark-emulator list` and retry against the current emulator"
+                "run `ark-emulator list`, then try again on an emulator it shows"
             });
         }
         error

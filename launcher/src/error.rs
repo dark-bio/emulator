@@ -30,7 +30,7 @@ pub(crate) enum Code {
     PortExhausted,
     /// The launcher or guest failed during startup or while running.
     StoppedUnexpectedly,
-    /// A bare run could not bring the emulator up.
+    /// A run with no command could not bring the emulator up.
     CouldNotStart,
     /// An emulator is booted from that image.
     DiskBusy,

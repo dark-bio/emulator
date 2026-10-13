@@ -438,7 +438,7 @@ impl Output {
     pub(crate) fn confirm(&self, question: &str, refusal: &str, flag: &str) -> Result<bool, Error> {
         if self.json() || self.0.no_input || !io::stdin().is_terminal() {
             return Err(Error::new(Code::ConfirmationRequired, refusal)
-                .hint(format!("pass `{flag}` to confirm without being asked")));
+                .hint(format!("pass {flag} to confirm without being asked")));
         }
         self.confirm_with(
             &mut prompt::Input::new()

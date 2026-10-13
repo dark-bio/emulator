@@ -26,8 +26,8 @@ pub(crate) const ABOUT: &str = "Emulated Ark enclave for development and demos";
 /// hardware acceleration behind it.
 pub(crate) const DEFAULT_TIMEOUT: u64 = 120;
 
-/// The command line as parsed. A bare run opens the device window; a command
-/// manages emulators without one.
+/// The command line as parsed. A run with no command opens the device window;
+/// a command manages emulators without one.
 #[derive(Parser)]
 // The help flag is added by the help renderer, on the root and on every
 // command, so that its line can say where the manual is.
@@ -46,7 +46,7 @@ pub(crate) struct Cli {
     #[command(flatten)]
     pub(crate) global: Global,
 
-    /// Versions of the emulator, its firmware and QEMU
+    /// Print the version
     #[arg(short = 'V', long)]
     pub(crate) version: bool,
 
@@ -57,19 +57,19 @@ pub(crate) struct Cli {
 
 impl Cli {
     /// Reject the combinations clap cannot express. The boot options belong
-    /// to the bare run and to `start`, so naming one beside a command is a
-    /// mistake rather than something to guess at.
+    /// to a run with no command and to `start`, so naming one beside another
+    /// command is a mistake rather than something to guess at.
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let message = if self.global.quiet && self.global.verbose {
             "--quiet cannot be combined with --verbose"
         } else if self.version && self.command.is_some() {
             "--version cannot be combined with a command"
         } else if self.command.is_some() && self.boot.named() {
-            "the boot options belong to a bare run or to `ark-emulator start`"
+            BOOT_USAGE
         } else {
             return Ok(());
         };
-        Err(Error::new(Code::Usage, message))
+        Err(Error::new(Code::Usage, message).hint("see `ark-emulator --help`"))
     }
 }
 
@@ -78,11 +78,11 @@ impl Cli {
 /// command name means the same thing.
 #[derive(clap::Args)]
 pub(crate) struct Global {
-    /// Print the result as JSON and events as JSON Lines
+    /// Print JSON, with events as JSON Lines on stderr
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Wait limit for a start, stop or reply
+    /// Limit a start, a stop or a reply
     #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT, value_name = "SECONDS", value_parser = parse_timeout)]
     pub(crate) timeout: u64,
 
@@ -93,11 +93,17 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
 
-    /// Diagnostic logs
-    #[arg(long, global = true, value_name = "LEVEL", value_enum)]
+    /// Print diagnostics: debug or trace
+    #[arg(
+        long,
+        global = true,
+        value_name = "LEVEL",
+        value_enum,
+        hide_possible_values = true
+    )]
     pub(crate) log: Option<Log>,
 
-    /// Hide progress, notes and warnings
+    /// Hide progress, notes, warnings and steps
     #[arg(short = 'q', long, global = true)]
     pub(crate) quiet: bool,
 
@@ -127,7 +133,10 @@ fn parse_timeout(value: &str) -> Result<u64, String> {
 }
 
 /// A year, which is as long as any wait could sensibly be asked for.
-const MAX_TIMEOUT: u64 = 365 * 24 * 60 * 60;
+pub(super) const MAX_TIMEOUT: u64 = 365 * 24 * 60 * 60;
+
+/// Usage error for boot options beside a management command.
+pub(super) const BOOT_USAGE: &str = "boot options belong to `ark-emulator start` or to no command";
 
 /// A port an emulator can hold, which is any but the one that means none.
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -137,8 +146,7 @@ fn parse_port(value: &str) -> Result<u16, String> {
     }
 }
 
-/// What an emulator boots from, shared by the bare run and by the command that
-/// boots one in the background.
+/// What an emulator boots from, shared by a run with no command and by `start`.
 #[derive(clap::Args)]
 pub(crate) struct Boot {
     /// Run without a window or prompts
@@ -224,7 +232,7 @@ pub(crate) enum Command {
         all: bool,
     },
 
-    /// Press the reset button of a running emulator
+    /// Press or release an emulator's reset button
     #[command(disable_help_subcommand = true)]
     Button {
         /// Which hold to apply to the running emulator.
@@ -255,7 +263,7 @@ pub(crate) enum Command {
 
     /// Print help for a command or a topic
     Help {
-        /// Command or topic: agents, images, registry or output
+        /// Command or topic: agents, images, registry, output or errors
         #[arg(value_name = "COMMAND_OR_TOPIC")]
         name: Vec<String>,
 
@@ -278,7 +286,7 @@ pub(crate) enum ButtonAction {
         #[arg(long, value_name = "SECONDS")]
         release_after: Option<u32>,
     },
-    /// Release the command line hold on the reset button
+    /// Release the command line's hold on the reset button
     Release {
         /// Locator, serial, name or image; the only one otherwise
         #[arg(value_name = "EMULATOR")]

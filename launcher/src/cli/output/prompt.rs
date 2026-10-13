@@ -390,13 +390,13 @@ mod tests {
             if json {
                 assert_eq!(
                     serde_json::from_str::<Value>(&fixture.stderr.text()).unwrap(),
-                    json!({"event":"error", "error":{"code":"confirmation-required", "message":"wipe needs confirmation", "hints":["pass `--yes` to confirm without being asked"]}}),
+                    json!({"event":"error", "error":{"code":"confirmation-required", "message":"wipe needs confirmation", "hints":["pass --yes to confirm without being asked"]}}),
                     "JSON confirmation error"
                 );
             } else {
                 assert_eq!(
                     fixture.stderr.text(),
-                    "error[confirmation-required]: wipe needs confirmation\nhint: pass `--yes` to confirm without being asked\n",
+                    "error[confirmation-required]: wipe needs confirmation\nhint: pass --yes to confirm without being asked\n",
                     "no-input confirmation error"
                 );
             }

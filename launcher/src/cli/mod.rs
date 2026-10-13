@@ -14,6 +14,7 @@ pub(crate) mod help;
 mod local_time;
 pub(crate) mod output;
 mod style;
+pub(crate) mod usage;
 
 use anyhow::Result;
 

@@ -7,14 +7,15 @@ Keep the two apart when parsing.
 ## Reading output
 
 The default output is formatted for reading, the same on a terminal and in
-a pipe. One item prints as a block of labels and values, several as a
-table, and an empty list as a sentence in place of its table, such as "No
-emulators running". Absent values print as - and booleans as yes and no.
-Times print in local time, as the date in a table and in full in a block.
-Paths show the home directory as ~, and the view may leave out fields,
-while --json keeps every field, every path whole and times in UTC. A mark such as ✓ prints as its ASCII twin, such as ok, when the
-locale is not UTF-8. Colors need a terminal, and NO_COLOR or CLICOLOR=0
-turns them off.
+a pipe. A result about one thing prints as a block of labels and values,
+and a list as a table, with an empty list as a sentence in place of its
+table, such as "No emulators running". Absent values print as - and
+booleans as yes and no. Times print in local time, as the date in a table
+and in full in a block. Paths show the home directory as ~, except on
+Windows, and the view may leave out fields, while --json keeps every field,
+every path whole and times in UTC. A mark
+such as ✓ prints as its ASCII twin, such as ok, when the locale is not
+UTF-8. Colors need a terminal, and NO_COLOR or CLICOLOR=0 turns them off.
 
 ## JSON
 
@@ -30,15 +31,15 @@ The kinds are progress, note, warning, hint, step, log and error. A
 progress event also carries stage, phase, step, steps, percent, done_bytes,
 total_bytes and remaining_seconds, each null when unknown. An error event
 carries the error object, hints included, in place of a message, and a log
-event also carries level, target and fields. A caller that merged the two streams
-drops the lines starting with `{"event":` and keeps the document.
+event also carries level, target and fields. A caller that merged the two
+streams drops the lines starting with `{"event":` and keeps the document.
 
 ## Events and verbosity
 
 -q hides progress, notes, warnings and steps, and keeps errors, hints and
-logs. -v adds steps. --log debug adds the launcher's diagnostics, including the log
-of an emulator that start launches, and --log trace adds every request to
-the registry.
+logs. -v adds steps. --log debug adds the launcher's diagnostics, including
+the log of an emulator that start launches, and --log trace adds every
+request to the registry.
 
 ## Runs with no command, and log files
 
@@ -67,10 +68,10 @@ emulator's cache directory.
 While the kept answer names a newer version, start, list, stop, button and
 wipe open with a note naming both versions and how to upgrade, and so does
 a headless run with no command. Under --json it is an ordinary note event.
-The note never changes the result or the exit code, and -q hides it. doctor
-looks up afresh and reports the answer as its ark-emulator check. A nonempty CI,
-or a local build whose version ends in -local, turns off both the lookup
-and the note.
+The note never changes the result or the exit code, and -q hides it.
+doctor looks up afresh and reports the answer as its ark-emulator check. A
+nonempty CI, or a local build whose version ends in -local, turns off both
+the lookup and the note.
 
 ## Failures
 
@@ -80,71 +81,16 @@ its code, message and hints, and no separate hint events follow. A command
 with no result prints nothing on stdout, or under --json a document holding
 only the error:
 
-    {"error": {"code": "no-emulator", "message": "no emulator is running", "hints": ["`ark-emulator start` boots one"]}}
+    {
+      "error": {
+        "code": "no-emulator",
+        "message": "no emulator is running",
+        "hints": ["run `ark-emulator start` to boot one"]
+      }
+    }
 
 A command that did part of its work keeps that result on stdout and still
 exits non-zero. A stop that fails or times out lists the emulators it
 already stopped. A command that cannot write its output, such as into a
-closed pipe, fails with io.
-
-## Error codes
-
-Each code is stable and belongs to one exit class.
-
-Exit 1 is a local file, a confirmation, or a launch that failed.
-
-- `confirmation-required` means a wipe was not confirmed. Pass --yes.
-- `disk-missing` means the named image is not there. Check the path.
-- `io` means a file could not be read or written, and the message names it.
-  A headless bare run that cannot start reports this code too.
-- `firmware-missing` means this build carries no firmware for that
-  architecture. Pass --kernel and --initrd.
-- `qemu-missing` means doctor found that the QEMU this build runs cannot
-  run. Reinstall Ark Emulator, or install QEMU for a source build.
-- `no-acceleration` means doctor found only software emulation, so a boot
-  takes minutes. The hint names the fix for the platform.
-- `port-exhausted` means every port from 18181 to 18280 is taken. Pass
-  --port, or stop an emulator.
-- `stopped-unexpectedly` means the launcher or the guest failed. A failed
-  start quotes the end of the launcher's log.
-- `could-not-start` means a bare run with a window could not bring the
-  emulator up. The message is what the error window would show.
-
-Exit 2 is a command line that makes no sense.
-
-- `usage` means invalid arguments or an unknown help topic.
-  `ark-emulator help` lists the commands and the topics.
-
-Exit 3 is an emulator in the way or out of reach.
-
-- `disk-busy` means an emulator holds that image. Stop it first.
-- `no-emulator` means nothing running matches, or nothing runs.
-  `ark-emulator list` shows what does.
-- `ambiguous-emulator` means several emulators match, or several run and
-  none was named. Name one by its locator, or pass --all to stop.
-- `registry-unreachable` means the registry could not be read or refused a
-  command. Emulators from different releases can cause it, so update Ark
-  Emulator and restart every running emulator.
-- `control-unsupported` means the emulator lacks the control the command
-  needs, or its control endpoint is missing. Update Ark Emulator and
-  restart every running emulator.
-- `control-unreachable` means the emulator's control endpoint could not be
-  reached or understood. A failed stop can still be shutting down, and a
-  button input without a reply has an unknown outcome, which
-  `ark-emulator button release` clears.
-- `button-unavailable` means the emulated hardware is disconnected or
-  restarting, or could not take the input. Wait for the boot and try again,
-  since an input never carries into a restarted guest.
-
-Exit 7 is a wait that ran out.
-
-- `timeout` means a start or a stop was not confirmed within --timeout, so
-  the emulator keeps booting or is still shutting down, or a button reply
-  did not come and its outcome is unknown.
-
-Exit 130 and 143 are Ctrl-C and SIGTERM, and on Windows Ctrl-Break counts
-as Ctrl-C and a closed console as SIGTERM. During a start they end only the
-wait, and the emulator keeps booting.
-
-- `interrupted` means Ctrl-C answered the wipe question, so the image stays
-  as it was.
+closed pipe, fails with io. `ark-emulator help errors` lists every code and
+when running a command again helps.
