@@ -24,7 +24,7 @@ Read `ark help agents` before driving the Ark itself.
   display. Otherwise its process opens the device window, and a covered
   window or a locked screen does not pause the device.
 - A start takes seconds with hardware acceleration and minutes without.
-  --timeout, 120 s unless set, bounds the wait for the firmware. On a
+  --timeout, 120s unless set, bounds the wait for the firmware. On a
   timeout the emulator keeps booting, the command exits 7, and
   `ark-emulator list` shows when it is ready. Ctrl-C ends only the wait.
   Run a slow start in the background. Use your harness's background mode
@@ -39,20 +39,22 @@ Read `ark help agents` before driving the Ark itself.
 - Starting an image that is already booted is no error. start waits for
   that emulator and reports it with started false and exit 0, in the window
   mode and the lock state it already has.
-- A bare `ark-emulator` runs an emulator in the foreground with its device
-  window. Unless --no-input or --headless is given, the window may ask where
-  to keep the image, and a failure opens an error window. A bare run with
-  --headless never asks, and Ctrl-C or SIGTERM stops its device. Use start
-  instead, unless a foreground process is what you need.
+- `ark-emulator` with no command runs an emulator in the foreground with
+  its device window. Unless --no-input or --headless is given, the window
+  may ask where to keep the image, and a failure opens an error window. With
+  --headless it never asks, and Ctrl-C or SIGTERM stops its device. Use
+  start instead, unless a foreground process is what you need.
 
 ## Reading results
 
 - The exit code is the outcome. 0 is done, 1 a local file, a confirmation
   or a failed launch, 2 usage, 3 an emulator in the way or out of reach, 7
-  a wait that ran out, 130 Ctrl-C and 143 SIGTERM.
+  a wait that ran out, 130 Ctrl-C, or Ctrl-Break on Windows, and 143
+  SIGTERM, or a closed console on Windows.
 - A failure prints error[code]: message, then hint: lines naming the next
-  step. Codes are stable, and `ark-emulator help output` lists every one
-  with its next step.
+  step. Under --json the error object carries the hints. Codes are stable,
+  and `ark-emulator help errors` lists every one with when another run
+  helps.
 - A command that did part of its work keeps that result on stdout and still
   exits non-zero, such as a stop that stopped some emulators before one
   failed.
@@ -62,9 +64,10 @@ Read `ark help agents` before driving the Ark itself.
 
 ## Checking state
 
-`ark-emulator list` shows every running emulator with its locator, image,
-readiness, environment, name, serial and when its identity expires, under
-the names `ark devices` uses. `ark-emulator doctor` checks this computer and
+`ark-emulator list` shows every running emulator with its locator, name,
+serial, environment, readiness and the date its identity expires, under the
+names `ark devices` uses. Its JSON adds the port, the image's file name and
+the log file. `ark-emulator doctor` checks this computer and
 this build, and suggests fixes without applying them. Its JSON names where
 the data directory, the settings and the logs live. Every emulator writes
 its launcher log to a file named after its port, which
@@ -72,7 +75,7 @@ its launcher log to a file named after its port, which
 failed start quotes the end of it.
 
 An emulator runs the firmware bundled with Ark Emulator, which
-`ark-emulator --version` names, unless --kernel and --initrd boot another
+`ark-emulator doctor` names, unless --kernel and --initrd boot another
 build. `ark firmware update` is unsupported on an emulator, so newer
 firmware comes with a newer Ark Emulator.
 
@@ -101,10 +104,10 @@ boots.
 An emulated Ark has the reset button of the hardware, in its window and
 through ark-emulator. During `ark pair` the owner presses it once the colors
 on the Ark match their phone, and the press confirms the pairing at once. A
-headless emulator shows no colors, so `ark-emulator button press
---release-after 0` presses it when the person asks for that. At any other
-time, a press without --release-after holds the button until
-`ark-emulator button release`, and a hold of 5 s arms a factory reset,
+headless emulator shows no colors, so `ark-emulator button press` presses
+it once when the person asks for that. At any other time,
+`ark-emulator button press --hold` holds the button until
+`ark-emulator button release`, and a hold of 5s arms a factory reset,
 which erases the device's data and pairing once the button is let go.
 
 ### Start over
@@ -127,6 +130,7 @@ names it, by locator, serial, name or image, or pass --all for every one.
 
 ### Diagnose
 
-`ark-emulator doctor` checks for a newer release, QEMU, the bundled
-firmware, hardware acceleration, the data directory, the settings, the
-remembered image, the registry and a free port.
+`ark-emulator doctor` checks this build's version against the newest
+release, QEMU, the bundled firmware, hardware acceleration, the data
+directory, the settings, the remembered image, the log directory, the
+registry and a free port.

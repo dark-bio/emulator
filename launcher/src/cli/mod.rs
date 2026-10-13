@@ -7,11 +7,14 @@
 //! Parses commands, renders terminal output and runs headless emulators.
 
 pub(crate) mod args;
+mod clock;
 pub(crate) mod commands;
 mod doctor;
 pub(crate) mod help;
+mod local_time;
 pub(crate) mod output;
 mod style;
+pub(crate) mod usage;
 
 use anyhow::Result;
 
@@ -27,12 +30,13 @@ use tracing::debug;
 
 /// Run in the foreground until QEMU exits or shutdown is requested.
 pub(crate) fn headless(paths: &Paths, boot: Boot, output: Output) -> Result<()> {
-    let runtime = Runtime::new()?;
+    let runtime = Runtime::new(output.clone())?;
     let (pending, settings, resolved) = runtime::prepare(paths, boot, true)?;
     let Resolved::Boot(disk) = resolved else {
         unreachable!("headless disk selection never asks for input")
     };
     let (memory, env) = runtime::effective(Some(&pending.boot), &settings);
+    output.booting(&disk, !disk.exists());
     ensure_disk(&disk, pending.qemu_libs.as_deref())?;
     runtime.launch(pending, &disk, memory, &env, move |result| match result {
         Ok(status) => {

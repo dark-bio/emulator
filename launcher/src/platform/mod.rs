@@ -87,20 +87,26 @@ pub(crate) fn install_shutdown() -> std::io::Result<()> {
 
     /// Keep the handler alive until cleanup ends, including console closure.
     unsafe extern "system" fn handler(event: u32) -> i32 {
-        match event {
-            CTRL_C_EVENT => crate::runtime::shut_down(130),
-            CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
-                crate::runtime::shut_down(143)
-            }
-            _ => 0,
-        }
+        let code = match event {
+            CTRL_C_EVENT | CTRL_BREAK_EVENT => 130,
+            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => 143,
+            _ => return 0,
+        };
+        crate::cli::output::restore_prompt();
+        crate::runtime::shut_down(code);
     }
 
-    // SAFETY: the handler has the documented ABI and lives for the process
-    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    /// Installed once, whether a command or the guest runtime asks first.
+    static INSTALLED: std::sync::OnceLock<Result<(), i32>> = std::sync::OnceLock::new();
+    INSTALLED
+        .get_or_init(|| {
+            // SAFETY: the handler has the documented ABI and lives for the process
+            if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+                return Err(std::io::Error::last_os_error().raw_os_error().unwrap());
+            }
+            Ok(())
+        })
+        .map_err(std::io::Error::from_raw_os_error)
 }
 
 /// Strips Windows' `\\?\` extended-length-path ("verbatim") prefix. Tauri's

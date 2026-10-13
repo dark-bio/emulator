@@ -34,20 +34,8 @@ use clap::{FromArgMatches as _, Parser};
 
 use bundle::Paths;
 use cli::args::Cli;
-use cli::{commands, help, output};
-use error::{Code, Error};
-
-/// Render clap's complaint in the command line's error format.
-fn usage(error: &clap::Error) -> Error {
-    let message = error.to_string();
-    let message = message
-        .split("\n\n")
-        .next()
-        .unwrap_or(&message)
-        .trim_start_matches("error: ")
-        .trim();
-    Error::new(Code::Usage, message).hint("`ark-emulator help` lists the commands and the topics")
-}
+use cli::{commands, help, output, usage};
+use error::Error;
 
 /// Dispatch management commands before creating a runtime or a window.
 fn main() {
@@ -64,10 +52,11 @@ fn main() {
         .skip(1)
         .take_while(|argument| *argument != "--")
         .any(|argument| argument == "--json");
-    let matches = match help::parser().try_get_matches_from_mut(&arguments) {
+    let mut parser = help::parser();
+    let matches = match parser.try_get_matches_from_mut(&arguments) {
         Ok(matches) => matches,
         Err(error) => {
-            platform::attach_console();
+            attach_console(json);
             let mut global = Cli::parse_from(["ark-emulator"]).global;
             global.json = json;
             let output = output::Output::new(&global);
@@ -80,25 +69,21 @@ fn main() {
                 }
                 ipc::local::exit(0);
             }
-            output.error(&usage(&error));
+            output.error(&usage::from_clap(&error, &parser, &arguments));
             ipc::local::exit(2);
         }
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
-        platform::attach_console();
+        attach_console(json);
         let _ = error.print();
         ipc::local::exit(2);
     });
     if cli.version || cli.command.is_some() || cli.boot.headless {
-        platform::attach_console();
+        attach_console(cli.global.json);
     }
     let output = output::Output::new(&cli.global);
     desktop::reporting(&output, cli.global.no_input || cli.boot.headless);
-    diagnostics::init(
-        &output,
-        cli.global.log,
-        cli.version || cli.command.is_some(),
-    );
+    diagnostics::init(&output, cli.global.log);
 
     // This reads compiled metadata without initializing a window system
     let context = tauri::generate_context!();
@@ -131,4 +116,19 @@ fn main() {
     }
 
     desktop::run(context, cli.boot, cli.global.no_input, &output);
+}
+
+/// Attaches the console for a command's output, and on Windows installs the
+/// handler for its control events.
+fn attach_console(_json: bool) {
+    platform::attach_console();
+    #[cfg(windows)]
+    if let Err(err) = platform::install_shutdown() {
+        let mut global = Cli::parse_from(["ark-emulator"]).global;
+        global.json = _json;
+        let output = output::Output::new(&global);
+        let error = Error::io(format!("could not handle console events ({err})"));
+        output.error(&error);
+        ipc::local::exit(error.exit());
+    }
 }

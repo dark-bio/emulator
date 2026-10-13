@@ -74,15 +74,15 @@ inside the portable build.
 ```sh
 ark-emulator start --headless   # boot without a window, return once ready
 ark-emulator list               # what is running on this computer
-ark-emulator button press --release-after 0   # press the reset button once
+ark-emulator button press       # press the reset button once
 ark-emulator stop               # shut it down
 ark-emulator wipe --yes         # reset the stopped image to a fresh device
 ```
 
-Without `--headless`, `start` opens the device window. A bare
-`ark-emulator --headless` runs an emulator in the foreground instead, until
-Ctrl-C. Hand the locator `start` prints to `ark`, which drives the emulated
-Ark as it drives hardware:
+Without `--headless`, `start` opens the device window.
+`ark-emulator --headless`, with no command, runs an emulator in the
+foreground instead, until Ctrl-C. Hand the locator `start` prints to `ark`,
+which drives the emulated Ark as it drives hardware:
 
 ```sh
 ark --device emulator:18181 status   # identity, firmware, pairing and lock
@@ -95,9 +95,9 @@ The enrollment lasts 30 days, and then `ark-emulator stop`, `wipe` and
 
 ## Help
 
-`ark-emulator -h` is the overview, `ark-emulator <command> --help` a
-command's full contract, and `ark-emulator help --all` the whole manual. AI
-agents read [`ark-emulator help agents`](launcher/src/cli/help/agents.md)
+`ark-emulator --help` is the overview, `ark-emulator <command> --help` a
+command's page with its contract, and `ark-emulator help --all` the whole
+manual. AI agents read [`ark-emulator help agents`](launcher/src/cli/help/agents.md)
 first, then `ark help agents` before driving the Ark itself. The topics'
 sources read the same on GitHub:
 
@@ -106,7 +106,8 @@ sources read the same on GitHub:
 | [`agents`](launcher/src/cli/help/agents.md) | Running ark-emulator from an AI agent, and the common tasks |
 | [`images`](launcher/src/cli/help/images.md) | The image that is the device, where it lives, its environment and identity, and wiping |
 | [`registry`](launcher/src/cli/help/registry.md) | The listing of running emulators, for a tool that reads it itself |
-| [`output`](launcher/src/cli/help/output.md) | Reading output, JSON, logs and error codes |
+| [`output`](launcher/src/cli/help/output.md) | Reading output, JSON, logs and failures |
+| [`errors`](launcher/src/cli/help/errors.md) | Every error code by exit class, and when running a command again helps |
 
 Apps to run on an emulator, in Rust, Go, C and Python, are in the
 [examples](https://github.com/dark-bio/examples) repository.

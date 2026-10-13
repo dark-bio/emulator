@@ -97,7 +97,14 @@ fn test_listing_reports_invalid_entries_without_diagnostics() {
         if !arguments.contains(&"--json") {
             assert!(stderr.contains("warning:"), "{stderr}");
             assert!(stderr.contains("entry 1"), "{stderr}");
-            assert!(String::from_utf8_lossy(&output.stdout).contains("demo.ark"));
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("emulator:18181"),
+                "listed locator"
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("demo.ark"),
+                "image is JSON-only"
+            );
             continue;
         }
 
@@ -547,7 +554,7 @@ fn bounded(command: &mut Command, pid_file: &Path) -> Output {
                 // The pid comes only from the guest this fixture just launched
                 let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
             }
-            panic!("the registry failure did not reach the caller within 10 s");
+            panic!("the registry failure did not reach the caller within 10s");
         }
         thread::sleep(Duration::from_millis(20));
     }

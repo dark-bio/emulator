@@ -45,6 +45,7 @@ pub(crate) fn run(
     output: &Output,
 ) {
     tauri::Builder::default()
+        .manage(output.clone())
         .plugin(webview::plugin())
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
@@ -97,7 +98,7 @@ fn install_menus(_app: &tauri::App) -> Result<()> {
 
 /// Prepare the guest, then boot it or show the settings panel for missing input.
 fn start(app: &tauri::App, boot: Boot, no_input: bool) -> Result<()> {
-    let runtime = Runtime::new()?;
+    let runtime = Runtime::new(app.state::<Output>().inner().clone())?;
     face::attach(app.handle(), runtime.hardware.clone());
     app.manage(runtime);
     let paths = Paths::resolve(&app.config().identifier, app.package_info())?;
@@ -109,6 +110,7 @@ fn start(app: &tauri::App, boot: Boot, no_input: bool) -> Result<()> {
             let (memory, env) = launcher.effective();
             let pending = launcher.take().expect("nothing has taken it yet");
             app.manage(Mutex::new(launcher));
+            app.state::<Output>().booting(&disk, !disk.exists());
             if pending.boot.image.is_some() || no_input {
                 ensure_disk(&disk, pending.qemu_libs.as_deref()).with_context(|| {
                     format!("failed to prepare the disk image at {}", disk.display())

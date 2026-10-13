@@ -51,12 +51,12 @@ try {
     }
     foreach ($shell in $shells) {
         $help = & $shell -NoProfile -NonInteractive -Command 'ark-emulator help start; exit $LASTEXITCODE' | Out-String
-        if ($LASTEXITCODE -ne 0 -or $help -notmatch 'Requires:') {
+        if ($LASTEXITCODE -ne 0 -or $help -notmatch 'Contract:\r?\n  Requires  ') {
             throw "the global command failed in $shell"
         }
     }
     $help = & $env:ComSpec /d /c 'ark-emulator help start' | Out-String
-    if ($LASTEXITCODE -ne 0 -or $help -notmatch 'Requires:') {
+    if ($LASTEXITCODE -ne 0 -or $help -notmatch 'Contract:\r?\n  Requires  ') {
         throw 'the global command failed in Command Prompt'
     }
 

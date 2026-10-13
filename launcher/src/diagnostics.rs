@@ -79,10 +79,10 @@ struct State {
 ///
 /// # Panics
 /// Panics if a global tracing subscriber has already been installed.
-pub(crate) fn init(output: &Output, level: Option<Log>, command: bool) {
-    // Commands keep diagnostics off stderr unless the caller requests them
+pub(crate) fn init(output: &Output, level: Option<Log>) {
+    // Diagnostics reach stderr only under --log
     if let Ok(mut state) = STATE.lock() {
-        state.output = (!command || level.is_some()).then(|| output.clone());
+        state.output = level.is_some().then(|| output.clone());
     }
     let level = if level == Some(Log::Trace) {
         LevelFilter::TRACE
@@ -226,7 +226,7 @@ pub(crate) fn record_path(key: &'static str, path: &Path) {
 /// [`record`] is collected.
 pub(crate) fn report(title: &str, err: &anyhow::Error) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "{PRODUCT} {}: {title}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(out, "{PRODUCT} {}: {title}", env!("ARK_EMULATOR_VERSION"));
     let _ = writeln!(out);
     let _ = writeln!(out, "Error: {err}");
 

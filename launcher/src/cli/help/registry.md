@@ -38,7 +38,7 @@ incomplete, and a reader says so rather than showing an empty list.
 - port identifies the emulator. A client connects to the emulated Ark at
   ws://127.0.0.1:PORT/v1/usb, and `ark` names it emulator:PORT.
 - disk is the image's file name, and disk_id an opaque digest of where it
-  lives, which tells two images of one name apart. No path is published,
+  lives, which distinguishes two images of one name. No path is published,
   since any page in a browser can read the listing.
 - ready turns true once the firmware has booted and reported itself, and
   false when the emulator's connection to its emulated hardware drops.
@@ -50,6 +50,6 @@ incomplete, and a reader says so rather than showing an empty list.
   other readers ignore it.
 
 Every emulator republishes itself once a second, and an entry not refreshed
-for 15 s drops out, so an emulator that was killed outright leaves the
+for 15s drops out, so an emulator that was killed outright leaves the
 listing on its own. The listing is discovery, not identity, since only a
 handshake with the emulated Ark proves which device answered.

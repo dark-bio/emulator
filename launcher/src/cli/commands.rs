@@ -26,6 +26,7 @@ use tauri::PackageInfo;
 
 use super::args::{Boot, ButtonAction, Command, Global};
 use super::output::{self, Output};
+use super::style::{self, Theme};
 use crate::bundle::{self, Paths};
 use crate::diagnostics;
 use crate::error::{Code, Error};
@@ -43,9 +44,22 @@ const POLL: Duration = Duration::from_millis(250);
 /// hold what QEMU said about why it would not start.
 const TAIL: usize = 20;
 
+/// The columns a list compares emulators by, in `ark devices`' order.
+const LIST_COLUMNS: &[(&str, &str)] = &[
+    ("LOCATOR", "locator"),
+    ("NAME", "name"),
+    ("SERIAL", "serial"),
+    ("ENVIRONMENT", "environment"),
+    ("READY", "ready"),
+    ("EXPIRES", "expires"),
+];
+
+/// The one row a finished wipe shows.
+const WIPE_ROWS: &[(&str, &str)] = &[("Path", "path")];
+
 /// Run one command, print what it answers, and hand back the exit code. No
 /// command at all is the root's own answer, which is what `--version` asks
-/// for, since a bare run opens a window instead of coming through here.
+/// for, since a run with no command opens a window instead of coming here.
 pub(crate) fn run(
     command: Option<Command>,
     global: &Global,
@@ -87,8 +101,9 @@ fn dispatch(
     // Answered before anything is resolved, since a reader asking what a
     // command does may be on a computer where nothing else would work.
     match command {
-        Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all, true),
+        Some(Command::Help { name, all }) => return super::help::run(name.as_slice(), all),
         Some(Command::Completions { shell }) => return completions(shell, output),
+        None => return version(output),
         _ => {}
     }
     let paths = Paths::resolve(identifier, package).map_err(|err| Error::io(format!("{err:#}")))?;
@@ -99,10 +114,9 @@ fn dispatch(
         Some(Command::Button { action }) => button(action, global, output),
         Some(Command::Wipe { path, yes }) => wipe(path.as_deref(), yes, output, &paths),
         Some(Command::Doctor) => super::doctor::doctor(output, &paths, global.timeout),
-        Some(Command::Completions { .. } | Command::Help { .. }) => {
+        Some(Command::Completions { .. } | Command::Help { .. }) | None => {
             unreachable!("answered above")
         }
-        None => version(output, &paths),
     }
 }
 
@@ -125,22 +139,12 @@ fn completions(shell: clap_complete::Shell, output: &Output) -> Result<(), Error
         .map_err(|err| Error::io(format!("could not write the completions: {err}")))
 }
 
-/// What this build is made of, which is what a bug report needs naming.
-fn version(output: &Output, paths: &Paths) -> Result<(), Error> {
-    let arch = architecture(None)?;
-    let libs = bundle::resolve_qemu_libs(paths.resources.as_deref());
-    output.block(
-        &json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "firmware": bundle::firmware_version(paths.resources.as_deref(), arch),
-            "qemu": qemu::resolve_qemu(arch).version(libs.as_deref()),
-        }),
-        &[
-            ("Version", "version"),
-            ("Firmware", "firmware"),
-            ("QEMU", "qemu"),
-        ],
-    )
+/// Print the stamped version, as one line or as one JSON field.
+fn version(output: &Output) -> Result<(), Error> {
+    let version = env!("ARK_EMULATOR_VERSION");
+    output.result(&json!({"version": version}), |_| {
+        format!("ark-emulator {version}")
+    })
 }
 
 /// Boot an emulator on the image this run settles on, and answer once the
@@ -156,7 +160,10 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     let image = disk::select(boot.image.as_deref(), settings.disk(), &paths.data)
         .map_err(|err| Error::io(format!("{err:#}")))?;
 
-    if let Some(instance) = discovery::booted(&listing(output)?, &image) {
+    let looking = output.notice("Looking for running emulators");
+    let running = listing(output)?;
+    drop(looking);
+    if let Some(instance) = discovery::booted(&running, &image) {
         output.event(
             "note",
             format!("{} is already booted", disk::name_of(&image)),
@@ -171,7 +178,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
         Some(port) => HostPort::fixed(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
         None => HostPort::reserve().map_err(|err| {
             Error::new(Code::PortExhausted, format!("{err:#}"))
-                .hint("pass `--port` to choose the port yourself")
+                .hint("pass --port to choose the port yourself")
         })?,
     };
     let address = reservation.addr();
@@ -189,6 +196,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
 
     let created = !image.exists();
     output.event("step", format!("booting {}", image.display()));
+    output.booting(&image, created);
     let child = spawn(boot, arch, &image, address).map_err(|err| Error::io(format!("{err:#}")))?;
     // Held until the child exists, so two starts issued together cannot both
     // settle on this port. The moment between here and the child's QEMU
@@ -208,6 +216,7 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     };
     let wait = Wait::new(&image, unready, created, true);
     let instance = wait.ready(Some((child, &log)), global, output, paths)?;
+    output.end_stage();
     warn_environment(output, boot, &instance);
     report(output, paths, &instance, &image, created, true)
 }
@@ -274,6 +283,7 @@ impl<'a> Wait<'a> {
                 self.last = instance.clone();
             }
             if Instant::now() >= deadline {
+                output.fail_stage();
                 report(
                     output,
                     paths,
@@ -285,7 +295,7 @@ impl<'a> Wait<'a> {
                 return Err(Error::new(
                     Code::Timeout,
                     format!(
-                        "the device was not ready within {} s and is still booting",
+                        "the device was not ready within {}s and is still booting",
                         global.timeout
                     ),
                 )
@@ -307,15 +317,8 @@ fn list(output: &Output, paths: &Paths) -> Result<(), Error> {
     output.table(
         &json!({ "emulators": rows }),
         &rows,
-        &[
-            ("LOCATOR", "locator"),
-            ("IMAGE", "image"),
-            ("READY", "ready"),
-            ("ENV", "environment"),
-            ("NAME", "name"),
-            ("SERIAL", "serial"),
-            ("EXPIRES", "expires"),
-        ],
+        LIST_COLUMNS,
+        "No emulators running",
     )
 }
 
@@ -328,7 +331,7 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
     let mut targets = if all {
         running
     } else {
-        pick(&running, selector)?
+        pick(&running, selector, "stop")?
     };
     targets.sort_by_key(|instance| instance.port);
     if targets.is_empty() {
@@ -339,6 +342,15 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
     let deadline = Instant::now() + Duration::from_secs(global.timeout);
     for instance in &targets {
         output.event("step", format!("asking {} to stop", locator(instance)));
+        let notice = output.notice(&format!(
+            "Stopping {}",
+            instance
+                .name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| locator(instance))
+        ));
         let result = match &instance.control {
             Some(endpoint) => control::stop(endpoint, instance.port, deadline),
             None => Err(Error::new(
@@ -347,16 +359,17 @@ fn stop(selector: Option<&str>, all: bool, global: &Global, output: &Output) -> 
             )
             .hint("update Ark Emulator and restart all running emulators, including the registry host")),
         };
+        drop(notice);
         if let Err(mut err) = result {
             if !done.is_empty() || err.code == Code::Timeout {
-                output.block(&stopped(&done), &[("Stopped", "stopped")])?;
+                output.block(&stopped(&done), None, &[("Stopped", "stopped")])?;
             }
             err.message = format!("{}: {}", locator(instance), err.message);
             return Err(err);
         }
         done.push(instance.port);
     }
-    output.block(&stopped(&done), &[("Stopped", "stopped")])
+    output.block(&stopped(&done), None, &[("Stopped", "stopped")])
 }
 
 /// Set this emulator's CLI hold and report the state after hardware delivery.
@@ -365,11 +378,25 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
     let (pressed, selector, release_after) = match action {
         ButtonAction::Press {
             emulator,
-            release_after,
-        } => (true, emulator, release_after),
+            hold,
+            hold_for,
+        } => (
+            true,
+            emulator,
+            if hold {
+                None
+            } else {
+                Some(hold_for.unwrap_or(0))
+            },
+        ),
         ButtonAction::Release { emulator } => (false, emulator, None),
     };
-    let targets = pick(&listing(output)?, selector.as_deref())?;
+    let command = if pressed {
+        "button press"
+    } else {
+        "button release"
+    };
+    let targets = pick(&listing(output)?, selector.as_deref(), command)?;
     let instance = &targets[0];
     let endpoint = instance.control.as_ref().ok_or_else(|| {
         Error::new(
@@ -401,20 +428,26 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
     }
 
     // Report the accepted schedule; the command does not wait for its expiry
-    output.block(
+    output.result(
         &json!({
             "locator": locator(instance), "pressed": outcome.pressed,
             "cli_pressed": outcome.cli_pressed, "changed": outcome.changed,
             "release_after_seconds": outcome.release_after_seconds,
         }),
-        &[
-            ("Locator", "locator"),
-            ("Pressed", "pressed"),
-            ("CLI held", "cli_pressed"),
-            ("Changed", "changed"),
-            ("Release after", "release_after_seconds"),
-        ],
+        |theme| button_block(theme, outcome.pressed, outcome.release_after_seconds),
     )
+}
+
+/// The button's state after the command, with any release it scheduled.
+fn button_block(theme: &Theme, pressed: bool, release_after: Option<u32>) -> String {
+    let state = match (pressed, release_after) {
+        (false, _) => "up".to_owned(),
+        (true, Some(seconds)) if seconds > 0 => {
+            format!("down, released in {}", style::duration(u64::from(seconds)))
+        }
+        (true, _) => "down".to_owned(),
+    };
+    output::block(theme, None, &[("Button".into(), state)])
 }
 
 /// Reset a stopped image to a fresh device, so that its next boot needs
@@ -461,7 +494,11 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
 
     if !yes
         && !output.confirm(
-            &format!("Wipe {}, {}?", path.display(), output::bytes(size)),
+            &format!(
+                "Wipe {}, {}?",
+                output::home_path(&path),
+                output::bytes(size)
+            ),
             &format!("wiping {} was not confirmed", path.display()),
             "--yes",
         )?
@@ -476,7 +513,8 @@ fn wipe(path: Option<&Path>, yes: bool, output: &Output, paths: &Paths) -> Resul
         .map_err(|err| Error::io(format!("could not reset {}: {err:#}", path.display())))?;
     output.block(
         &json!({"path": path.display().to_string(), "wiped": true}),
-        &[("Path", "path"), ("Wiped", "wiped")],
+        None,
+        WIPE_ROWS,
     )
 }
 
@@ -534,19 +572,23 @@ fn stopped(ports: &[u16]) -> Value {
 /// The running emulators a selector names, as `ark -d` reads one: an exact
 /// locator, a unique serial, a unique name or a unique image basename. The
 /// bare word `emulator`, like no selector at all, means the only one running.
-fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, Error> {
+fn pick(
+    running: &[Instance],
+    selector: Option<&str>,
+    command: &str,
+) -> Result<Vec<Instance>, Error> {
     let listed =
         |instances: &[Instance]| instances.iter().map(locator).collect::<Vec<_>>().join(", ");
     let Some(selector) = selector.filter(|selector| *selector != "emulator") else {
         return match running {
             [] => Err(Error::new(Code::NoEmulator, "no emulator is running")
-                .hint("`ark-emulator start` boots one")),
+                .hint("run `ark-emulator start` to boot one")),
             [only] => Ok(vec![only.clone()]),
             _ => Err(Error::new(
                 Code::AmbiguousEmulator,
                 format!("several emulators are running: {}", listed(running)),
             )
-            .hint("name one by its locator")),
+            .hint(selection_hint(command, &running[0]))),
         };
     };
     if let Some(port) = selector.strip_prefix("emulator:") {
@@ -557,7 +599,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                 Code::NoEmulator,
                 format!("no emulator is running as {selector}"),
             )
-            .hint("`ark-emulator list` shows what is")),
+            .hint("run `ark-emulator list` to see what is running")),
         };
     }
     let matches: Vec<&Instance> = running
@@ -579,7 +621,7 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                     "a port is named by its locator, emulator:{selector}"
                 ));
             }
-            Err(error.hint("`ark-emulator list` shows what is running"))
+            Err(error.hint("run `ark-emulator list` to see what is running"))
         }
         [only] => Ok(vec![only.clone()]),
         _ => Err(Error::new(
@@ -593,8 +635,22 @@ fn pick(running: &[Instance], selector: Option<&str>) -> Result<Vec<Instance>, E
                     .join(", ")
             ),
         )
-        .hint("name one by its locator")),
+        .hint(selection_hint(command, matches[0]))),
     }
+}
+
+/// The hint for an ambiguous selection, the running command with a locator
+/// to paste.
+fn selection_hint(command: &str, instance: &Instance) -> String {
+    format!(
+        "name one, as in `ark-emulator {command} {}`{}",
+        locator(instance),
+        if command == "stop" {
+            ", or pass --all"
+        } else {
+            ""
+        },
+    )
 }
 
 /// Print what a start settled on: where the emulator is, which image it holds,
@@ -611,15 +667,25 @@ fn report(
     document["path"] = json!(image.display().to_string());
     document["created"] = json!(created);
     document["started"] = json!(started);
-    output.block(
-        &document,
+    output.result(&document, |theme| start_block(theme, &document))
+}
+
+/// The started emulator's block, titled with its name, or with its image's
+/// file name when it has none.
+fn start_block(theme: &Theme, document: &Value) -> String {
+    let title = document["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .or_else(|| document["image"].as_str());
+    output::fields(
+        theme,
+        document,
+        title,
         &[
             ("Locator", "locator"),
-            ("Image", "image"),
-            ("Created", "created"),
-            ("Started", "started"),
+            ("Serial", "serial"),
+            ("Image", "path"),
             ("Environment", "environment"),
-            ("Ready", "ready"),
             ("Expires", "expires"),
         ],
     )
@@ -651,7 +717,7 @@ fn architecture(named: Option<GuestArch>) -> Result<GuestArch, Error> {
                 std::env::consts::ARCH
             ),
         )
-        .hint("pass `--arch` to name the architecture to boot")
+        .hint("pass --arch to name the architecture to boot")
     })
 }
 
@@ -758,17 +824,112 @@ fn iso8601(seconds: u64) -> Option<String> {
         .ok()
 }
 
+/// Tests of the result layouts, on invented emulators.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::style::Color;
     use tempfile::TempDir;
 
+    /// A list prints its columns in order, and an empty one its sentence.
+    #[test]
+    fn test_list_result_columns_and_empty_sentence() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        let rows = [
+            json!({
+                "locator": "emulator:18181", "image": "lab.ark", "ready": true,
+                "name": "Lab Emulator", "serial": "emulator-1234567-1",
+                "environment": "develop", "expires": null,
+            }),
+            json!({"locator": "emulator:18182", "ready": false}),
+        ];
+        assert_eq!(
+            output::table(&theme, &rows, LIST_COLUMNS, "No emulators running"),
+            "LOCATOR         NAME          SERIAL              ENVIRONMENT  READY  EXPIRES\nemulator:18181  Lab Emulator  emulator-1234567-1  develop      yes    -\nemulator:18182  -             -                   -            no     -",
+            "list columns and plain readiness"
+        );
+        assert_eq!(
+            output::table(&theme, &[], LIST_COLUMNS, "No emulators running"),
+            "No emulators running",
+            "empty inventory"
+        );
+    }
+
+    /// A start's block takes the emulator's name as its title, or the image's
+    /// file name, and shows the image's full path.
+    #[test]
+    fn test_start_result_uses_the_name_or_image_title() {
+        let path = dirs::home_dir().unwrap().join("arks/lab.ark");
+        let shown = if cfg!(any(target_os = "macos", target_os = "linux")) {
+            "~/arks/lab.ark".to_owned()
+        } else {
+            path.display().to_string()
+        };
+        let theme = Theme::fixed(200, Color::Off, true);
+        for (name, title) in [
+            (Some("Lab Emulator"), "Lab Emulator"),
+            (None, "lab.ark"),
+            (Some(""), "lab.ark"),
+        ] {
+            let document = json!({
+                "locator": "emulator:18181", "name": name,
+                "serial": "emulator-1234567-1", "image": "lab.ark",
+                "path": path.display().to_string(), "environment": "develop",
+                "ready": true, "created": true, "started": true, "expires": null,
+            });
+            assert_eq!(
+                start_block(&theme, &document),
+                format!(
+                    "{title}\n  Locator      emulator:18181\n  Serial       emulator-1234567-1\n  Image        {shown}\n  Environment  develop\n  Expires      -"
+                ),
+                "name={name:?}"
+            );
+        }
+    }
+
+    /// A wipe's block shows only its path, and JSON keeps the wiped flag.
+    #[test]
+    fn test_wipe_result_keeps_only_the_path() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        let document = json!({"path": "lab.ark", "wiped": true});
+        assert_eq!(
+            output::fields(&theme, &document, None, WIPE_ROWS),
+            "  Path  lab.ark",
+            "wipe block"
+        );
+        assert_eq!(document["wiped"], true, "JSON completion flag");
+    }
+
+    /// A button's result is its state after the command, with durations in the
+    /// house format.
+    #[test]
+    fn test_button_result_states_and_scheduled_releases() {
+        let theme = Theme::fixed(80, Color::Off, true);
+        for (pressed, delay, expected) in [
+            (false, None, "up"),
+            (false, Some(0), "up"),
+            (true, None, "down"),
+            (true, Some(0), "down"),
+            (true, Some(5), "down, released in 5s"),
+            (true, Some(62), "down, released in 1m 02s"),
+            (true, Some(3900), "down, released in 1h 05m"),
+        ] {
+            assert_eq!(
+                button_block(&theme, pressed, delay),
+                format!("  Button  {expected}"),
+                "pressed={pressed}, delay={delay:?}"
+            );
+        }
+    }
+
+    /// JSON keeps a timestamp as its whole UTC instant.
     #[test]
     fn test_a_timestamp_reads_as_a_utc_instant() {
-        assert_eq!(iso8601(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(iso8601(0).as_deref(), Some("1970-01-01T00:00:00Z"), "epoch");
         assert_eq!(
             iso8601(1_788_000_000).as_deref(),
-            Some("2026-08-29T10:40:00Z")
+            Some("2026-08-29T10:40:00Z"),
+            "expiry instant"
         );
     }
 
@@ -796,21 +957,58 @@ mod tests {
             running(18182, "b.ark", None, Some("abc123")),
         ];
         let ports = |picked: Vec<Instance>| picked.iter().map(|i| i.port).collect::<Vec<_>>();
-        assert_eq!(ports(pick(&both, Some("emulator:18182")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both, Some("demo")).unwrap()), [18181]);
-        assert_eq!(ports(pick(&both, Some("b.ark")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both, Some("abc123")).unwrap()), [18182]);
-        assert_eq!(ports(pick(&both[..1], None).unwrap()), [18181]);
-        assert_eq!(ports(pick(&both[..1], Some("emulator")).unwrap()), [18181]);
-
-        assert_eq!(pick(&both, None).unwrap_err().code, Code::AmbiguousEmulator);
-        assert_eq!(pick(&[], None).unwrap_err().code, Code::NoEmulator);
         assert_eq!(
-            pick(&both, Some("emulator:1")).unwrap_err().code,
-            Code::NoEmulator
+            ports(pick(&both, Some("emulator:18182"), "stop").unwrap()),
+            [18182],
+            "locator"
         );
-        let bare = pick(&both, Some("18181")).unwrap_err();
-        assert_eq!(bare.code, Code::NoEmulator);
+        assert_eq!(
+            ports(pick(&both, Some("demo"), "stop").unwrap()),
+            [18181],
+            "name"
+        );
+        assert_eq!(
+            ports(pick(&both, Some("b.ark"), "stop").unwrap()),
+            [18182],
+            "image"
+        );
+        assert_eq!(
+            ports(pick(&both, Some("abc123"), "stop").unwrap()),
+            [18182],
+            "serial"
+        );
+        assert_eq!(
+            ports(pick(&both[..1], None, "stop").unwrap()),
+            [18181],
+            "only instance"
+        );
+        assert_eq!(
+            ports(pick(&both[..1], Some("emulator"), "stop").unwrap()),
+            [18181],
+            "emulator kind"
+        );
+
+        assert_eq!(
+            pick(&both, None, "stop").unwrap_err().code,
+            Code::AmbiguousEmulator,
+            "several instances"
+        );
+        assert_eq!(
+            pick(&[], None, "stop").unwrap_err().code,
+            Code::NoEmulator,
+            "no instance"
+        );
+        assert_eq!(
+            pick(&both, Some("emulator:1"), "stop").unwrap_err().code,
+            Code::NoEmulator,
+            "unmatched locator"
+        );
+        let bare = pick(&both, Some("18181"), "stop").unwrap_err();
+        assert_eq!(
+            bare.code,
+            Code::NoEmulator,
+            "a port needs its locator prefix"
+        );
         assert!(bare.hints[0].contains("emulator:18181"), "{:?}", bare.hints);
 
         let twins = [
@@ -818,9 +1016,34 @@ mod tests {
             running(18182, "same.ark", None, None),
         ];
         assert_eq!(
-            pick(&twins, Some("same.ark")).unwrap_err().code,
-            Code::AmbiguousEmulator
+            pick(&twins, Some("same.ark"), "stop").unwrap_err().code,
+            Code::AmbiguousEmulator,
+            "shared image name"
         );
+
+        // The example locator comes from the matches, never another emulator
+        let matches = [
+            running(18180, "other.ark", None, None),
+            twins[0].clone(),
+            twins[1].clone(),
+        ];
+        for (command, hint) in [
+            (
+                "stop",
+                "name one, as in `ark-emulator stop emulator:18181`, or pass --all",
+            ),
+            (
+                "button press",
+                "name one, as in `ark-emulator button press emulator:18181`",
+            ),
+            (
+                "button release",
+                "name one, as in `ark-emulator button release emulator:18181`",
+            ),
+        ] {
+            let error = pick(&matches, Some("same.ark"), command).unwrap_err();
+            assert_eq!(error.hints, [hint], "{command}: matching locator");
+        }
     }
 
     /// The tail is the end of the log, not its beginning, and a log that is

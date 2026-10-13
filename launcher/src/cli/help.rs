@@ -6,11 +6,9 @@
 
 //! The manual, which is the only thing an agent plans from.
 //!
-//! Every command carries its whole contract: what has to be true first, how
-//! long to expect it to take, what it prints and what it can exit with, then
-//! two examples. `-h` is the scan of that page, `--help` and
-//! `ark-emulator help <command>` are the contract, and the topics below are
-//! the reference a reader arrives at from either.
+//! Every command page carries its contract, with what the command requires,
+//! how long it takes and its JSON keys, then two examples. `-h`, `--help` and `ark-emulator help <command>` print the same
+//! page, and the topics are the reference a reader arrives at from it.
 //!
 //! The tree built here is also the one a run is parsed with, so the pages and
 //! the arguments cannot drift apart. Help prints text on stdout whatever the
@@ -23,11 +21,18 @@ use super::style::{self, Color, Role, Theme};
 use crate::error::{Code, Error};
 
 /// The topics this build carries, in the order the manual prints them.
-const TOPICS: [&str; 4] = ["agents", "images", "registry", "output"];
+const TOPICS: [&str; 5] = ["agents", "images", "registry", "output", "errors"];
 
-/// The column the contract's values start in, one past the widest label and
-/// its colon.
-const COLUMN: usize = 10;
+/// The widest a help page or topic gets, in cells, even on a wider terminal.
+const WIDTH: usize = 80;
+
+/// The options every command takes, in the root page's order.
+const GLOBAL: [&str; 6] = ["json", "no_input", "timeout", "quiet", "verbose", "log"];
+
+/// The boot options, for a run with no command or for `start`, in page order.
+const BOOT: [&str; 8] = [
+    "headless", "image", "env", "memory", "arch", "kernel", "initrd", "port",
+];
 
 /// What a help page is styled with. It is written for reading even when the
 /// run answers in JSON, so the theme never follows that flag.
@@ -40,14 +45,9 @@ fn theme() -> Theme {
 /// build and a moved argument would answer to another's flag.
 fn command(theme: &Theme) -> clap::Command {
     let mut command = Cli::command();
-    let globals: Vec<clap::Arg> = command
-        .get_arguments()
-        .filter(|argument| argument.is_global_set())
-        .cloned()
-        .collect();
-    decorate(&mut command, "", theme, &globals);
+    decorate(&mut command, "", theme);
     command.build();
-    compact(&mut command, theme);
+    compact(&mut command, theme, true);
     command
 }
 
@@ -57,10 +57,8 @@ pub(crate) fn parser() -> clap::Command {
     command(&theme())
 }
 
-/// Print a command's page, a topic, or the whole manual. `long` is the
-/// contract rather than the scan, which is what `--help` asks for and `-h`
-/// does not.
-pub(crate) fn run(path: &[String], all: bool, long: bool) -> Result<(), Error> {
+/// Prints a command's page, a topic, or the whole manual.
+pub(crate) fn run(path: &[String], all: bool) -> Result<(), Error> {
     let theme = theme();
     let mut root = command(&theme);
     if all {
@@ -72,18 +70,51 @@ pub(crate) fn run(path: &[String], all: bool, long: bool) -> Result<(), Error> {
         return print(&markdown(&theme, text));
     }
     let mut command = &mut root;
-    for name in path {
-        command = command.find_subcommand_mut(name).ok_or_else(|| {
-            Error::new(Code::Usage, format!("no command or topic named {name:?}"))
-                .hint("`ark-emulator help` lists the commands and the topics")
-        })?;
+    for (index, name) in path.iter().enumerate() {
+        if command.find_subcommand(name).is_none() {
+            return Err(unknown_page(command, path, index));
+        }
+        command = command.find_subcommand_mut(name).expect("a known command");
     }
-    let printed = if long {
-        command.print_long_help()
-    } else {
-        command.print_help()
-    };
-    printed.map_err(|err| Error::io(format!("could not print the help: {err}")))
+    print(command.render_long_help().ansi().to_string().trim_end())
+}
+
+/// The usage error for an unknown page, with clap's near match or the
+/// parent's help as its hint.
+fn unknown_page(command: &clap::Command, path: &[String], index: usize) -> Error {
+    let name = &path[index];
+    let suggestions = command
+        .clone()
+        .try_get_matches_from([command.get_name(), name])
+        .err()
+        .map(|error| {
+            super::usage::suggestions(&error, clap::error::ContextKind::SuggestedSubcommand)
+        })
+        .unwrap_or_default();
+    if index == 0 && suggestions.is_empty() {
+        let error = Error::new(Code::Usage, format!("unknown help topic '{name}'"));
+        return if let Some(suggested) = super::usage::similar(name, TOPICS) {
+            error.hint(format!(
+                "a similar topic exists: `ark-emulator help {suggested}`"
+            ))
+        } else {
+            error.hint("see `ark-emulator help --help`")
+        };
+    }
+
+    // Command suggestions use the path to the page's parent
+    let parent = std::iter::once("ark-emulator")
+        .chain(path[..index].iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut error = Error::new(Code::Usage, format!("unknown help command '{name}'"));
+    for suggested in suggestions {
+        error = error.hint(format!("a similar command exists: `{parent} {suggested}`"));
+    }
+    if error.hints.is_empty() {
+        error = error.hint(format!("see `{parent} --help`"));
+    }
+    error
 }
 
 /// Write a page to stdout, reporting a reader that has gone away rather than
@@ -98,16 +129,11 @@ fn print(text: &str) -> Result<(), Error> {
 
 /// Attach the palette, the contract lines and the examples to one command and
 /// everything under it. clap keeps owning the syntax and the argument help.
-///
-/// The options every command takes are listed on the root page for all of
-/// them, so each command below the root gets its own hidden copy of them
-/// before the build; clap then leaves the copy alone instead of propagating
-/// the root's visible one.
-fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &[clap::Arg]) {
+fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme) {
     *command = command
         .clone()
         .styles(theme.clap())
-        .term_width(theme.width)
+        .term_width(theme.width.min(WIDTH))
         .color(if theme.color == Color::Off {
             clap::ColorChoice::Never
         } else {
@@ -121,19 +147,13 @@ fn decorate(command: &mut clap::Command, parent: &str, theme: &Theme, globals: &
         .long("help")
         .action(clap::ArgAction::Help);
     if parent.is_empty() {
-        // The boot options belong to the bare run and to `start`, and clap
-        // would otherwise offer them on one line together with a command.
+        // Boot options apply to a run with no command and to `start`
         *command = command
             .clone()
             .override_usage("ark-emulator [OPTIONS]\n       ark-emulator <COMMAND>")
-            .arg(help.help("Print help; `ark-emulator help --all` prints the manual"));
+            .arg(help.help("Print help; `ark-emulator help --all` is the manual"));
     } else {
-        for global in globals {
-            *command = command.clone().arg(global.clone().hide(true));
-        }
-        *command = command
-            .clone()
-            .arg(help.help("Print help (see more with '--help')"));
+        *command = command.clone().arg(help.help("Print help"));
     }
     let path = if parent.is_empty() {
         command.get_name().to_owned()
@@ -153,53 +173,93 @@ Topics: {}.",
     );
     let closing = closing
         .lines()
-        .map(|line| style::wrap(&theme.inline(line), theme.width, 0))
+        .map(|line| style::wrap(&theme.inline(line), theme.width.min(WIDTH), 0))
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Clap selects the paragraph with the help action, and the template puts
-    // it between the description and usage
-    let paragraph = style::wrap(&theme.inline(contract.paragraph), theme.width, 0);
-    let mut decorated = command.clone().before_long_help(paragraph.clone());
-    if parent.is_empty() {
+    // -h, --help and help <command> all carry the paragraph and the contract
+    let paragraph = style::wrap(&theme.inline(contract.paragraph), theme.width.min(WIDTH), 0);
+    let help = if parent.is_empty() {
         let footer = footer(
             theme,
-            contract.footer.as_ref().expect("the bare run's footer"),
+            contract.footer.as_ref().expect("the root's contract"),
+            "Contract with no command:",
         );
-        decorated = decorated
-            .before_help(paragraph)
-            .after_help(format!("{closing}\n"))
-            .after_long_help(format!("{footer}\n\n{closing}\n"));
+        format!("{footer}\n\n{}\n\n{closing}", exit_codes(theme))
     } else if let Some(fields) = &contract.footer {
-        decorated = decorated.after_long_help(format!("{}\n", footer(theme, fields)));
+        footer(theme, fields, "Contract:")
     } else {
-        decorated = decorated.after_long_help(format!(
-            "Each subcommand has its own requirements and output.\nRead {} COMMAND --help for its contract.\n", path
-        ));
-    }
-    *command = decorated;
+        format!(
+            "Each subcommand has its own requirements and output.\nRead `{} COMMAND --help` for its contract.",
+            path
+        )
+    };
+    let help = help
+        .lines()
+        .map(|line| style::wrap(line, theme.width.min(WIDTH), hanging(line)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    *command = command
+        .clone()
+        .before_help(paragraph.clone())
+        .before_long_help(paragraph)
+        .after_help(format!("{help}\n"))
+        .after_long_help(format!("{help}\n"));
     for child in command.get_subcommands_mut() {
-        decorate(child, &path, theme, globals);
+        decorate(child, &path, theme);
     }
 }
 
-/// Renders clap's compact option layout with the paragraph and footer selected
-/// by the help action.
-fn compact(command: &mut clap::Command, theme: &Theme) {
-    // Render the scan alone so the template can insert the paragraph after
-    // the description and the footer after the arguments and options
-    let rendered = command
+/// Lays out every page the same for each way of asking for help. Global
+/// options hide only on a display copy, so the parser keeps them.
+fn compact(command: &mut clap::Command, theme: &Theme, root: bool) {
+    let mut display = command
         .clone()
         .before_help(None)
         .before_long_help(None)
         .after_help(None)
-        .after_long_help(None)
-        .render_help()
-        .ansi()
-        .to_string();
+        .after_long_help(None);
+    if root {
+        for (order, name) in GLOBAL.into_iter().chain(["version", "help"]).enumerate() {
+            display = display.mut_arg(name, |arg| arg.display_order(order));
+        }
+        for (order, name) in BOOT.into_iter().enumerate() {
+            display = display.mut_arg(name, |arg| arg.display_order(order + GLOBAL.len() + 2));
+        }
+    } else {
+        for name in GLOBAL {
+            display = display.mut_arg(name, |arg| arg.hide(true));
+        }
+    }
+
+    // Group the root commands and wrap every row under its own description
+    let rendered = display.render_help().ansi().to_string();
     let scan = rendered
         .lines()
-        .map(|line| style::wrap(&theme.inline(line), theme.width, hanging(line)))
+        .map(|line| {
+            let plain = console::strip_ansi_codes(line);
+            let before = if root && plain.starts_with("  doctor ") {
+                "\n".to_owned()
+            } else if root && plain.split_whitespace().next() == Some("--headless") {
+                format!(
+                    "\n{}\n",
+                    style::wrap(
+                        &theme.paint(
+                            Role::Heading,
+                            "Boot options, with no command or with start:"
+                        ),
+                        theme.width.min(WIDTH),
+                        0,
+                    )
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "{before}{}",
+                style::wrap(&theme.inline(line), theme.width.min(WIDTH), hanging(line))
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let (description, scan) = scan.split_once("\n\n").unwrap_or((&scan, ""));
@@ -210,7 +270,7 @@ fn compact(command: &mut clap::Command, theme: &Theme) {
 
     // Subcommands use the same layout for their own paragraphs and footers
     for child in command.get_subcommands_mut() {
-        compact(child, theme);
+        compact(child, theme, false);
     }
 }
 
@@ -236,7 +296,7 @@ struct Contract {
     path: &'static str,
     /// Explanation between the one-line description and usage.
     paragraph: &'static str,
-    /// Contract fields for the bare run and leaves, absent on group pages.
+    /// The contract of a run with no command or of a leaf, absent on a group.
     footer: Option<ContractFooter>,
 }
 
@@ -246,10 +306,8 @@ struct ContractFooter {
     requires: &'static str,
     /// Expected duration and the waits the timeout bounds.
     time: &'static str,
-    /// Result fields in reading order and any JSON differences.
-    prints: &'static str,
-    /// Exit classes the command can return.
-    exit: &'static str,
+    /// Every key of the JSON document, or what prints in its place.
+    json: &'static str,
     /// Two invocations printed as bare commands.
     examples: &'static str,
 }
@@ -266,217 +324,210 @@ const CONTRACTS: &[Contract] = &[
         footer: Some(ContractFooter {
             requires: "a display unless --headless; a source build needs --kernel, --initrd \
                 and QEMU on PATH",
-            time: "runs in the foreground until the window closes, `ark-emulator stop`, \
-                Ctrl-C or SIGTERM; the firmware boots in about 10 s with hardware \
-                acceleration, minutes without; --timeout plays no part",
-            prints: "nothing on stdout, apart from the guest console of a run with \
-                --kernel and --initrd; the launcher's log lines on stderr, as log events \
-                under --json",
-            exit: "0 stopped; 1 launch, launcher or QEMU failure; 2 usage; 130/143 \
-                interrupted, device stopped",
+            time: "until the window closes, `ark-emulator stop`, Ctrl-C or SIGTERM; the \
+                firmware boots in about 10s with hardware acceleration; --timeout plays \
+                no part",
+            json: "none; stdout carries the guest console with --kernel and --initrd, and \
+                stderr narrates the boot",
             examples: "ark-emulator\nark-emulator --headless --image ~/arks/dev.ark",
         }),
     },
     Contract {
         path: "start",
-        paragraph: "Boots an emulator in a process of its own and waits until its firmware \
-            has booted. The emulator keeps running after start returns, until \
-            `ark-emulator stop`, and the locator it prints is what `ark --device` \
-            takes. Without --headless the emulator opens the device window. An image \
-            that is already booted is waited for and reported with started false, \
-            never booted twice. `ark-emulator help images` covers which image a start \
-            boots.",
+        paragraph: "The emulator runs in a process of its own, in its window unless \
+            --headless, until `ark-emulator stop`. Its locator is what `ark --device` \
+            takes. An image that is already booted is reported, never booted twice. A \
+            start that runs past --timeout fails with timeout while the emulator keeps \
+            booting. Which image a start boots is in `ark-emulator help images`.",
         footer: Some(ContractFooter {
             requires: "a free port from 18181 to 18280, or --port; a display unless \
                 --headless; a source build needs --kernel and --initrd",
-            time: "about 10 s with hardware acceleration, minutes without; --timeout \
-                bounds the wait for the firmware, after which the emulator keeps \
-                booting",
-            prints: "locator, image, created, started, environment, ready, expires; JSON \
-                adds port, path, name, serial and log",
-            exit: "0 ready; 1 image, firmware, launch or output failure; 2 usage; 3 \
-                registry unreachable; 7 not ready in time, still booting; 130/143 \
-                interrupted, still booting",
+            time: "about 10s with hardware acceleration, minutes without; --timeout \
+                bounds the wait, after which the emulator keeps booting",
+            json: "locator, port, image, ready, environment, name, serial, expires, log, \
+                path, created, started",
             examples: "ark-emulator start\nark-emulator start --headless --image ~/arks/dev.ark --json",
         }),
     },
     Contract {
         path: "list",
-        paragraph: "Lists every emulator the registry on this computer reports, without \
-            connecting to any. Environment, name, serial and expiry are what each \
-            emulator's firmware reported, absent until it has and never verified. \
-            `ark devices` shows the same emulators beside hardware Arks.",
+        paragraph: "It reads the registry this computer keeps and connects to no emulator. \
+            The name, serial, environment and expiry are what each emulator's firmware \
+            reported, absent until it has and never verified. `ark devices` shows the \
+            same emulators beside hardware Arks.",
         footer: Some(ContractFooter {
-            requires: "nothing; no emulator running is an empty list",
+            requires: "nothing",
             time: "immediate",
-            prints: "locator, image, ready, environment, name, serial, expires; JSON adds \
-                port and log",
-            exit: "0 done; 1 output failure; 2 usage; 3 registry unreadable; 130/143 \
-                interrupted",
+            json: "emulators, each with locator, port, image, ready, environment, name, \
+                serial, expires and log",
             examples: "ark-emulator list\nark-emulator list --json",
         }),
     },
     Contract {
         path: "stop",
-        paragraph: "Asks the emulator to shut down, the way closing its window does, and \
-            waits until its launcher and QEMU have exited. The guest gets no warning, \
-            like hardware that loses power, so stop an emulator only while no `ark` \
-            command runs against it. With several running, name one as \
-            `ark --device` names it, or pass --all, which stops them one at a time in \
-            port order.",
+        paragraph: "It waits until the emulator's launcher and QEMU have exited. The guest \
+            gets no warning, like hardware that loses power, so stop an emulator only \
+            while no `ark` command runs against it. With several running, name one as \
+            `ark --device` names it, or pass --all, which stops them in port order. A \
+            stop that runs past --timeout fails with timeout while the emulator may \
+            still be shutting down.",
         footer: Some(ContractFooter {
-            requires: "a running emulator, named by locator, serial, name or image, or the \
-                only one; --all needs none",
+            requires: "a running emulator; --all needs none",
             time: "seconds; --timeout bounds the wait for the emulators to exit",
-            prints: "stopped, the locators of the emulators that stopped, kept on a later \
-                failure or timeout",
-            exit: "0 done; 1 output failure; 2 usage; 3 selection, registry or control \
-                failure; 7 shutdown not confirmed in time; 130/143 interrupted",
+            json: "stopped, the locators that stopped, kept when a later one fails",
             examples: "ark-emulator stop\nark-emulator stop emulator:18181 --json",
         }),
     },
     Contract {
         path: "button",
-        paragraph: "Presses an emulated Ark's reset button from the command line. The window \
-            and the command line hold the button independently, and it is down while \
-            either holds it. While `ark pair` waits for the button, a press confirms \
-            the pairing at once. At any other time, a hold of 5 s arms a factory \
-            reset, which erases the device's data and pairing once the button is let \
-            go, and keeps its enrollment.",
+        paragraph: "The window and the command line hold the button independently, and it \
+            is down while either holds it. While `ark pair` waits for the button, a \
+            press confirms the pairing at once. At any other time, a hold of 5s arms a \
+            factory reset, which erases the device's data and pairing once the button \
+            is let go, and keeps its enrollment.",
         footer: None,
     },
     Contract {
         path: "button press",
-        paragraph: "Presses the button and holds it until `ark-emulator button release`, or \
-            for --release-after seconds. --release-after 0 is one short press, released \
-            before the command returns. The hold outlives the command and ends if the \
-            emulated hardware disconnects. A press while the command line holds the \
-            button sends no second press, and replaces or cancels the timer.",
+        paragraph: "A plain press is released before the command returns, which is what \
+            `ark pair` waits for. --hold keeps the button down until \
+            `ark-emulator button release`, and --hold-for releases it after that many \
+            seconds. A hold outlives the command and ends if the emulated hardware \
+            disconnects. A press while the command line holds the button sends no \
+            second press, and replaces or cancels the timer. A reply that does not \
+            come fails with timeout, and the button's state is then unknown.",
         footer: Some(ContractFooter {
-            requires: "a booted emulator, named by locator, serial, name or image, or the \
-                only one",
-            time: "under a second; --timeout bounds each reply; a positive \
-                --release-after returns once the release is scheduled",
-            prints: "locator; pressed, the button's state; CLI held, the command line's \
-                hold, cli_pressed in JSON; changed, whether that hold or its timer \
-                changed; release after, the accepted delay, release_after_seconds in JSON",
-            exit: "0 delivered; 1 output failure; 2 usage; 3 selection, control or \
-                hardware unavailable; 7 no reply in time, outcome unknown; 130/143 \
-                interrupted, outcome unknown",
-            examples: "ark-emulator button press --release-after 0\nark-emulator button press emulator:18181 --release-after 3 --json",
+            requires: "a booted emulator",
+            time: "under a second; --timeout bounds each reply; --hold-for returns once \
+                the release is scheduled",
+            json: "locator, pressed, cli_pressed, changed, release_after_seconds, which is \
+                0 for a press and null under --hold",
+            examples: "ark-emulator button press\nark-emulator button press emulator:18181 --hold-for 5 --json",
         }),
     },
     Contract {
         path: "button release",
-        paragraph: "Releases the command line's hold on the button and cancels a pending \
-            --release-after. The button stays down while the window holds it. \
-            Releasing a button the command line does not hold succeeds without a \
-            change, so it clears a press whose outcome is unknown.",
+        paragraph: "It also cancels the release --hold-for scheduled. The button stays \
+            down while the window holds it. Releasing a button the command line does \
+            not hold succeeds without a change, so it clears a press whose outcome is \
+            unknown.",
         footer: Some(ContractFooter {
-            requires: "a booted emulator, named by locator, serial, name or image, or the \
-                only one",
+            requires: "a booted emulator",
             time: "under a second; --timeout bounds each reply",
-            prints: "locator; pressed; CLI held, cli_pressed in JSON; changed; release \
-                after, release_after_seconds in JSON, which is null",
-            exit: "0 released; 1 output failure; 2 usage; 3 selection, control or \
-                hardware unavailable; 7 no reply in time, outcome unknown; 130/143 \
-                interrupted, outcome unknown",
+            json: "locator, pressed, cli_pressed, changed, release_after_seconds, which \
+                is null",
             examples: "ark-emulator button release\nark-emulator button release emulator:18181 --json",
         }),
     },
     Contract {
         path: "wipe",
-        paragraph: "Replaces the image with an empty one at the same path, so its next boot \
-            is a factory-fresh device that needs `ark enroll` and `ark pair` again. \
-            Without PATH it wipes the image a start would boot. An image an emulator \
-            holds is refused, so stop that emulator first.",
+        paragraph: "It replaces the image with an empty one at the same path, so the \
+            device needs `ark enroll` and `ark pair` again. Without PATH it wipes the \
+            image a start would boot. An image an emulator holds fails with disk-busy, \
+            so stop that emulator first.",
         footer: Some(ContractFooter {
-            requires: "an image that exists and no emulator holds; confirmation at a \
-                terminal, or --yes",
+            requires: "an image no emulator holds; confirmation at a terminal, or --yes",
             time: "a second",
-            prints: "path, wiped",
-            exit: "0 done; 1 not confirmed, image missing or file error; 2 usage; 3 \
-                image in use or registry unreachable; 130/143 interrupted",
+            json: "path, wiped",
             examples: "ark-emulator wipe\nark-emulator wipe ~/arks/dev.ark --yes",
         }),
     },
     Contract {
         path: "doctor",
-        paragraph: "Runs every check in order and prints the whole list. It covers newer \
-            releases, QEMU, the bundled firmware, hardware acceleration, the data \
-            directory, the settings, the remembered image, the registry and a free \
-            port. Each check is ok, warn, fail or skip, with a hint where something \
-            needs action. It applies no fixes.",
+        paragraph: "It runs every check in order and prints the whole report, closed by a \
+            count of problems and warnings. It covers this build's version against the \
+            newest release, QEMU, the bundled firmware, hardware acceleration, the data \
+            directory, the settings, the remembered image, the log directory, the \
+            registry and a free port. It applies no fixes, and exits with the first \
+            failed check's code.",
         footer: Some(ContractFooter {
             requires: "nothing; a check that cannot run is skipped",
-            time: "seconds; --timeout bounds each network reply of the release lookup",
-            prints: "result, name, detail and hint for each check; JSON adds version, \
-                firmware, qemu, accel, arch, data_dir, settings, disk, logs_dir and \
-                registry",
-            exit: "0 no check failed; 1 or 3, the class of the first failed check; 1 \
-                output failure; 2 usage; 130/143 interrupted",
+            time: "seconds; --timeout bounds the release lookup",
+            json: "version, and checks, each with name, result, detail and hint",
             examples: "ark-emulator doctor\nark-emulator doctor --json",
         }),
     },
     Contract {
         path: "completions",
-        paragraph: "Prints the completion script for the shell on stdout. It never installs \
-            the script.",
+        paragraph: "It prints the script for the shell on stdout, even under --json, and \
+            never installs it.",
         footer: Some(ContractFooter {
             requires: "nothing",
             time: "immediate",
-            prints: "the shell's completion script, even under --json",
-            exit: "0 done; 1 output failure; 2 usage",
+            json: "none; the script prints as text",
             examples: "ark-emulator completions zsh\nark-emulator completions bash",
         }),
     },
     Contract {
         path: "help",
-        paragraph: "Prints the help page of a command, or a topic: agents, images, registry \
-            or output. `ark-emulator help --all` prints the whole manual, starting with \
-            the root page and the agents topic.",
+        paragraph: "`ark-emulator help --all` prints the whole manual, starting with the \
+            root page and the agents topic. The topics are agents, images, registry, \
+            output and errors. Help prints text even under --json.",
         footer: Some(ContractFooter {
             requires: "nothing",
             time: "immediate",
-            prints: "help text, even under --json",
-            exit: "0 done; 1 output failure; 2 no such command or topic",
+            json: "none; help prints as text",
             examples: "ark-emulator help agents\nark-emulator help start",
         }),
     },
 ];
 
-/// The contract as it prints: four labeled lines aligned on one column, then
-/// the examples as bare commands, since a pasted prompt breaks in a shell.
-fn footer(theme: &Theme, fields: &ContractFooter) -> String {
-    let mut lines: Vec<String> = [
+/// The contract with its values aligned in one column, then the examples as
+/// commands a reader can paste.
+fn footer(theme: &Theme, fields: &ContractFooter, heading: &str) -> String {
+    let rows = [
         ("Requires", fields.requires),
         ("Time", fields.time),
-        ("Prints", fields.prints),
-        ("Exit", fields.exit),
-    ]
-    .into_iter()
-    .map(|(label, text)| {
-        let label = format!("{label}:");
+        ("JSON", fields.json),
+    ];
+    let column = rows.iter().map(|(label, _)| label.len() + 4).max().unwrap();
+    let mut lines = vec![theme.paint(Role::Heading, heading)];
+    lines.extend(rows.into_iter().map(|(label, text)| {
         style::wrap(
             &format!(
-                "{}{}{}",
-                theme.paint(Role::Muted, &label),
-                " ".repeat(COLUMN - label.len()),
+                "  {}{}{}",
+                theme.paint(Role::Muted, label),
+                " ".repeat(column - label.len() - 2),
                 theme.inline(text)
             ),
-            theme.width,
-            COLUMN,
+            theme.width.min(WIDTH),
+            column,
         )
-    })
-    .collect();
+    }));
+
+    // Examples have their own heading and command color
     lines.push(format!("\n{}", theme.paint(Role::Heading, "Examples:")));
     lines.extend(fields.examples.lines().map(|line| {
         style::wrap(
             &format!("  {}", theme.paint(Role::Accent, line)),
-            theme.width,
+            theme.width.min(WIDTH),
             2,
         )
     }));
+    lines.join("\n")
+}
+
+/// The exit codes in one column, muted numbers beside plain meanings.
+fn exit_codes(theme: &Theme) -> String {
+    let mut lines = vec![theme.paint(Role::Heading, "Exit codes:")];
+    for (code, meaning) in [
+        ("0", "done"),
+        ("1", "a local file, a confirmation or a failed launch"),
+        ("2", "usage"),
+        ("3", "an emulator in the way or out of reach"),
+        ("7", "a wait that ran out"),
+        ("130", "Ctrl-C, or Ctrl-Break on Windows"),
+        ("143", "SIGTERM, or a closed console"),
+    ] {
+        lines.push(style::wrap(
+            &format!(
+                "  {}  {meaning}",
+                theme.paint(Role::Muted, format!("{code:>3}"))
+            ),
+            theme.width.min(WIDTH),
+            7,
+        ));
+    }
     lines.join("\n")
 }
 
@@ -492,7 +543,11 @@ fn markdown(theme: &Theme, text: &str) -> String {
     let mut block = None;
     let flush = |paragraph: &mut Option<(String, usize)>, lines: &mut Vec<String>| {
         if let Some((text, hanging)) = paragraph.take() {
-            lines.push(style::wrap(&theme.inline(&text), theme.width, hanging));
+            lines.push(style::wrap(
+                &theme.inline(&text),
+                theme.width.min(WIDTH),
+                hanging,
+            ));
         }
     };
     for line in text.lines() {
@@ -506,7 +561,7 @@ fn markdown(theme: &Theme, text: &str) -> String {
         if fenced {
             flush(&mut paragraph, &mut lines);
             let code = format!("  {}", theme.paint(Role::Accent, line));
-            lines.push(style::wrap(&code, theme.width, 2));
+            lines.push(style::wrap(&code, theme.width.min(WIDTH), 2));
             continue;
         }
         if indent >= 4 && !content.is_empty() {
@@ -515,7 +570,7 @@ fn markdown(theme: &Theme, text: &str) -> String {
             let code = &line[base.min(indent)..];
             let pad = if bullet { 4 } else { 2 };
             let code = format!("{}{}", " ".repeat(pad), theme.paint(Role::Accent, code));
-            lines.push(style::wrap(&code, theme.width, pad));
+            lines.push(style::wrap(&code, theme.width.min(WIDTH), pad));
             continue;
         }
         block = None;
@@ -525,7 +580,11 @@ fn markdown(theme: &Theme, text: &str) -> String {
         } else if line.starts_with('#') {
             flush(&mut paragraph, &mut lines);
             bullet = false;
-            lines.push(theme.paint(Role::Heading, content.trim_start_matches('#').trim_start()));
+            lines.push(style::wrap(
+                &theme.paint(Role::Heading, content.trim_start_matches('#').trim_start()),
+                theme.width.min(WIDTH),
+                0,
+            ));
         } else if line.starts_with("- ") {
             flush(&mut paragraph, &mut lines);
             bullet = true;
@@ -558,7 +617,7 @@ fn manual(root: &mut clap::Command, theme: &Theme) -> String {
             .iter()
             .map(|name| markdown(theme, topic(name).expect("a listed topic"))),
     );
-    let rule = theme.paint(Role::Muted, "-".repeat(theme.width.min(80)));
+    let rule = theme.paint(Role::Muted, "-".repeat(theme.width.min(WIDTH)));
     pages.join(&format!("\n\n{rule}\n\n"))
 }
 
@@ -584,10 +643,12 @@ fn topic(name: &str) -> Option<&'static str> {
         "images" => include_str!("help/images.md"),
         "registry" => include_str!("help/registry.md"),
         "output" => include_str!("help/output.md"),
+        "errors" => include_str!("help/errors.md"),
         _ => return None,
     })
 }
 
+/// Tests of the rendered pages, the parser and the topics.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +665,7 @@ mod tests {
         "help",
     ];
 
+    /// Every leaf includes the contract rows and two examples.
     #[test]
     fn test_every_command_states_its_whole_contract() {
         let theme = Theme::fixed(80, Color::Off, false);
@@ -617,7 +679,13 @@ mod tests {
                 .unwrap()
                 .render_long_help()
                 .to_string();
-            for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
+            for label in [
+                "Contract:",
+                "  Requires  ",
+                "  Time      ",
+                "  JSON      ",
+                "Examples:",
+            ] {
                 assert!(page.contains(label), "{name}: {label}");
             }
             assert_eq!(page.matches("\n  ark-emulator ").count(), 2, "{name}");
@@ -632,23 +700,33 @@ mod tests {
         let mut root = command(&theme);
         let group = root.find_subcommand_mut("button").unwrap();
         let page = group.render_long_help().to_string();
-        assert!(!page.contains("Requires:"));
-        assert!(page.contains("Each subcommand has its own requirements and output"));
+        assert!(!page.contains("Contract:"), "groups carry no contract");
+        assert!(
+            page.contains("Each subcommand has its own requirements and output"),
+            "group footer"
+        );
         for name in ["press", "release"] {
             let page = group
                 .find_subcommand_mut(name)
                 .unwrap()
                 .render_long_help()
                 .to_string();
-            for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
+            for label in [
+                "Contract:",
+                "  Requires  ",
+                "  Time      ",
+                "  JSON      ",
+                "Examples:",
+            ] {
                 assert!(page.contains(label), "{name}: {label}");
             }
             assert_eq!(
                 page.matches(&format!("\n  ark-emulator button {name}"))
                     .count(),
-                2
+                2,
+                "{name} examples"
             );
-            assert!(!page.contains("--no-input"));
+            assert!(!page.contains("--no-input"), "{name} global options");
         }
     }
 
@@ -667,33 +745,47 @@ mod tests {
         }
     }
 
+    /// The root page states the contract of a run with no command and names
+    /// every topic.
     #[test]
-    fn test_the_bare_run_states_its_contract_on_the_root_page() {
+    fn test_a_run_with_no_command_states_its_contract_on_the_root_page() {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_long_help().to_string();
-        for label in ["Requires:", "Time:", "Prints:", "Exit:", "Examples:"] {
+        for label in [
+            "Contract with no command:",
+            "  Requires  ",
+            "  Time      ",
+            "  JSON      ",
+            "Examples:",
+            "Exit codes:",
+        ] {
             assert!(page.contains(label), "{label}");
         }
-        assert!(page.contains("Topics: agents, images, registry, output."));
+        assert!(
+            page.contains("Topics: agents, images, registry, output, errors."),
+            "topic list"
+        );
     }
 
-    /// The short root page lists all commands within one screen.
+    /// The root page lists every command and quotes the manual's command.
     #[test]
-    fn test_the_root_scan_fits_on_a_screen() {
+    fn test_the_root_scan_lists_every_command() {
         let theme = Theme::fixed(80, Color::Off, false);
         let page = command(&theme).render_help().to_string();
-        assert!(page.lines().count() <= 42, "{}", page.lines().count());
+        assert!(
+            page.contains("`ark-emulator help --all`"),
+            "quoted help command"
+        );
         for command in COMMANDS {
             assert!(page.contains(command), "{command}");
         }
     }
 
-    /// Every long page places a nonempty paragraph after its description,
-    /// while only the root keeps its paragraph on the short page.
+    /// Every way of asking for help puts a paragraph after the one-liner.
     #[test]
     fn test_paragraphs_follow_descriptions_on_the_right_pages() {
         /// Checks the preamble of a command and every command below it.
-        fn check(command: &mut clap::Command, root: bool, width: usize) {
+        fn check(command: &mut clap::Command, width: usize) {
             // Separate each preamble from usage and check the paragraph's
             // spacing independently of its wording
             let long = command.render_long_help().to_string();
@@ -708,18 +800,17 @@ mod tests {
             for line in paragraph.lines() {
                 assert!(console::measure_text_width(line) <= width, "{name}: {line}");
             }
-            let (scan, _) = short.split_once("\n\nUsage:").expect(name);
-            assert_eq!(scan, if root { preamble } else { description }, "{name}");
+            assert_eq!(short, long, "{name}");
 
             // Visit the actual tree so a new command also needs a paragraph
             for child in command.get_subcommands_mut() {
-                check(child, false, width);
+                check(child, width);
             }
         }
 
         for width in [40, 80, 120] {
             let theme = Theme::fixed(width, Color::Off, false);
-            check(&mut command(&theme), true, width);
+            check(&mut command(&theme), width.min(80));
         }
     }
 
@@ -746,7 +837,7 @@ mod tests {
             "completions",
             "help",
         ];
-        assert_eq!(pages.len(), paths.len() + TOPICS.len());
+        assert_eq!(pages.len(), paths.len() + TOPICS.len(), "manual pages");
         for (index, path) in paths.into_iter().enumerate() {
             let page = pages[if index == 0 { 0 } else { index + 1 }];
             let usage = page
@@ -758,7 +849,11 @@ mod tests {
             } else {
                 format!("ark-emulator {path}")
             };
-            assert_eq!(usage.split(['[', '<']).next().unwrap().trim(), path);
+            assert_eq!(
+                usage.split(['[', '<']).next().unwrap().trim(),
+                path,
+                "{index}"
+            );
         }
 
         // Each advertised topic has a nonempty page at its expected position
@@ -767,6 +862,7 @@ mod tests {
             ("images", 12),
             ("registry", 13),
             ("output", 14),
+            ("errors", 15),
         ] {
             let page = markdown(&theme, topic(name).unwrap());
             assert!(!page.trim().is_empty(), "{name}");
@@ -779,13 +875,12 @@ mod tests {
     }
 
     /// The two help flags after a command are what an agent tries first, and
-    /// they print the same page `help <command>` does, the scan for `-h` and
-    /// the contract for `--help`.
+    /// they print the same whole contract.
     #[test]
     fn test_help_flags_after_a_command_print_its_page() {
-        for (arguments, contract) in [
-            (["ark-emulator", "wipe", "-h"], false),
-            (["ark-emulator", "wipe", "--help"], true),
+        for arguments in [
+            ["ark-emulator", "wipe", "-h"],
+            ["ark-emulator", "wipe", "--help"],
         ] {
             let error = parser().try_get_matches_from(arguments).unwrap_err();
             assert_eq!(
@@ -795,7 +890,7 @@ mod tests {
             );
             let page = error.render().to_string();
             assert!(page.contains("Reset a stopped image"), "{arguments:?}");
-            assert_eq!(page.contains("Requires:"), contract, "{arguments:?}");
+            assert!(page.contains("Contract:"), "{arguments:?}");
         }
     }
 
@@ -805,25 +900,290 @@ mod tests {
     fn test_global_options_are_listed_once() {
         let theme = Theme::fixed(80, Color::Off, false);
         let mut root = command(&theme);
-        assert!(root.render_help().to_string().contains("--no-input"));
-        let page = root
-            .find_subcommand_mut("list")
-            .unwrap()
-            .render_long_help()
-            .to_string();
-        assert!(!page.contains("--no-input"), "{page}");
+        let mut pages = Vec::new();
+        collect(&mut root, &mut pages);
+        for (index, page) in pages.iter().enumerate() {
+            let options = page.split_once("\nOptions:\n").expect("options section").1;
+            let options = options.split("\n\n").next().unwrap();
+            for flag in [
+                "--json",
+                "--no-input",
+                "--timeout",
+                "--quiet",
+                "--verbose",
+                "--log",
+            ] {
+                assert_eq!(
+                    options.matches(flag).count(),
+                    usize::from(index == 0),
+                    "page {index}: {flag}"
+                );
+            }
+            assert_eq!(
+                options.matches("-h, --help").count(),
+                1,
+                "page {index}: help"
+            );
+        }
     }
 
+    /// A global option means the same before, between and after commands.
+    #[test]
+    fn test_global_options_parse_at_every_level() {
+        use clap::FromArgMatches as _;
+        use serde_json::json;
+
+        for (flags, key, expected) in [
+            (vec!["--json"], "json", json!(true)),
+            (vec!["--no-input"], "no_input", json!(true)),
+            (vec!["--timeout", "17"], "timeout", json!(17)),
+            (vec!["--quiet"], "quiet", json!(true)),
+            (vec!["-q"], "quiet", json!(true)),
+            (vec!["--verbose"], "verbose", json!(true)),
+            (vec!["-v"], "verbose", json!(true)),
+            (vec!["--log", "trace"], "log", json!("trace")),
+        ] {
+            for path in [vec!["list"], vec!["button", "release"], vec!["start"]] {
+                for level in 0..=path.len() {
+                    let mut arguments = vec!["ark-emulator"];
+                    arguments.extend_from_slice(&path[..level]);
+                    arguments.extend_from_slice(&flags);
+                    arguments.extend_from_slice(&path[level..]);
+                    let matches = command(&Theme::fixed(80, Color::Off, false))
+                        .try_get_matches_from(&arguments)
+                        .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+                    let cli = Cli::from_arg_matches(&matches).unwrap();
+                    let actual = json!({
+                        "json": cli.global.json, "no_input": cli.global.no_input,
+                        "timeout": cli.global.timeout, "quiet": cli.global.quiet,
+                        "verbose": cli.global.verbose,
+                        "log": cli.global.log.map(|log| match log {
+                            super::super::args::Log::Debug => "debug",
+                            super::super::args::Log::Trace => "trace",
+                        }),
+                    });
+                    let mut wanted = json!({
+                        "json": false, "no_input": false, "timeout": 120,
+                        "quiet": false, "verbose": false, "log": null,
+                    });
+                    wanted[key] = expected.clone();
+                    assert_eq!(actual, wanted, "{arguments:?}");
+                    assert!(
+                        !cli.version && !cli.boot.named(),
+                        "{arguments:?}: root options"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The root page's sections, command groups and options come in reading
+    /// order.
+    #[test]
+    fn test_root_sections_and_option_order() {
+        let page = command(&Theme::fixed(80, Color::Off, false))
+            .render_help()
+            .to_string();
+        let mut rest = page.as_str();
+        for section in [
+            "Usage: ark-emulator [OPTIONS]\n       ark-emulator <COMMAND>",
+            "Commands:",
+            "Options:",
+            "Boot options, with no command or with start:",
+            "Contract with no command:",
+            "Examples:",
+            "Exit codes:",
+            "Output is formatted for reading; --json keeps complete, exact values.",
+            "AI agents: read `ark-emulator help agents` first.",
+            "Topics: agents, images, registry, output, errors.",
+        ] {
+            rest = rest
+                .split_once(section)
+                .unwrap_or_else(|| panic!("missing or misplaced {section}: {page}"))
+                .1;
+        }
+        let commands = page
+            .split_once("Commands:\n")
+            .unwrap()
+            .1
+            .split_once("\nOptions:")
+            .unwrap()
+            .0;
+        let names: Vec<_> = commands
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "start",
+                "list",
+                "stop",
+                "button",
+                "wipe",
+                "doctor",
+                "completions",
+                "help"
+            ],
+            "root commands"
+        );
+        assert!(commands.contains("\n\n  doctor "), "command groups");
+
+        // The shared options precede boot options, each shown once
+        let mut options = page.split_once("Options:\n").unwrap().1;
+        for flag in [
+            "--json",
+            "--no-input",
+            "--timeout",
+            "-q, --quiet",
+            "-v, --verbose",
+            "--log",
+            "-V, --version",
+            "-h, --help",
+        ] {
+            options = options
+                .split_once(flag)
+                .unwrap_or_else(|| panic!("misplaced {flag}: {page}"))
+                .1;
+        }
+        let mut boot = page
+            .split_once("Boot options, with no command or with start:\n")
+            .unwrap()
+            .1;
+        for flag in [
+            "--headless",
+            "--image",
+            "--env",
+            "--memory",
+            "--arch",
+            "--kernel",
+            "--initrd",
+            "--port",
+        ] {
+            boot = boot
+                .split_once(flag)
+                .unwrap_or_else(|| panic!("misplaced {flag}: {page}"))
+                .1;
+        }
+    }
+
+    /// A contract names the document's keys, with no exit or approval row.
+    #[test]
+    fn test_json_contracts_name_every_result_key() {
+        let mut root = command(&Theme::fixed(80, Color::Off, false));
+        for (path, keys) in [
+            (
+                "start",
+                "locator port image path created started environment name serial ready expires log",
+            ),
+            (
+                "list",
+                "emulators locator port image ready environment name serial expires log",
+            ),
+            ("stop", "stopped"),
+            (
+                "button press",
+                "locator pressed cli_pressed changed release_after_seconds",
+            ),
+            (
+                "button release",
+                "locator pressed cli_pressed changed release_after_seconds",
+            ),
+            ("wipe", "path wiped"),
+            ("doctor", "version checks name result detail hint"),
+        ] {
+            let mut command = &mut root;
+            for name in path.split_whitespace() {
+                command = command.find_subcommand_mut(name).unwrap();
+            }
+            let page = command.render_help().to_string();
+            let json = page
+                .split_once("  JSON      ")
+                .unwrap()
+                .1
+                .split_once("\n\nExamples:")
+                .unwrap()
+                .0;
+            for key in keys.split_whitespace() {
+                assert!(
+                    json.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                        .any(|word| word == key),
+                    "{path}: {key}"
+                );
+            }
+            for removed in ["Prints", "Exit", "Approval"] {
+                assert!(
+                    !page.contains(&format!("\n  {removed}")),
+                    "{path}: {removed}"
+                );
+            }
+        }
+    }
+
+    /// Headings, contract labels and the exit codes take their own roles.
+    #[test]
+    fn test_contract_styles_and_exit_column() {
+        let theme = Theme::fixed(200, Color::True, true);
+        let page = command(&theme).render_help().ansi().to_string();
+        assert!(
+            page.contains("\x1b[1mContract with no command:\x1b[0m"),
+            "contract heading"
+        );
+        for label in ["Requires", "Time", "JSON"] {
+            assert!(
+                page.contains(&format!("\x1b[38;2;124;128;152m{label}\x1b[0m")),
+                "{label}"
+            );
+        }
+        for code in ["  0", "  1", "  2", "  3", "  7", "130", "143"] {
+            assert!(
+                page.contains(&format!("\n  \x1b[38;2;124;128;152m{code}\x1b[0m  ")),
+                "exit {code}"
+            );
+        }
+        let plain = console::strip_ansi_codes(&page);
+        let exits = plain
+            .split_once("Exit codes:\n")
+            .unwrap()
+            .1
+            .split_once("\n\n")
+            .unwrap()
+            .0;
+        assert_eq!(
+            exits,
+            "    0  done\n    1  a local file, a confirmation or a failed launch\n    2  usage\n    3  an emulator in the way or out of reach\n    7  a wait that ran out\n  130  Ctrl-C, or Ctrl-Break on Windows\n  143  SIGTERM, or a closed console",
+            "exit meanings and alignment"
+        );
+        let bare = command(&Theme::fixed(200, Color::Off, false))
+            .render_help()
+            .to_string();
+        assert_eq!(plain, bare, "color preserves layout");
+        assert!(
+            page.contains("`\x1b[1m\x1b[38;2;137;180;250mark-emulator help agents\x1b[0m`"),
+            "quoted command"
+        );
+    }
+
+    /// Command and topic pages fit both narrow and wide terminals.
     #[test]
     fn test_no_page_runs_past_the_width() {
-        for width in [80, 120] {
-            let theme = Theme::fixed(width, Color::Off, false);
+        for (width, color) in [
+            (40, Color::Off),
+            (80, Color::Off),
+            (200, Color::Off),
+            (40, Color::True),
+            (200, Color::True),
+        ] {
+            let theme = Theme::fixed(width, color, true);
             let mut root = command(&theme);
             let mut pages = Vec::new();
             collect(&mut root, &mut pages);
             pages.extend(TOPICS.map(|name| markdown(&theme, topic(name).unwrap())));
             for line in pages.join("\n").lines() {
-                assert!(console::measure_text_width(line) <= width, "{line}");
+                assert!(
+                    console::measure_text_width(line) <= width.min(80),
+                    "{width}: {line}"
+                );
             }
         }
     }
@@ -847,20 +1207,24 @@ mod tests {
         }
     }
 
-    /// The output topic is checked against the codes the tool defines, not
-    /// against a second list of them.
+    /// The errors topic names every error code the tool defines.
     #[test]
-    fn test_the_output_topic_names_every_error_code() {
-        let output = topic("output").unwrap();
+    fn test_the_errors_topic_names_every_error_code() {
+        let errors = markdown(
+            &Theme::fixed(80, Color::Off, false),
+            topic("errors").unwrap(),
+        );
         for code in Code::ALL {
             assert!(
-                output.contains(&format!("- `{}` means", code.name())),
+                errors.contains(&format!("`{}`", code.name())),
                 "{}",
                 code.name()
             );
         }
     }
 
+    /// A topic styles its headings, bullets and code, and keeps the backticks of
+    /// a quoted command.
     #[test]
     fn test_a_topic_renders_its_headings_bullets_and_code() {
         let theme = Theme::fixed(80, Color::Basic, true);
@@ -869,7 +1233,8 @@ mod tests {
                 &theme,
                 "# Stopping\n\nRun `ark-emulator list` first.\n\n- One emulator at a time.\n\n    ark-emulator stop 18181\n\n  It stops at once.\n"
             ),
-            "\x1b[1mStopping\x1b[0m\n\nRun \x1b[1mark-emulator list\x1b[0m first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m\n\n    It stops at once."
+            "\x1b[1mStopping\x1b[0m\n\nRun `\x1b[1mark-emulator list\x1b[0m` first.\n\n  - One emulator at a time.\n\n    \x1b[1mark-emulator stop 18181\x1b[0m\n\n    It stops at once.",
+            "headings, inline commands and examples keep their reading layout"
         );
     }
 
@@ -881,7 +1246,8 @@ mod tests {
         let text = "one two\nthree four five six seven eight nine ten\n\n- a bullet that runs\n  on and on and on\n";
         assert_eq!(
             markdown(&theme, text),
-            "one two three four five six seven eight\nnine ten\n\n  - a bullet that runs on and on and on"
+            "one two three four five six seven eight\nnine ten\n\n  - a bullet that runs on and on and on",
+            "paragraph and bullet wrapping"
         );
     }
 }

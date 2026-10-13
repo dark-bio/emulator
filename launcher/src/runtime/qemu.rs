@@ -441,6 +441,9 @@ mod tests {
     #[test]
     #[ignore = "requires qemu-img"]
     fn test_create_disk_replaces_an_existing_image() {
+        #[cfg(unix)]
+        let _exclusive = crate::ipc::local::PROCESS_TEST.lock().unwrap();
+
         let tmp = tempfile::TempDir::new().unwrap();
         let disk = tmp.path().join("disk.ark");
         std::fs::write(&disk, b"old contents").unwrap();
@@ -462,6 +465,9 @@ mod tests {
     #[test]
     #[ignore = "requires qemu-img"]
     fn test_create_disk_reports_an_invalid_destination() {
+        #[cfg(unix)]
+        let _exclusive = crate::ipc::local::PROCESS_TEST.lock().unwrap();
+
         let tmp = tempfile::TempDir::new().unwrap();
         let disk = tmp.path().join("missing-parent/disk.ark");
         let err = create_disk(&disk, None).unwrap_err().to_string();

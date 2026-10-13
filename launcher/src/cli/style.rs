@@ -4,22 +4,22 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//! What a terminal adds to a stream: the palette every Dark Bio tool paints
-//! with, the glyphs and their ASCII twins, the width lines wrap at, and the
-//! escaping that keeps text from a device or a file from steering the
-//! terminal. None of it carries information, so a pipe loses the styling and
-//! keeps every word.
+//! The palette every Dark Bio tool paints with, the glyphs and their ASCII
+//! twins, the width lines wrap at, and the escaping that keeps text from a
+//! device or a file from steering the terminal. Color carries no information,
+//! so a pipe loses it and keeps every word, and the glyphs follow the locale
+//! on a terminal and in a pipe alike.
 
 use std::io::{self, IsTerminal as _};
 
 use crate::platform;
 
-/// Semantic emphasis, the same seven roles every Dark Bio tool paints with.
+/// The semantic roles every Dark Bio command line tool paints with.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Role {
     /// Content whose meaning needs no emphasis.
     Default,
-    /// Section titles, help headings and table headers.
+    /// Help headings, a result's title and a check group.
     Heading,
     /// Completed or verified states.
     Success,
@@ -31,10 +31,6 @@ pub(crate) enum Role {
     Accent,
     /// Labels and secondary context.
     Muted,
-    /// The staging environment's label.
-    Staging,
-    /// The develop environment's label.
-    Develop,
 }
 
 /// How much styling a stream can carry.
@@ -56,7 +52,7 @@ pub(crate) struct Theme {
     /// Whether this stream is a terminal that may be styled.
     pub(crate) interactive: bool,
 
-    /// Whether the terminal and the locale allow the Unicode glyphs.
+    /// Whether the locale allows the Unicode glyphs, in a pipe too.
     pub(crate) unicode: bool,
 
     /// How much styling depth this stream has.
@@ -86,7 +82,7 @@ impl Theme {
             .into_iter()
             .filter_map(|key| std::env::var(key).ok())
             .find(|value| !value.is_empty());
-        let unicode = interactive
+        let unicode = !json
             && locale.is_none_or(|locale| {
                 let locale = locale.to_ascii_uppercase().replace('-', "");
                 locale.contains("UTF8") || cfg!(windows)
@@ -119,7 +115,7 @@ impl Theme {
 
     /// The escape sequence a role is painted with, degrading to bold and then
     /// to nothing as the stream's depth runs out.
-    fn style(&self, role: Role) -> clap::builder::styling::Style {
+    pub(crate) fn style(&self, role: Role) -> clap::builder::styling::Style {
         use clap::builder::styling::{Ansi256Color, RgbColor, Style};
         if self.color == Color::Off || role == Role::Default {
             return Style::new();
@@ -130,14 +126,11 @@ impl Theme {
             Role::Failure => (235, 96, 112),
             Role::Accent => (137, 180, 250),
             Role::Muted => (124, 128, 152),
-            Role::Staging => (147, 153, 178),
-            Role::Develop => (108, 112, 134),
             Role::Heading => return Style::new().bold(),
             Role::Default => return Style::new(),
         };
-        // The three quiet roles stay plain so that what they sit beside reads
-        // as the louder of the two.
-        let style = if matches!(role, Role::Muted | Role::Staging | Role::Develop) {
+        // Muted stays regular weight, and every other color is bold
+        let style = if role == Role::Muted {
             Style::new()
         } else {
             Style::new().bold()
@@ -165,7 +158,8 @@ impl Theme {
         if self.unicode { unicode } else { ascii }
     }
 
-    /// Put a role's mark before a state, so the state survives without color.
+    /// Put a state's mark before its word, with the mark alone in the role's
+    /// color.
     pub(crate) fn mark(&self, role: Role, text: &str) -> String {
         let icon = match role {
             Role::Success => self.glyph("\u{2713}", "ok"),
@@ -173,7 +167,7 @@ impl Theme {
             Role::Attention => "!",
             _ => self.glyph("\u{00b7}", "-"),
         };
-        self.paint(role, format!("{icon} {text}"))
+        format!("{} {text}", self.paint(role, icon))
     }
 
     /// Cut `text` to `width` cells, marking what was dropped.
@@ -212,7 +206,9 @@ impl Theme {
                 break;
             };
             painted.push_str(before);
+            painted.push('`');
             painted.push_str(&self.paint(Role::Accent, code));
+            painted.push('`');
             rest = tail;
         }
         painted.push_str(rest);
@@ -240,6 +236,17 @@ pub(crate) fn printable(text: &str) -> String {
 /// start a new row.
 pub(crate) fn cell(text: &str) -> String {
     printable(text).replace('\n', "\\n")
+}
+
+/// A duration in the house format, `14s`, `1m 02s` or `1h 05m`.
+pub(crate) fn duration(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// Wrap styled text at `width` cells, indenting every line after the first by
@@ -327,45 +334,171 @@ impl Theme {
 mod tests {
     use super::*;
 
+    /// A role degrades from color to bold to plain with the stream's depth.
     #[test]
     fn test_a_role_degrades_from_color_to_bold_to_plain() {
         let theme = Theme::fixed(80, Color::True, true);
         assert_eq!(
             theme.paint(Role::Success, "ready"),
-            "\x1b[1m\x1b[38;2;148;202;110mready\x1b[0m"
+            "\x1b[1m\x1b[38;2;148;202;110mready\x1b[0m",
+            "true color"
         );
         assert_eq!(
             Theme::fixed(80, Color::Ansi256, true).paint(Role::Success, "ready"),
-            "\x1b[1m\x1b[38;5;150mready\x1b[0m"
+            "\x1b[1m\x1b[38;5;150mready\x1b[0m",
+            "256 colors"
         );
         assert_eq!(
             Theme::fixed(80, Color::Basic, true).paint(Role::Success, "ready"),
-            "\x1b[1mready\x1b[0m"
+            "\x1b[1mready\x1b[0m",
+            "bold only"
         );
         assert_eq!(
             Theme::fixed(80, Color::Off, true).paint(Role::Success, "ready"),
-            "ready"
+            "ready",
+            "plain text"
         );
     }
 
+    /// A mark and its word read the same without color, in either glyph set.
     #[test]
     fn test_a_state_keeps_its_word_without_color_or_glyphs() {
         let colored = Theme::fixed(80, Color::Off, true);
-        assert_eq!(colored.mark(Role::Success, "yes"), "\u{2713} yes");
+        assert_eq!(
+            colored.mark(Role::Success, "done"),
+            "✓ done",
+            "Unicode mark"
+        );
         let plain = Theme::fixed(80, Color::Off, false);
-        assert_eq!(plain.mark(Role::Success, "yes"), "ok yes");
-        assert_eq!(plain.mark(Role::Default, "no"), "- no");
+        assert_eq!(plain.mark(Role::Success, "done"), "ok done", "ASCII mark");
+        assert_eq!(
+            plain.mark(Role::Muted, "skipped"),
+            "- skipped",
+            "neutral mark"
+        );
     }
 
+    /// Only a state's mark carries its role's color and weight.
+    #[test]
+    fn test_state_words_stay_plain() {
+        let theme = Theme::fixed(80, Color::True, true);
+        for (role, expected) in [
+            (Role::Success, "\x1b[1m\x1b[38;2;148;202;110m✓\x1b[0m done"),
+            (Role::Attention, "\x1b[1m\x1b[38;2;232;162;74m!\x1b[0m done"),
+            (Role::Failure, "\x1b[1m\x1b[38;2;235;96;112m✗\x1b[0m done"),
+            (Role::Muted, "\x1b[38;2;124;128;152m·\x1b[0m done"),
+        ] {
+            assert_eq!(theme.mark(role, "done"), expected, "{expected:?}");
+        }
+    }
+
+    /// Quoted commands keep their backticks, with and without color.
+    #[test]
+    fn test_inline_commands_keep_their_backticks() {
+        for (color, expected) in [
+            (
+                Color::Off,
+                "run `ark-emulator list`, then `ark-emulator stop`; keep `",
+            ),
+            (
+                Color::Basic,
+                "run `\x1b[1mark-emulator list\x1b[0m`, then `\x1b[1mark-emulator stop\x1b[0m`; keep `",
+            ),
+            (
+                Color::True,
+                "run `\x1b[1m\x1b[38;2;137;180;250mark-emulator list\x1b[0m`, then `\x1b[1m\x1b[38;2;137;180;250mark-emulator stop\x1b[0m`; keep `",
+            ),
+        ] {
+            assert_eq!(
+                Theme::fixed(80, color, true)
+                    .inline("run `ark-emulator list`, then `ark-emulator stop`; keep `"),
+                expected,
+                "{expected:?}"
+            );
+        }
+    }
+
+    /// The locale alone picks the glyphs in a pipe, whatever the terminal
+    /// settings say.
+    #[test]
+    fn test_piped_glyphs_follow_the_locale() {
+        #[cfg(unix)]
+        let _exclusive = crate::ipc::local::PROCESS_TEST.lock().unwrap();
+
+        // Each case runs in a child process, since the locale is process-wide
+        if let Ok(expected) = std::env::var("EMULATOR_TEST_GLYPH") {
+            for stderr in [false, true] {
+                let theme = Theme::new(false, stderr);
+                assert_eq!(
+                    theme.mark(Role::Success, "done"),
+                    format!("{expected} done"),
+                    "stderr={stderr}"
+                );
+                assert_eq!(
+                    Theme::new(true, stderr).mark(Role::Success, "done"),
+                    "ok done",
+                    "JSON styling, stderr={stderr}"
+                );
+            }
+            return;
+        }
+
+        for (all, ctype, lang, unicode) in [
+            (None, None, None, true),
+            (Some("en_US.UTF-8"), Some("C"), Some("C"), true),
+            (Some("C"), Some("en_US.UTF-8"), Some("en_US.UTF-8"), false),
+            (Some(""), Some("C.UTF8"), Some("C"), true),
+            (None, Some("C"), Some("en_US.UTF-8"), false),
+            (None, None, Some("en_US.UTF-8"), true),
+            (None, None, Some("POSIX"), false),
+        ] {
+            for term in ["dumb", "xterm-256color"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "cli::style::tests::test_piped_glyphs_follow_the_locale",
+                    ])
+                    .env(
+                        "EMULATOR_TEST_GLYPH",
+                        if unicode || cfg!(windows) {
+                            "✓"
+                        } else {
+                            "ok"
+                        },
+                    )
+                    .env("TERM", term)
+                    .env("COLORTERM", "truecolor")
+                    .env("CLICOLOR_FORCE", "1")
+                    .env_remove("NO_COLOR")
+                    .env_remove("CLICOLOR");
+                for (key, value) in [("LC_ALL", all), ("LC_CTYPE", ctype), ("LANG", lang)] {
+                    if let Some(value) = value {
+                        command.env(key, value);
+                    } else {
+                        command.env_remove(key);
+                    }
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{all:?}/{ctype:?}/{lang:?}, {term}: {output:?}"
+                );
+            }
+        }
+    }
+
+    /// A message keeps its own line breaks under the hanging indent.
     #[test]
     fn test_wrapping_keeps_the_lines_a_message_already_had() {
         let wrapped = wrap("the emulator exited\n[qemu] it would not start", 80, 4);
         assert_eq!(
-            wrapped,
-            "the emulator exited\n    [qemu] it would not start"
+            wrapped, "the emulator exited\n    [qemu] it would not start",
+            "existing line break"
         );
     }
 
+    /// Long paths wrap without losing text or exceeding the width.
     #[test]
     fn test_wrapping_keeps_every_line_within_the_width() {
         let theme = Theme::fixed(32, Color::True, true);
@@ -378,7 +511,8 @@ mod tests {
             console::strip_ansi_codes(&wrapped)
                 .split_whitespace()
                 .collect::<String>(),
-            path.replace(' ', "")
+            path.replace(' ', ""),
+            "the path survives wrapping"
         );
     }
 
@@ -386,8 +520,12 @@ mod tests {
     /// and nothing it carries may reach the terminal as a control sequence.
     #[test]
     fn test_untrusted_text_cannot_steer_the_terminal() {
-        assert_eq!(printable("ark\x1b[2J\r"), "ark\\u{1b}[2J\\r");
-        assert_eq!(printable("two\nlines"), "two\nlines");
-        assert_eq!(cell("two\nlines"), "two\\nlines");
+        assert_eq!(
+            printable("ark\x1b[2J\r"),
+            "ark\\u{1b}[2J\\r",
+            "terminal controls"
+        );
+        assert_eq!(printable("two\nlines"), "two\nlines", "message line break");
+        assert_eq!(cell("two\nlines"), "two\\nlines", "cell line break");
     }
 }
