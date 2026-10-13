@@ -10,7 +10,7 @@
 use std::io;
 use std::time::Duration;
 
-use console::{Key, Term};
+use console::Key;
 
 use crate::cli::clock::Clock;
 use crate::error::{Code, Error};
@@ -27,29 +27,21 @@ pub(super) trait Keys {
     fn read(&mut self) -> io::Result<Key>;
 }
 
-/// The terminal's keys, even when stdout and stderr are redirected.
-pub(super) struct Input {
-    /// The reader, whose write side marks it as a terminal for console on
-    /// Unix.
-    terminal: Term,
-}
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub(super) use unix::Input;
 
+/// The console's keys, even when stdout and stderr are redirected.
+#[cfg(windows)]
+pub(super) struct Input;
+
+#[cfg(windows)]
 impl Input {
-    /// Opens the terminal that supplies stdin.
+    /// Checks that stdin supplies a console input handle.
     pub(super) fn new() -> io::Result<Self> {
-        #[cfg(unix)]
-        let terminal = {
-            use std::os::fd::AsFd;
-            let descriptor = io::stdin().as_fd().try_clone_to_owned()?;
-            Term::read_write_pair(io::stdin(), std::fs::File::from(descriptor))
-        };
-        #[cfg(not(unix))]
-        let terminal = if Term::stderr().is_term() {
-            Term::stderr()
-        } else {
-            Term::stdout()
-        };
-        Ok(Self { terminal })
+        console_mode()?;
+        Ok(Self)
     }
 }
 
@@ -76,52 +68,79 @@ impl Keys for Input {
     }
 
     fn read(&mut self) -> io::Result<Key> {
+        #[cfg(unix)]
+        return self.read_key();
         #[cfg(windows)]
-        if !self.terminal.is_term() {
-            return redirected_key();
-        }
-        self.terminal.read_key_raw()
+        return console_key();
     }
 }
 
-/// Reads a key from the console when Windows has redirected stdout and
-/// stderr.
+/// The console's input flags, kept until the raw read ends.
 #[cfg(windows)]
-fn redirected_key() -> io::Result<Key> {
+static CONSOLE_MODE: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+/// Reads stdin's console input flags.
+#[cfg(windows)]
+fn console_mode() -> io::Result<u32> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+    let mut mode = 0;
+    // Sound since stdin stays open and mode is a writable word
+    if unsafe { GetConsoleMode(io::stdin().as_raw_handle(), &mut mode) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(mode)
+}
+
+/// Restores the console's input before shutdown, and keeps another raw read
+/// from starting.
+#[cfg(windows)]
+pub(crate) fn restore_console() {
+    let mut mode = CONSOLE_MODE.lock().unwrap();
+    restore_mode(&mut mode);
+    // Keep the read from reentering raw mode while the process exits
+    std::mem::forget(mode);
+}
+
+/// Restores the flags saved before the active console read.
+#[cfg(windows)]
+fn restore_mode(mode: &mut Option<u32>) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::SetConsoleMode;
+    if let Some(original) = mode.take() {
+        // Sound since stdin remains open and the flags came from GetConsoleMode
+        unsafe { SetConsoleMode(io::stdin().as_raw_handle(), original) };
+    }
+}
+
+/// Reads one console key, with its mode changes kept in step with shutdown.
+#[cfg(windows)]
+fn console_key() -> io::Result<Key> {
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::Console::{
-        ENABLE_PROCESSED_INPUT, GetConsoleMode, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW,
-        SetConsoleMode,
+        ENABLE_PROCESSED_INPUT, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, SetConsoleMode,
     };
 
     /// Restores the console's input mode after the key or a failed read.
-    struct Mode {
-        /// Stdin handle, which remains open while the guard exists.
-        handle: HANDLE,
-        /// The console's flags before this read.
-        original: u32,
-    }
+    struct Mode;
 
     impl Drop for Mode {
         fn drop(&mut self) {
-            // Sound since stdin remains open and original came from GetConsoleMode
-            unsafe { SetConsoleMode(self.handle, self.original) };
+            restore_mode(&mut CONSOLE_MODE.lock().unwrap());
         }
     }
 
     // Read Ctrl-C as a key so it follows the caller's cleanup path
     let handle = io::stdin().as_raw_handle();
-    let mut original = 0;
-    // Sound since the handle stays open and original is a writable mode word
-    if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let mut mode = CONSOLE_MODE.lock().unwrap();
+    let original = console_mode()?;
     // Sound since the handle stays open and these are console input flags
     if unsafe { SetConsoleMode(handle, original & !ENABLE_PROCESSED_INPUT) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let _mode = Mode { handle, original };
+    *mode = Some(original);
+    drop(mode);
+    let _mode = Mode;
 
     loop {
         // Sound since every field of INPUT_RECORD accepts zero
@@ -156,9 +175,10 @@ fn redirected_key() -> io::Result<Key> {
 /// `show` flushes the question, and the window starts then, on `clock`. Keys
 /// read within the window are dropped. After it, `y` and `n` answer, Enter
 /// takes `default`, and other keys are ignored. Ctrl-C returns the
-/// interruption error for the caller's cleanup.
+/// interruption error for the caller's cleanup. The terminal leaves raw mode
+/// before the answer prints.
 pub(super) fn confirm(
-    input: &mut impl Keys,
+    mut input: impl Keys,
     clock: &Clock,
     default: bool,
     show: impl FnOnce() -> Result<(), Error>,
@@ -190,6 +210,7 @@ pub(super) fn confirm(
             _ => {}
         }
     };
+    drop(input);
     echo(answer)?;
     Ok(answer)
 }
@@ -220,7 +241,7 @@ mod tests {
         discarded: bool,
     }
 
-    impl prompt::Keys for Keys {
+    impl prompt::Keys for &mut Keys {
         fn discard(&mut self) -> io::Result<()> {
             self.queued.clear();
             self.discarded = true;

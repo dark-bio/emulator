@@ -422,6 +422,9 @@ mod tests {
     /// settings say.
     #[test]
     fn test_piped_glyphs_follow_the_locale() {
+        #[cfg(unix)]
+        let _exclusive = crate::ipc::local::PROCESS_TEST.lock().unwrap();
+
         // Each case runs in a child process, since the locale is process-wide
         if let Ok(expected) = std::env::var("EMULATOR_TEST_GLYPH") {
             for stderr in [false, true] {

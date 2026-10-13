@@ -202,6 +202,9 @@ mod tests {
         use std::process::{Child, Command};
         use std::time::Instant;
 
+        #[cfg(unix)]
+        let _exclusive = local::PROCESS_TEST.lock().unwrap();
+
         /// Test child reaped even when a connection or assertion fails.
         struct Guest(
             /// QEMU process owned by this test.

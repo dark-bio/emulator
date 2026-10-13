@@ -160,7 +160,10 @@ fn start(boot: &Boot, global: &Global, output: &Output, paths: &Paths) -> Result
     let image = disk::select(boot.image.as_deref(), settings.disk(), &paths.data)
         .map_err(|err| Error::io(format!("{err:#}")))?;
 
-    if let Some(instance) = discovery::booted(&listing(output)?, &image) {
+    let looking = output.notice("Looking for running emulators");
+    let running = listing(output)?;
+    drop(looking);
+    if let Some(instance) = discovery::booted(&running, &image) {
         output.event(
             "note",
             format!("{} is already booted", disk::name_of(&image)),

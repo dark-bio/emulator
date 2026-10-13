@@ -13,6 +13,17 @@ use std::process::Command;
 
 mod support;
 
+#[path = "../src/ipc/local.rs"]
+#[allow(dead_code)] // only the listener serves these fixtures
+mod local;
+
+#[path = "../src/ipc/http.rs"]
+#[allow(dead_code)] // only the request reader serves these fixtures
+mod http;
+
+#[path = "terminal/windows.rs"]
+mod terminal;
+
 /// The script preserves arguments, waits for output, and returns the application's exit code.
 #[test]
 fn test_windows_launcher_waits_and_preserves_arguments_and_exit_codes() {
@@ -58,7 +69,9 @@ fn test_windows_launcher_waits_and_preserves_arguments_and_exit_codes() {
         let help = invoke(&["help", "start"]);
         assert_eq!(help.status.code(), Some(0), "{shell}: {help:?}");
         assert!(
-            String::from_utf8_lossy(&help.stdout).contains("Requires:"),
+            String::from_utf8_lossy(&help.stdout)
+                .replace("\r\n", "\n")
+                .contains("Contract:\n  Requires  "),
             "{shell}: {help:?}"
         );
 

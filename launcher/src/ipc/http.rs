@@ -551,6 +551,8 @@ mod tests {
     #[test]
     #[ignore = "requires curl with Unix socket support"]
     fn test_curl_unix_socket() {
+        #[cfg(unix)]
+        let _exclusive = local::PROCESS_TEST.lock().unwrap();
         let server = Server::bind(&format!("t-{}", local::identity())).unwrap();
         let path = local::address(server.name()).unwrap();
         let worker = thread::spawn(move || {

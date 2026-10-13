@@ -56,7 +56,7 @@ fn main() {
     let matches = match parser.try_get_matches_from_mut(&arguments) {
         Ok(matches) => matches,
         Err(error) => {
-            platform::attach_console();
+            attach_console(json);
             let mut global = Cli::parse_from(["ark-emulator"]).global;
             global.json = json;
             let output = output::Output::new(&global);
@@ -74,12 +74,12 @@ fn main() {
         }
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
-        platform::attach_console();
+        attach_console(json);
         let _ = error.print();
         ipc::local::exit(2);
     });
     if cli.version || cli.command.is_some() || cli.boot.headless {
-        platform::attach_console();
+        attach_console(cli.global.json);
     }
     let output = output::Output::new(&cli.global);
     desktop::reporting(&output, cli.global.no_input || cli.boot.headless);
@@ -116,4 +116,19 @@ fn main() {
     }
 
     desktop::run(context, cli.boot, cli.global.no_input, &output);
+}
+
+/// Attaches the console for a command's output, and on Windows installs the
+/// handler for its control events.
+fn attach_console(_json: bool) {
+    platform::attach_console();
+    #[cfg(windows)]
+    if let Err(err) = platform::install_shutdown() {
+        let mut global = Cli::parse_from(["ark-emulator"]).global;
+        global.json = _json;
+        let output = output::Output::new(&global);
+        let error = Error::io(format!("could not handle console events ({err})"));
+        output.error(&error);
+        ipc::local::exit(error.exit());
+    }
 }

@@ -69,7 +69,7 @@ try {
     if ($document.error.code -ne "usage") { throw "a usage error lost its JSON result" }
 
     $helpText = & $wrapper help start | Out-String
-    if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'Requires:') {
+    if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'Contract:\r?\n  Requires  ') {
         throw "help could not be read through a PowerShell pipeline"
     }
 

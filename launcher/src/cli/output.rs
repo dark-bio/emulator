@@ -18,6 +18,9 @@
 mod narration;
 mod prompt;
 
+#[cfg(windows)]
+pub(crate) use prompt::restore_console as restore_prompt;
+
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -441,14 +444,14 @@ impl Output {
                 .hint(format!("pass {flag} to confirm without being asked")));
         }
         self.confirm_with(
-            &mut prompt::Input::new()
+            prompt::Input::new()
                 .map_err(|err| Error::io(format!("could not open terminal input: {err}")))?,
             question,
         )
     }
 
     /// Ask the question through `input`, after dropping the keys typed ahead.
-    fn confirm_with(&self, input: &mut impl prompt::Keys, question: &str) -> Result<bool, Error> {
+    fn confirm_with(&self, input: impl prompt::Keys, question: &str) -> Result<bool, Error> {
         prompt::confirm(
             input,
             &self.0.clock,

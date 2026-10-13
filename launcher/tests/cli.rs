@@ -14,6 +14,10 @@ use std::process::{Command, Output};
 mod support;
 
 #[cfg(unix)]
+#[path = "terminal/mod.rs"]
+mod terminal;
+
+#[cfg(unix)]
 #[path = "../src/ipc/local.rs"]
 #[allow(dead_code)] // only its listener serves the fixtures
 mod local;
@@ -37,6 +41,7 @@ const COMMANDS: [&str; 9] = [
 ];
 
 /// Run the built binary with `arguments` and hand back what it did.
+/// On Unix, the calling test holds [`local::PROCESS_TEST`] through this call.
 fn run(arguments: &[&str]) -> Output {
     Command::new(support::executable())
         .args(arguments)
@@ -59,6 +64,8 @@ fn stderr(output: &Output) -> String {
 /// The version is one plain line, or one JSON field, with nothing on stderr.
 #[test]
 fn test_version_is_one_line_or_one_json_field() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let json = run(&["--json", "--version"]);
     assert!(json.status.success(), "JSON version: {}", stderr(&json));
     assert!(json.stderr.is_empty(), "JSON version stderr");
@@ -250,6 +257,7 @@ fn test_running_emulator_results() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn test_doctor_shortens_home_paths_only_for_reading() {
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     // Keep the settings and the image away from the owner's own
     let directory = tempfile::TempDir::new().unwrap();
     let test_home = directory.path().join("home");
@@ -495,6 +503,8 @@ fn test_doctor_shortens_home_paths_only_for_reading() {
 /// The private update entry point does nothing and prints nothing under CI.
 #[test]
 fn test_update_entry_point_is_silent_under_ci() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let output = run(&["__update"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
@@ -506,6 +516,7 @@ fn test_update_entry_point_is_silent_under_ci() {
 #[cfg(unix)]
 #[test]
 fn test_update_note_preserves_command_output_and_excludes_noncommands() {
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     // macOS uses Library/Caches while other Unix targets use XDG_CACHE_HOME
     let directory = tempfile::TempDir::new().unwrap();
     let home = directory.path().join("home");
@@ -714,6 +725,8 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
 /// Every way of asking for help prints the same page, under --json too.
 #[test]
 fn test_both_help_forms_answer_on_every_command() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     for command in std::iter::once("").chain(COMMANDS).chain(["button"]) {
         let mut arguments: Vec<_> = command.split_whitespace().collect();
         arguments.push("-h");
@@ -746,6 +759,8 @@ fn test_both_help_forms_answer_on_every_command() {
 /// Nested commands retain global flags, reject incomplete input and open no UI.
 #[test]
 fn test_button_group_and_invalid_arguments() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let group = run(&["button", "--help"]);
     assert!(group.status.success(), "button help");
     assert!(
@@ -943,6 +958,8 @@ fn test_button_press_modes_and_release_results() {
 /// The hold options belong to press, and --hold-for takes whole seconds from 1.
 #[test]
 fn test_button_hold_option_validation_and_help() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     // Both help pages list the options only under the command that takes them
     for flag in ["-h", "--help"] {
         for (action, expected) in [("press", true), ("release", false)] {
@@ -997,6 +1014,8 @@ fn test_button_hold_option_validation_and_help() {
 
 #[test]
 fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let plain = run(&["list", "--bogus"]);
     assert_eq!(plain.status.code(), Some(2));
     assert!(stdout(&plain).is_empty());
@@ -1034,6 +1053,8 @@ fn test_a_usage_error_takes_the_house_shape_on_both_outputs() {
 /// help.
 #[test]
 fn test_usage_messages_and_recovery_hints() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     for (arguments, message, hint) in [
         (
             vec!["statr"],
@@ -1216,6 +1237,8 @@ fn test_usage_messages_and_recovery_hints() {
 /// topic.
 #[test]
 fn test_the_manual_keeps_its_shape_and_its_links_in_a_pipe() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let manual = run(&["help", "--all"]);
     assert_eq!(manual.status.code(), Some(0), "manual exit");
     let text = stdout(&manual);
@@ -1243,6 +1266,8 @@ fn test_the_manual_keeps_its_shape_and_its_links_in_a_pipe() {
 /// Every topic prints as text under --json, the errors topic included.
 #[test]
 fn test_topics_print_text_on_both_outputs() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     for (topic, heading) in [
         ("agents", "Driving ark-emulator from an AI agent"),
         ("images", "Images"),
@@ -1270,6 +1295,8 @@ fn test_topics_print_text_on_both_outputs() {
 
 #[test]
 fn test_completions_are_shell_text_even_under_json() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let script = run(&["--json", "completions", "zsh"]);
     assert_eq!(script.status.code(), Some(0));
     let text = stdout(&script);
@@ -1280,6 +1307,8 @@ fn test_completions_are_shell_text_even_under_json() {
 /// Help and completions report a closed output pipe as a local I/O failure.
 #[test]
 fn test_help_and_completions_fail_when_the_output_pipe_is_closed() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     for arguments in [
         vec!["help"],
         vec!["help", "--all"],
@@ -1323,6 +1352,8 @@ fn test_help_and_completions_fail_when_the_output_pipe_is_closed() {
 /// Headless is a boot option in both modes, never a management option.
 #[test]
 fn test_headless_option_placement_and_help() {
+    #[cfg(unix)]
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     for arguments in [vec!["--help"], vec!["start", "--help"]] {
         let output = run(&arguments);
         assert!(output.status.success());
@@ -1343,6 +1374,7 @@ fn test_headless_option_placement_and_help() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_headless_startup_error_without_a_display_or_no_input_flag() {
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
     let directory = tempfile::TempDir::new().unwrap();
     std::fs::write(
         directory.path().join("bio.dark.emulator"),
