@@ -565,7 +565,8 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
     for case in [
         vec!["list"],
         vec!["button", "press", "emulator:0"],
-        vec!["button", "press", "emulator:0", "--release-after", "0"],
+        vec!["button", "press", "emulator:0", "--hold"],
+        vec!["button", "press", "emulator:0", "--hold-for", "1"],
         vec!["button", "release", "emulator:0"],
         vec!["--headless"],
     ] {
@@ -654,8 +655,11 @@ fn test_update_note_preserves_command_output_and_excludes_noncommands() {
         vec!["--json", "--version"],
         vec!["list", "--bogus"],
         vec!["list", "--timeout", "0"],
-        vec!["button", "press", "--release-after", "-1"],
-        vec!["button", "release", "--release-after", "0"],
+        vec!["button", "press", "--hold-for", "-1"],
+        vec!["button", "press", "--hold-for", "0"],
+        vec!["button", "press", "--hold", "--hold-for", "1"],
+        vec!["button", "press", "--release-after", "0"],
+        vec!["button", "release", "--hold-for", "1"],
         vec!["--headless", "button", "press"],
         vec!["--headless", "--kernel", "kernel"],
         vec!["list", "-q", "-v"],
@@ -780,48 +784,215 @@ fn test_button_group_and_invalid_arguments() {
     }
 }
 
-/// Timed release is a press-only option with a bounded nonnegative duration.
-/// A usage error keeps its message and hints in both outputs.
+/// Each button spelling sends its hold and prints its result, read and in JSON.
+#[cfg(unix)]
 #[test]
-fn test_timed_release_option_validation_and_help() {
-    // Both help forms advertise the option only on the command that accepts it
+fn test_button_press_modes_and_release_results() {
+    use std::time::Duration;
+
+    // Keep every command and listener apart from any running emulator
+    let _exclusive = local::PROCESS_TEST.lock().unwrap();
+    if std::env::var_os("ARK_EMULATOR_BUTTON_TEST").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "test_button_press_modes_and_release_results",
+                "--nocapture",
+            ])
+            .env("ARK_EMULATOR_BUTTON_TEST", "1")
+            .env(local::TEST_NAMESPACE, local::identity())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        return;
+    }
+
+    // Each spelling takes its own route and keeps the result's fields
+    for (arguments, path, pressed, seconds, reading) in [
+        (
+            vec!["button", "press"],
+            "/v1/button/press/0",
+            false,
+            Some(0),
+            "  Button  up\n",
+        ),
+        (
+            vec!["button", "press", "--hold"],
+            "/v1/button/press",
+            true,
+            None,
+            "  Button  down\n",
+        ),
+        (
+            vec!["button", "press", "--hold-for", "5"],
+            "/v1/button/press/5",
+            true,
+            Some(5),
+            "  Button  down, released in 5s\n",
+        ),
+        (
+            vec!["button", "release"],
+            "/v1/button/release",
+            false,
+            None,
+            "  Button  up\n",
+        ),
+    ] {
+        for json in [false, true] {
+            let registry = local::Server::bind_test("registry-18180").unwrap();
+            let id = local::identity();
+            let control = local::Server::bind_test(&format!("c-{id}")).unwrap();
+            let listing = serde_json::json!({
+                "version": 1,
+                "instances": [{
+                    "port": 18181, "disk": "lab.ark", "disk_id": "0123456789abcdef",
+                    "ready": true, "control": {"id": id},
+                }],
+            });
+            let outcome = serde_json::json!({
+                "pressed": pressed, "cli_pressed": pressed, "changed": true,
+                "release_after_seconds": seconds,
+            });
+
+            // Confirm the request before replying, without running a release timer
+            let worker = std::thread::spawn(move || {
+                let request = registry
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request.method().as_str(), "GET", "registry method");
+                request
+                    .respond(tiny_http::Response::from_string(listing.to_string()))
+                    .unwrap();
+
+                let request = control
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request.method().as_str(), "GET", "snapshot method");
+                assert_eq!(request.url(), "/v1/button", "snapshot route");
+                let held = path == "/v1/button/release";
+                let snapshot = serde_json::json!({
+                    "generation": "7", "connected": true, "pressed": held, "cli_pressed": held,
+                });
+                request
+                    .respond(tiny_http::Response::from_string(snapshot.to_string()))
+                    .unwrap();
+
+                let request = control
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request.method().as_str(), "POST", "button method");
+                assert_eq!(request.url(), path, "button route");
+                let generation = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-Ark-Generation"));
+                assert_eq!(
+                    generation.map(|header| header.value.as_str()),
+                    Some("7"),
+                    "connection generation"
+                );
+                assert!(request.body().is_empty(), "button request body");
+                request
+                    .respond(tiny_http::Response::from_string(outcome.to_string()))
+                    .unwrap();
+            });
+            let mut arguments = arguments.clone();
+            arguments.extend(["--timeout", "2"]);
+            if json {
+                arguments.push("--json");
+            }
+            let output = run(&arguments);
+            worker.join().unwrap();
+
+            // Both outputs report the acknowledged state without narration
+            assert!(
+                output.status.success(),
+                "{arguments:?}: {}",
+                stderr(&output)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{arguments:?}: {}",
+                stderr(&output)
+            );
+            if json {
+                let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(
+                    document,
+                    serde_json::json!({
+                        "locator": "emulator:18181", "pressed": pressed, "cli_pressed": pressed,
+                        "changed": true, "release_after_seconds": seconds,
+                    }),
+                    "{arguments:?}"
+                );
+            } else {
+                assert_eq!(stdout(&output), reading, "{arguments:?}");
+            }
+        }
+    }
+}
+
+/// The hold options belong to press, and --hold-for takes whole seconds from 1.
+#[test]
+fn test_button_hold_option_validation_and_help() {
+    // Both help pages list the options only under the command that takes them
     for flag in ["-h", "--help"] {
         for (action, expected) in [("press", true), ("release", false)] {
             let page = stdout(&run(&["button", action, flag]));
             let (_, options) = page.split_once("\nOptions:\n").unwrap();
             let options = options.split("\n\n").next().unwrap();
-            assert_eq!(
-                options.contains("--release-after"),
-                expected,
-                "{action} {flag}"
+            for option in ["--hold ", "--hold-for <SECONDS>"] {
+                assert_eq!(
+                    options.contains(option),
+                    expected,
+                    "{action} {flag}: {option}"
+                );
+            }
+            assert!(
+                !options.contains("--release-after"),
+                "{action} {flag}: removed option"
             );
         }
     }
 
     // Both duration limits reach selection, using a port no emulator can hold
-    for seconds in ["0", "4294967295"] {
+    for seconds in ["1", "4294967295"] {
         let output = run(&[
             "button",
             "press",
             "emulator:0",
-            "--release-after",
+            "--hold-for",
             seconds,
             "--json",
         ]);
         assert_eq!(output.status.code(), Some(3), "{seconds}");
         let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(body["error"]["code"], "no-emulator");
+        assert_eq!(body["error"]["code"], "no-emulator", "{seconds}");
     }
 
     // Invalid durations fail as usage errors before discovery or hardware access
-    for seconds in ["-1", "1.5", "NaN", "inf", "4294967296", "seconds"] {
-        let output = run(&["button", "press", "--release-after", seconds, "--json"]);
+    for seconds in ["0", "-1", "1.5", "NaN", "inf", "4294967296", "seconds"] {
+        let output = run(&["button", "press", "--hold-for", seconds, "--json"]);
         assert_eq!(output.status.code(), Some(2), "{seconds}");
         let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(body["error"]["code"], "usage");
+        assert_eq!(body["error"]["code"], "usage", "{seconds}");
     }
-    let output = run(&["button", "release", "--release-after", "1", "--json"]);
-    assert_eq!(output.status.code(), Some(2));
+    for arguments in [
+        vec!["button", "release", "--hold"],
+        vec!["button", "release", "--hold-for", "1"],
+        vec!["button", "release", "--release-after", "1"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+    }
 }
 
 #[test]
@@ -940,8 +1111,28 @@ fn test_usage_messages_and_recovery_hints() {
             "see `ark-emulator start --help`",
         ),
         (
-            vec!["button", "press", "--release-after"],
-            "missing a value for --release-after",
+            vec!["button", "press", "--hold-for"],
+            "missing a value for --hold-for",
+            "see `ark-emulator button press --help`",
+        ),
+        (
+            vec!["button", "press", "--hold-for", "0"],
+            "hold duration must be whole seconds from 1 to 4294967295",
+            "see `ark-emulator button press --help`",
+        ),
+        (
+            vec!["button", "press", "--hold", "--hold-for", "5"],
+            "--hold cannot be combined with --hold-for <SECONDS>",
+            "see `ark-emulator button press --help`",
+        ),
+        (
+            vec!["button", "press", "--hold-for", "5", "--hold"],
+            "--hold-for <SECONDS> cannot be combined with --hold",
+            "see `ark-emulator button press --help`",
+        ),
+        (
+            vec!["button", "press", "--release-after", "0"],
+            "unknown option '--release-after'",
             "see `ark-emulator button press --help`",
         ),
         (

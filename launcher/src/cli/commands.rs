@@ -375,8 +375,17 @@ fn button(action: ButtonAction, global: &Global, output: &Output) -> Result<(), 
     let (pressed, selector, release_after) = match action {
         ButtonAction::Press {
             emulator,
-            release_after,
-        } => (true, emulator, release_after),
+            hold,
+            hold_for,
+        } => (
+            true,
+            emulator,
+            if hold {
+                None
+            } else {
+                Some(hold_for.unwrap_or(0))
+            },
+        ),
         ButtonAction::Release { emulator } => (false, emulator, None),
     };
     let command = if pressed {

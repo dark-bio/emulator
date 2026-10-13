@@ -104,9 +104,9 @@ boots.
 An emulated Ark has the reset button of the hardware, in its window and
 through ark-emulator. During `ark pair` the owner presses it once the colors
 on the Ark match their phone, and the press confirms the pairing at once. A
-headless emulator shows no colors, so `ark-emulator button press
---release-after 0` presses it when the person asks for that. At any other
-time, a press without --release-after holds the button until
+headless emulator shows no colors, so `ark-emulator button press` presses
+it once when the person asks for that. At any other time,
+`ark-emulator button press --hold` holds the button until
 `ark-emulator button release`, and a hold of 5s arms a factory reset,
 which erases the device's data and pairing once the button is let go.
 

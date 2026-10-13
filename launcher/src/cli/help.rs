@@ -389,24 +389,28 @@ const CONTRACTS: &[Contract] = &[
     },
     Contract {
         path: "button press",
-        paragraph: "It holds the button until `ark-emulator button release`, or for \
-            --release-after seconds, and --release-after 0 is one short press, released \
-            before the command returns. The hold outlives the command and ends if the \
-            emulated hardware disconnects. A press while the command line holds the \
-            button sends no second press, and replaces or cancels the timer.",
+        paragraph: "A plain press is released before the command returns, which is what \
+            `ark pair` waits for. --hold keeps the button down until \
+            `ark-emulator button release`, and --hold-for releases it after that many \
+            seconds. A hold outlives the command and ends if the emulated hardware \
+            disconnects. A press while the command line holds the button sends no \
+            second press, and replaces or cancels the timer. A reply that does not \
+            come fails with timeout, and the button's state is then unknown.",
         footer: Some(ContractFooter {
             requires: "a booted emulator",
-            time: "under a second; --timeout bounds each reply; a positive \
-                --release-after returns once the release is scheduled",
-            json: "locator, pressed, cli_pressed, changed, release_after_seconds",
-            examples: "ark-emulator button press --release-after 0\nark-emulator button press emulator:18181 --release-after 3 --json",
+            time: "under a second; --timeout bounds each reply; --hold-for returns once \
+                the release is scheduled",
+            json: "locator, pressed, cli_pressed, changed, release_after_seconds, which is \
+                0 for a press and null under --hold",
+            examples: "ark-emulator button press\nark-emulator button press emulator:18181 --hold-for 5 --json",
         }),
     },
     Contract {
         path: "button release",
-        paragraph: "It also cancels a scheduled release. The button stays down while the \
-            window holds it. Releasing a button the command line does not hold succeeds \
-            without a change, so it clears a press whose outcome is unknown.",
+        paragraph: "It also cancels the release --hold-for scheduled. The button stays \
+            down while the window holds it. Releasing a button the command line does \
+            not hold succeeds without a change, so it clears a press whose outcome is \
+            unknown.",
         footer: Some(ContractFooter {
             requires: "a booted emulator",
             time: "under a second; --timeout bounds each reply",

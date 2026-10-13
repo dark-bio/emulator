@@ -74,15 +74,15 @@ inside the portable build.
 ```sh
 ark-emulator start --headless   # boot without a window, return once ready
 ark-emulator list               # what is running on this computer
-ark-emulator button press --release-after 0   # press the reset button once
+ark-emulator button press       # press the reset button once
 ark-emulator stop               # shut it down
 ark-emulator wipe --yes         # reset the stopped image to a fresh device
 ```
 
-Without `--headless`, `start` opens the device window. A bare
-`ark-emulator --headless` runs an emulator in the foreground instead, until
-Ctrl-C. Hand the locator `start` prints to `ark`, which drives the emulated
-Ark as it drives hardware:
+Without `--headless`, `start` opens the device window.
+`ark-emulator --headless`, with no command, runs an emulator in the
+foreground instead, until Ctrl-C. Hand the locator `start` prints to `ark`,
+which drives the emulated Ark as it drives hardware:
 
 ```sh
 ark --device emulator:18181 status   # identity, firmware, pairing and lock

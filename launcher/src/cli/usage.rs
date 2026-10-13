@@ -69,7 +69,7 @@ pub(crate) fn from_clap(
             ),
             "--port" => "port must be a number from 1 to 65535".into(),
             "--memory" => "memory must be a whole number of MiB from 0 to 4294967295".into(),
-            "--release-after" => "release delay must be whole seconds from 0 to 4294967295".into(),
+            "--hold-for" => "hold duration must be whole seconds from 1 to 4294967295".into(),
             _ => format!("unknown value '{value}' for {option}"),
         },
         ErrorKind::ArgumentConflict => format!(

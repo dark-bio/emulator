@@ -273,18 +273,22 @@ pub(crate) enum Command {
     },
 }
 
-/// Explicit command line holds of the emulated reset button.
+/// What the command line does to the emulated reset button.
 #[derive(clap::Subcommand)]
 pub(crate) enum ButtonAction {
-    /// Hold the reset button, optionally releasing it later
+    /// Press the reset button once, or hold it
     Press {
         /// Locator, serial, name or image; the only one otherwise
         #[arg(value_name = "EMULATOR")]
         emulator: Option<String>,
 
-        /// Release after this many seconds; 0 for one short press
-        #[arg(long, value_name = "SECONDS")]
-        release_after: Option<u32>,
+        /// Hold it until `ark-emulator button release`
+        #[arg(long, conflicts_with = "hold_for")]
+        hold: bool,
+
+        /// Hold it, then release it after SECONDS
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u32).range(1..))]
+        hold_for: Option<u32>,
     },
     /// Release the command line's hold on the reset button
     Release {
