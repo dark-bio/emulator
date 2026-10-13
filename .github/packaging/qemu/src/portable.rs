@@ -7,9 +7,10 @@
 //! Builds macOS and Windows QEMU from pinned sources with static dependencies.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::{Build, Target, bundle, output, run};
@@ -112,16 +113,7 @@ fn fetch(build: &Build, definition: &Value) -> Result<()> {
         .output
         .join(format!("sources/dependencies/{name}.tar"));
     if !archive.exists() {
-        let partial = archive.with_extension("partial");
-        run(Command::new("curl")
-            .args(["--fail", "--location", "--retry", "3", "--output"])
-            .arg(&partial)
-            .arg(field(definition, "url")?))?;
-        ensure!(
-            bundle::digest(&fs::read(&partial)?) == hash,
-            "source checksum mismatch for {name}"
-        );
-        fs::rename(partial, &archive)?;
+        download(definition, &archive)?;
     }
     ensure!(
         bundle::digest(&fs::read(&archive)?) == hash,
@@ -145,6 +137,69 @@ fn fetch(build: &Build, definition: &Value) -> Result<()> {
         .arg(&destination))?;
     fs::write(marker, hash)?;
     Ok(())
+}
+
+/// Try source mirrors in order and cache only a checksum-verified download.
+fn download(definition: &Value, archive: &Path) -> Result<()> {
+    // Validate the complete mirror list before starting any network requests
+    let name = field(definition, "name")?;
+    let hash = field(definition, "sha256")?;
+    let mut urls = vec![field(definition, "url")?];
+    if let Some(mirrors) = definition.get("mirrors") {
+        for mirror in mirrors
+            .as_array()
+            .context("source mirrors must be an array")?
+        {
+            urls.push(
+                mirror
+                    .as_str()
+                    .context("source mirror must be a URL string")?,
+            );
+        }
+    }
+
+    // Bound retries so an unavailable host does not stall the build indefinitely
+    let partial = archive.with_extension("partial");
+    if partial.exists() {
+        fs::remove_file(&partial)?;
+    }
+    let mut failures = Vec::new();
+    for url in urls {
+        let result = run(Command::new("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "120",
+                "--retry",
+                "2",
+                "--retry-max-time",
+                "60",
+                "--output",
+            ])
+            .arg(&partial)
+            .arg(url));
+        if let Err(error) = result {
+            if partial.exists() {
+                fs::remove_file(&partial)?;
+            }
+            failures.push(format!("{url}: {error:#}"));
+            continue;
+        }
+
+        // A checksum mismatch is an integrity failure, not a mirror outage
+        if bundle::digest(&fs::read(&partial)?) != hash {
+            fs::remove_file(&partial)?;
+            bail!("source checksum mismatch for {name} from {url}");
+        }
+        fs::rename(&partial, archive)?;
+        return Ok(());
+    }
+    bail!("could not download {name}:\n{}", failures.join("\n"))
 }
 
 /// Read a required string from the checked-in dependency lock.
@@ -614,4 +669,133 @@ pub(crate) fn package(build: &Build) -> Result<()> {
 /// Verify artifact integrity, system-only linkage and native runtime behavior.
 pub(crate) fn check(build: &Build) -> Result<()> {
     crate::portable_check::check(build)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Exercise mirror failures and checksum enforcement through real HTTP requests.
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Serve a bounded sequence of responses and record the requested paths.
+    fn serve(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> Result<(String, JoinHandle<Vec<String>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let server = thread::spawn(move || {
+            // Limit the fixture lifetime if a regression skips a mirror request
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing mirror request");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("HTTP fixture failed: {error}"),
+                    }
+                };
+
+                // Consume request headers before sending a complete HTTP response
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                requests.push(request.split_whitespace().nth(1).unwrap().to_owned());
+                loop {
+                    let mut line = String::new();
+                    let count = reader.read_line(&mut line).unwrap();
+                    if count == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        Ok((url, server))
+    }
+
+    /// Use the next mirror after an HTTP failure and cache its verified bytes.
+    #[test]
+    fn test_download_falls_back_to_mirror() -> Result<()> {
+        // The SHA-256 value is the standard test vector for the ASCII string abc
+        let (url, server) = serve(vec![("404 Not Found", "missing"), ("200 OK", "abc")])?;
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("source.tar");
+        let definition = json!({
+            "name": "fixture",
+            "url": format!("{url}/primary"),
+            "mirrors": [format!("{url}/mirror")],
+            "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        });
+        fs::write(archive.with_extension("partial"), "interrupted download")?;
+
+        // A stale partial file must not contaminate the successful fallback
+        download(&definition, &archive)?;
+        assert_eq!(fs::read(&archive)?, b"abc");
+        assert!(!archive.with_extension("partial").exists());
+        assert_eq!(server.join().unwrap(), ["/primary", "/mirror"]);
+        Ok(())
+    }
+
+    /// Report exhausted mirrors without leaving an archive or partial download.
+    #[test]
+    fn test_download_rejects_unavailable_mirrors() -> Result<()> {
+        let (url, server) = serve(vec![("404 Not Found", "missing"); 2])?;
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("source.tar");
+        let definition = json!({
+            "name": "fixture",
+            "url": format!("{url}/primary"),
+            "mirrors": [format!("{url}/mirror")],
+            "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        });
+
+        // Both attempted URLs remain available in the failure diagnostic
+        let error = download(&definition, &archive).unwrap_err().to_string();
+        assert!(error.contains(&format!("{url}/primary")), "{error}");
+        assert!(error.contains(&format!("{url}/mirror")), "{error}");
+        assert!(!archive.exists());
+        assert!(!archive.with_extension("partial").exists());
+        assert_eq!(server.join().unwrap(), ["/primary", "/mirror"]);
+        Ok(())
+    }
+
+    /// Reject a downloaded checksum mismatch before it can enter the cache.
+    #[test]
+    fn test_download_rejects_corrupt_source() -> Result<()> {
+        let (url, server) = serve(vec![("200 OK", "corrupt archive")])?;
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("source.tar");
+        let definition = json!({
+            "name": "fixture",
+            "url": format!("{url}/primary"),
+            "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        });
+
+        // Successful HTTP status cannot bypass the pinned content hash
+        let error = download(&definition, &archive).unwrap_err().to_string();
+        assert!(error.contains("checksum mismatch"), "{error}");
+        assert!(!archive.exists());
+        assert!(!archive.with_extension("partial").exists());
+        assert_eq!(server.join().unwrap(), ["/primary"]);
+        Ok(())
+    }
 }
