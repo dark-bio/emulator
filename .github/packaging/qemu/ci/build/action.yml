@@ -1,0 +1,67 @@
+name: Build QEMU runtime
+description: Build or verify cached QEMU binaries and upload their matching source archive.
+
+inputs:
+  os:
+    description: Native runner label used to name the artifact and cache.
+    required: true
+  arch:
+    description: Guest architecture, amd64 or arm64.
+    required: true
+  platform:
+    description: Runtime platform, linux, macos or windows.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install macOS build tools
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+      run: brew install cmake ninja pkgconf python xz
+
+    - name: Identify QEMU build inputs
+      id: inputs
+      shell: bash
+      run: |
+        cat .github/packaging/qemu/source.json > "$RUNNER_TEMP/qemu-inputs"
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          xcodebuild -version >> "$RUNNER_TEMP/qemu-inputs"
+          xcrun --show-sdk-version >> "$RUNNER_TEMP/qemu-inputs"
+          clang --version >> "$RUNNER_TEMP/qemu-inputs"
+        fi
+        digest=$(shasum -a 256 "$RUNNER_TEMP/qemu-inputs" | cut -d ' ' -f 1)
+        echo "hash=$digest" >> "$GITHUB_OUTPUT"
+
+    - name: Cache QEMU runtime and sources
+      if: github.ref_type != 'tag'
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/qemu-${{ inputs.platform }}/runtime
+          target/qemu-${{ inputs.platform }}/artifacts
+        key: qemu-v3-${{ inputs.os }}-${{ inputs.arch }}-${{ hashFiles('.github/packaging/qemu/**', 'Makefile', 'Cargo.lock') }}-${{ steps.inputs.outputs.hash }}
+
+    - name: Build QEMU
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        QEMU_PLATFORM: ${{ inputs.platform }}
+      run: make "qemu-$QEMU_PLATFORM"
+
+    - name: Verify cached QEMU
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        QEMU_PLATFORM: ${{ inputs.platform }}
+      run: make "qemu-$QEMU_PLATFORM-check"
+
+    - uses: actions/upload-artifact@v6
+      with:
+        name: qemu-${{ inputs.os }}
+        path: target/qemu-${{ inputs.platform }}/artifacts/*
+        retention-days: 7
+        if-no-files-found: error

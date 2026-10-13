@@ -1,0 +1,38 @@
+name: Stage QEMU runtime
+description: Download QEMU and matching sources, verify the native runtime and stage it for packaging.
+
+inputs:
+  os:
+    description: Native runner label used to name the artifact.
+    required: true
+  arch:
+    description: Guest architecture, amd64 or arm64.
+    required: true
+  platform:
+    description: Runtime platform, linux, macos or windows.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download QEMU and its matching sources
+      uses: actions/download-artifact@v8
+      with:
+        name: qemu-${{ inputs.os }}
+        path: target/qemu-${{ inputs.platform }}/artifacts
+
+    - name: Restore the QEMU runtime
+      shell: bash
+      env:
+        QEMU_PLATFORM: ${{ inputs.platform }}
+        QEMU_ARCH: ${{ inputs.arch }}
+      run: |
+        directory="target/qemu-$QEMU_PLATFORM"
+        mkdir -p "$directory/runtime"
+        tar -xJf "$directory/artifacts/$QEMU_PLATFORM-$QEMU_ARCH-qemu-runtime.tar.xz" -C "$directory/runtime"
+
+    - name: Verify and stage QEMU on its native host
+      shell: bash
+      env:
+        QEMU_PLATFORM: ${{ inputs.platform }}
+      run: make "qemu-$QEMU_PLATFORM-check"

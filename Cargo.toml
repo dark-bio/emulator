@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["launcher", "tools/cli-tests", "tools/qemu-build"]
+members = ["launcher", "tools/cli-tests", ".github/packaging/qemu"]
 default-members = ["launcher"]
 
 [profile.release]
