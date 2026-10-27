@@ -1,0 +1,58 @@
+# Settings for cargo-deny, which the licenses CI job runs against the full
+# dependency graph with every feature enabled.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licenses only. A dependency offering a choice passes with any one
+# of these, a dependency offering none of them fails the check. Entries no
+# dependency uses yet stay pre-approved without a warning on every run. Beyond
+# the usual set, target-lexicon uses Apache-2.0 with the LLVM exception.
+unused-allowed-license = "allow"
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# The launcher and its test crate are never published, so they need no license
+# field of their own.
+ignore = true
+
+# Tauri parses HTML with dom_query, which pulls in these four crates of Servo's
+# MPL CSS engine. Each exception is pinned to the version reviewed, so an update
+# brings it back for review.
+[[licenses.exceptions]]
+name = "cssparser"
+version = "=0.36.0"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "cssparser-macros"
+version = "=0.6.1"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "dtoa-short"
+version = "=0.3.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "selectors"
+version = "=0.36.1"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+# Platform directory lookup uses this MPL helper through dirs.
+name = "option-ext"
+version = "=0.2.0"
+allow = ["MPL-2.0"]
